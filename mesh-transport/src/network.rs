@@ -1,4 +1,4 @@
-﻿//! libp2p swarm wiring for identity-based mesh routing.
+//! libp2p swarm wiring for identity-based mesh routing.
 //!
 //! Uses the workspace `libp2p` Kademlia behaviour (reticulum-rs is not on
 //! crates.io). Complements the pure-Rust [`crate::kademlia_routing`] table
