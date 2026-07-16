@@ -1,0 +1,154 @@
+openapi: 3.0.3
+info:
+  title: MossyMesh Interop Gateway
+  description: |
+    OpenAPI surface that activates when a mesh island regains upstream internet.
+    Bridges local credit balances to a global AMM mock via TWAMM with a strict
+    2% max-spread cap. Genesis offline nodes earn retroactive AMM liquidity mining points.
+  version: 0.1.0
+servers:
+  - url: http://localhost/api/v1
+    description: Local mesh island (dormant OpenAPI until internet_reconnected)
+paths:
+  /health:
+    get:
+      summary: Mesh island health
+      operationId: health
+      responses:
+        "200":
+          description: Island is active
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: Mesh Island Active
+  /submit_job:
+    post:
+      summary: Submit a compute job into the Kademlia DHT
+      operationId: submitJob
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        "200":
+          description: Job accepted
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: Job Accepted
+  /twamm:
+    get:
+      summary: TWAMM book status (max spread 200 bps)
+      operationId: twammStatus
+      responses:
+        "200":
+          description: Open TWAMM orders
+    post:
+      summary: Submit / stream a TWAMM order (enforces 2% max-spread cap)
+      operationId: twammStream
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [side, amount, ref_price]
+              properties:
+                side:
+                  type: string
+                  enum: [buy, sell]
+                amount:
+                  type: integer
+                  format: int64
+                slices:
+                  type: integer
+                  default: 1
+                ref_price:
+                  type: integer
+                  format: int64
+                  description: Reference mid (scale 1e6)
+                exec_price:
+                  type: integer
+                  format: int64
+                  description: Optional immediate execution price (scale 1e6)
+      responses:
+        "200":
+          description: Fill or accept receipt
+        "400":
+          description: Spread cap exceeded or bad request
+  /liquidity:
+    get:
+      summary: Liquidity mining program status
+      operationId: liquidityStatus
+      responses:
+        "200":
+          description: Genesis mining aggregate status
+    post:
+      summary: Register genesis node, accrue offline epochs, or claim airdrop
+      operationId: liquidityAction
+      requestBody:
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                action:
+                  type: string
+                  enum: [register, accrue, claim, get, status]
+                node_id:
+                  type: string
+                epochs:
+                  type: integer
+                  format: int64
+      responses:
+        "200":
+          description: Action result
+        "503":
+          description: Claim attempted while gateway still offline
+  /gateway:
+    get:
+      summary: OpenAPI gateway status (active only after internet reconnect)
+      operationId: gatewayStatus
+      responses:
+        "200":
+          description: Gateway status JSON
+    post:
+      summary: Reconnect flag, set local credit, or bridge to global AMM
+      operationId: gatewayAction
+      requestBody:
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                action:
+                  type: string
+                  enum: [reconnect, disconnect, bridge, status]
+                account:
+                  type: string
+                amount:
+                  type: integer
+                  format: int64
+                slices:
+                  type: integer
+                credit:
+                  type: string
+                  description: "account:balance to seed local credits"
+      responses:
+        "200":
+          description: Status or bridge receipt
+        "503":
+          description: Gateway dormant (internet not reconnected)
+components:
+  schemas:
+    MaxSpread:
+      type: object
+      properties:
+        max_spread_bps:
+          type: integer
+          example: 200
+          description: Hard cap — 200 basis points (2%)
