@@ -323,4 +323,110 @@ mod tests {
         assert_eq!(p.parse_public().fold_count, 1);
         assert!(verify_snark(&p));
     }
+
+    /// Lemma 1 / layout: public blob is always exactly 200 bytes with fixed field offsets.
+    #[test]
+    fn public_layout_offsets_are_stable() {
+        let root = [0x42u8; 32];
+        let proof = SnarkProof::genesis(root);
+        let parsed = proof.parse_public();
+        assert_eq!(proof.public.len(), ANCHOR_PROOF_SIZE);
+        assert_eq!(parsed.fold_count, 0);
+        assert_eq!(parsed.flags, 0);
+        // Bytes [64..72) are LE fold_count.
+        assert_eq!(&proof.public[64..72], &0u64.to_le_bytes());
+        // Commitment and step digest occupy the first 64 bytes (non-zero for genesis).
+        assert_ne!(parsed.commitment, [0u8; 32]);
+        assert_ne!(parsed.step_digest, [0u8; 32]);
+        // Padding region [73..) is derived, not all zeros.
+        assert!(proof.public[73..].iter().any(|&b| b != 0));
+    }
+
+    /// Domain separation: step digests depend on DOMAIN_STEP; different roots yield different digests.
+    #[test]
+    fn step_digest_is_domain_separated_and_deterministic() {
+        let s1 = StepInstance {
+            prev_state_root: [1u8; 32],
+            next_state_root: [2u8; 32],
+            witness_digest: [3u8; 32],
+        };
+        let s2 = StepInstance {
+            prev_state_root: [1u8; 32],
+            next_state_root: [2u8; 32],
+            witness_digest: [4u8; 32],
+        };
+        assert_eq!(s1.digest(), s1.digest());
+        assert_ne!(s1.digest(), s2.digest());
+        // Explicit DOMAIN_STEP binding: recomputation matches StepInstance::digest.
+        let manual = hash_parts(&[
+            DOMAIN_STEP,
+            &s1.prev_state_root,
+            &s1.next_state_root,
+            &s1.witness_digest,
+        ]);
+        assert_eq!(s1.digest(), manual);
+    }
+
+    /// Same step inputs always yield identical single-step proofs (determinism SLA).
+    #[test]
+    fn from_step_is_deterministic() {
+        let step = StepInstance {
+            prev_state_root: [9u8; 32],
+            next_state_root: [8u8; 32],
+            witness_digest: [7u8; 32],
+        };
+        let a = SnarkProof::from_step(&step);
+        let b = SnarkProof::from_step(&step);
+        assert_eq!(a, b);
+        assert_eq!(a.public_bytes(), b.public_bytes());
+        assert_eq!(a.public_bytes().len(), ANCHOR_PROOF_SIZE);
+    }
+
+    /// MicroSpartan budget is the documented ~10k gate constant (not a free-growing circuit).
+    #[test]
+    fn microsparatan_gate_budget_is_exactly_10k_documented() {
+        assert_eq!(MICROSPARTAN_GATE_COUNT, 10_000);
+        let prep = MicroSpartanPreprocessing::preprocess(b"doc-budget");
+        assert_eq!(prep.gate_count, 10_000);
+        assert_eq!(prep.metadata.len(), 512);
+        // gate_count LE is embedded in metadata after the "microspar/v1" tag.
+        assert_eq!(&prep.metadata[0..12], b"microspar/v1");
+        assert_eq!(
+            u32::from_le_bytes(prep.metadata[12..16].try_into().unwrap()),
+            10_000
+        );
+    }
+
+    /// Well-formedness rejects desynced embedded fold_count (malleability structural check).
+    #[test]
+    fn well_formed_rejects_desynced_fold_count() {
+        let mut proof = SnarkProof::genesis([1u8; 32]);
+        assert!(proof.is_well_formed());
+        proof.public[64] ^= 0x01; // flip embedded fold_count LSB
+        assert!(!proof.is_well_formed());
+        assert!(!verify_snark(&proof));
+    }
+
+    /// Verification payload length is independent of claimed history depth fields alone.
+    #[test]
+    fn verification_payload_len_is_constant_formula() {
+        let proof = SnarkProof::genesis([0u8; 32]);
+        let pi = PublicInput {
+            genesis_state_root: [0u8; 32],
+            final_state_root: [0u8; 32],
+            min_fold_count: 0,
+        };
+        // 200 + 32 + 32 + 8 + 8 + 32 = 312
+        assert_eq!(proof.verification_payload_len(&pi), 312);
+        assert!(proof.verification_payload_len(&pi) < MAX_VERIFICATION_PAYLOAD_BYTES);
+    }
+
+    /// Domain tags used by mock must remain distinct (future Nova uses separate domains).
+    #[test]
+    fn domain_separators_are_distinct() {
+        assert_ne!(DOMAIN_PROOF, DOMAIN_STEP);
+        assert_ne!(DOMAIN_PROOF, DOMAIN_FOLD);
+        assert_ne!(DOMAIN_STEP, DOMAIN_FOLD);
+        assert_eq!(DOMAIN_FOLD, fold_domain());
+    }
 }
