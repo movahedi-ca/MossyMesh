@@ -112,15 +112,21 @@ rustup target add riscv32imc-unknown-none-elf
 
 ## 4. WASM engine target (`wasm32-wasip1`)
 
-Chess engine / sandbox workstreams compile to WASI for deterministic replay:
+Chess engine / sandbox workstreams compile to WASI for deterministic replay.
+
+**Full notes (build scripts, optional cargo config, Mnps bench how-to):**
+[`engine-wasm.md`](engine-wasm.md)
 
 ```bash
 rustup target add wasm32-wasip1
 cargo build -p engine --release --target wasm32-wasip1
+# or: ./devops/build-engine-wasm.sh
 ```
 
-Bounded stack / fixed memory pools are enforced in the WAMR sandbox workstream
-(`-z stack-size=N`, fixed-block pools) — do not raise RAM without SLA review.
+Do **not** change the workspace default Cargo target — host `cargo test -p engine`
+must remain native. Bounded stack / fixed memory pools are enforced in the WAMR
+sandbox workstream (`-z stack-size=N`, fixed-block pools) — do not raise RAM
+without SLA review.
 
 ## 5. Docker on Pi
 

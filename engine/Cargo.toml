@@ -4,13 +4,16 @@ version = "0.1.0"
 edition = "2021"
 description = "MossyMesh chess application logic (shakmaty) — deterministic, WASM-ready"
 license = "MIT OR Apache-2.0"
-# Target notes (wasm32-wasip1 readiness):
+# Target notes (wasm32-wasip1 readiness) — full how-to: devops/engine-wasm.md
 #   rustup target add wasm32-wasip1
 #   cargo build -p engine --target wasm32-wasip1
+#   ./devops/build-engine-wasm.sh   # or devops/build-engine-wasm.ps1
 # Default features avoid mmap / OS-specific tablebase I/O so the crate compiles for WASI.
+# Host stays default: cargo test -p engine  (do NOT set build.target = wasm32-wasip1)
 # Enable native Syzygy probing (file-backed, optional mmap) with: --features syzygy
-# Aspirational native throughput target: ~836 Mnps (million nodes/sec) on strong hosts;
-# measured values come from benchmark_mnps() — never hard-coded. WASM will be lower.
+# Mnps: cargo run -p engine --example mnps_bench --release
+# Aspirational native throughput ~836 Mnps on strong hosts; measured via benchmark_mnps()
+# — never hard-coded. WASM will be lower.
 
 [features]
 default = []
