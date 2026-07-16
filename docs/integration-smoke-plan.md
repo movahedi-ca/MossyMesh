@@ -31,19 +31,23 @@ If Rust is unavailable, treat this plan + harness source as the contract; run wh
 | SMK-03 | `smoke_engine_startpos` | engine | startpos 20 legal moves |
 | SMK-04 | `smoke_consensus_insert_merge` | consensus | insert + merge child present |
 | SMK-05 | `smoke_interop_health` | interop | `/api/v1/health` Ok |
-| SMK-06 | `smoke_job_pipeline_stub` | interop → sandbox | `get_best_move` non-empty |
+| SMK-06 | `smoke_job_pipeline` | interop → sandbox (test MinRoot admit) → engine → consensus | admitted `get_best_move` + startpos eval + Merkle proof |
 | SMK-07 | `smoke_ledger_bound_constant` | consensus | `MAX_LEDGER_SIZE == 10_000_000` |
 | SMK-08 | `smoke_sandbox_mem_constant` | sandbox | `MEM_LIMIT == 10 * 1024 * 1024` |
 
-## Pipeline Stub (SMK-06)
+## Job Pipeline (SMK-06)
 
 ```text
 AsyncApiRequest{ "/api/v1/submit_job", payload }
   → interop::handle_rest_call
-  → sandbox::WamrInstance::new
-  → invoke_wasm_function("get_best_move")
-  → non-empty bytes
+  → sandbox::MinRootVdfVerifier::for_tests + Job::admit_and_load
+  → Job::invoke_admitted("get_best_move")
+  → engine::EngineState startpos (legal moves + evaluate_position)
+  → consensus::MerklePatriciaTrie insert + prove + verify_proof
+  → JobPipelineResult { job_did, sandbox_output, eval, root, proof_ok }
 ```
+
+Offline / fast: test MinRoot uses small iteration counts (never production 50M).
 
 ## Pass / Fail
 
