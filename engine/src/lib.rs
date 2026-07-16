@@ -48,6 +48,13 @@ impl Bitboard {
 
         Bitboard::new(moves)
     }
+
+    /// Evaluates if a generated move target mathematically collides with a friendly piece.
+    /// DOC 51: By performing a bitwise AND between the target square mask and the friendly pieces mask,
+    /// we can deterministically validate moves without iterating arrays.
+    pub fn is_collision(&self, target_square_mask: u64, friendly_pieces_mask: u64) -> bool {
+        (target_square_mask & friendly_pieces_mask) != 0
+    }
 }
 
 pub fn get_moves() -> Vec<u64> { vec![] }

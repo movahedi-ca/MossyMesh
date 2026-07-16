@@ -41,6 +41,25 @@ impl WamrInstance {
         
         Ok(ptr)
     }
+
+    /// Simulates the Foreign Function Interface (FFI) boundary.
+    /// Transport layers call this to invoke specific exported WASM functions within the Sandbox.
+    /// DOC 52: The FFI ensures that the host environment maintains absolute authority over the guest execution.
+    pub fn invoke_wasm_function(&self, func_name: &str, args: &[u8]) -> Result<Vec<u8>, &'static str> {
+        println!("FFI Call: Executing WASM function '{}'...", func_name);
+        
+        match func_name {
+            "evaluate_move" => {
+                // Simulate bridging into the engine bitboard logic
+                Ok(vec![0x01]) // Simulated valid move response
+            }
+            "get_best_move" => {
+                // Simulate WASM minimax search
+                Ok(vec![0xE2, 0xE4]) // e2-e4
+            }
+            _ => Err("FFI Error: Exported function not found in WASM module."),
+        }
+    }
 }
 
 pub fn load_wasm() {}

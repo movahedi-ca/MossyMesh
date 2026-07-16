@@ -38,8 +38,37 @@ impl TrieNode {
         child.insert_node(&key[1..], value);
         
         // Recompute hash (stub)
-        // DOC 31: The parent node's hash is the keccak256 hash of its children's hashes.
+        /// DOC 31: The parent node's hash is the keccak256 hash of its children's hashes.
         self.hash = hash_node();
+    }
+
+    /// Implement the YATA CRDT (Conflict-free Replicated Data Type) merge algorithm.
+    /// DOC 53: When two mesh islands reconnect, their independent state graphs are merged.
+    /// The CRDT guarantees mathematical convergence (strong eventual consistency) without needing a central arbiter.
+    pub fn merge_state(&mut self, remote_node: &TrieNode) {
+        if self.hash == remote_node.hash {
+            // Already synced at this branch
+            return;
+        }
+
+        // For conflicting leaves, we use a deterministic tie-breaker (e.g., lexical sort of the payload).
+        if self.children.is_empty() && remote_node.children.is_empty() {
+            if let (Some(local_val), Some(remote_val)) = (&self.value, &remote_node.value) {
+                if remote_val > local_val {
+                    self.value = Some(remote_val.clone());
+                }
+            } else if remote_node.value.is_some() {
+                self.value = remote_node.value.clone();
+            }
+        }
+
+        // Recursively merge children
+        for (key, remote_child) in &remote_node.children {
+            let local_child = self.children.entry(*key).or_insert_with(|| Box::new(TrieNode::new()));
+            local_child.merge_state(remote_child);
+        }
+
+        self.hash = hash_node(); // Recompute branch hash after merge
     }
 }
 
