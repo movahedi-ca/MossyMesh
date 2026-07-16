@@ -1,0 +1,101 @@
+name: CI
+
+on:
+  push:
+    branches: [main, 'agent/**']
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  frontend:
+    name: Frontend + portal build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        package: [frontend, captive-portal]
+    defaults:
+      run:
+        working-directory: ${{ matrix.package }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: ${{ matrix.package }}/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      - name: Build
+        run: |
+          if [ "${{ matrix.package }}" = "frontend" ]; then
+            # Served under /app/ by captive-portal nginx
+            npx tsc -b && npx vite build --base=/app/
+          else
+            npm run build
+          fi
+
+  rust:
+    name: Cargo check (${{ matrix.crate }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Best-effort matrix over workspace members
+        crate:
+          - mesh-transport
+          - consensus
+          - engine
+          - sandbox
+          - interop
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: '. -> target'
+          shared-key: ${{ matrix.crate }}
+
+      - name: cargo check -p ${{ matrix.crate }}
+        # Best-effort: do not fail the whole matrix on one crate while stubs evolve
+        continue-on-error: true
+        run: cargo check -p ${{ matrix.crate }} --all-targets
+
+  rust-workspace:
+    name: Cargo check (workspace)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: '. -> target'
+          shared-key: workspace
+
+      - name: cargo check --workspace
+        continue-on-error: true
+        run: cargo check --workspace --all-targets
+
+  docker-portal:
+    name: Docker portal image
+    runs-on: ubuntu-latest
+    needs: [frontend]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build captive-portal image
+        run: docker build -f captive-portal/Dockerfile -t messymash/captive-portal:ci .

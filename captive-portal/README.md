@@ -1,32 +1,45 @@
-# React + TypeScript + Vite
+# MessyMash Captive Portal
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+Offline Wi-Fi landing page for MossyMesh / MessyMash mesh islands.
 
-Currently, two official plugins are available:
+When a phone or laptop joins the AP, OS connectivity checks are intercepted by
+`nginx.conf` and redirected here. Users can open the chess PWA at `/app/`.
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+## Stack
 
-## React Compiler
+- React + TypeScript + Vite (portal UI)
+- nginx (`client_max_body_size 150M`)
+- Docker Compose (root `docker-compose.yml` or this directory)
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+## Local develop
 
-## Expanding the Oxlint configuration
-
-If you are developing a production application, we recommend enabling type-aware lint rules by installing `oxlint-tsgolint` and editing `.oxlintrc.json`:
-
-```json
-{
-  "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "plugins": ["react", "typescript", "oxc"],
-  "options": {
-    "typeAware": true
-  },
-  "rules": {
-    "react/rules-of-hooks": "error",
-    "react/only-export-components": ["warn", { "allowConstantExport": true }]
-  }
-}
+```bash
+npm ci
+npm run dev
 ```
 
-See the [Oxlint rules documentation](https://oxc.rs/docs/guide/usage/linter/rules) for the full list of rules and categories.
+## Build & serve with nginx (bind mounts)
+
+```bash
+# from repo root
+(cd captive-portal && npm ci && npm run build)
+(cd frontend && npm ci && npx tsc -b && npx vite build --base=/app/)
+docker compose -f captive-portal/docker-compose.yml up
+```
+
+## Full multi-stage image
+
+```bash
+# from repo root
+docker compose up --build
+```
+
+- Portal: `http://localhost/`
+- Chess app: `http://localhost/app/`
+- Health: `http://localhost/healthz`
+
+## Captive probes
+
+nginx redirects common iOS / Android / Windows / Firefox checks to `/`
+(see `nginx.conf`). That triggers the system captive-portal sheet so users
+see MessyMash instead of a broken internet error.
