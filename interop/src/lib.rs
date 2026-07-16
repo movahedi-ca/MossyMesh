@@ -1,6 +1,14 @@
 //! Interop Module for MossyMesh
 //! This is a Phase 1 stub for mocking AsyncAPI endpoints.
 
+pub mod credits;
+pub mod htlc;
+
+pub use credits::{Account, CreditError, CreditLedger};
+pub use htlc::{
+    hash_preimage, verify_preimage, Htlc, HtlcError, HtlcParams, HtlcState, MockVdf,
+};
+
 pub fn init_interop() {
     println!("Interop (stub): Mocking AsyncAPI and OpenAPI gateway endpoints...");
 }
@@ -29,7 +37,9 @@ pub fn handle_websocket(mut connection_alive: bool) {
         println!("WebSocket Sync Tick {}...", tick);
         tick += 1;
         // Simulate break
-        if tick == 2 { connection_alive = false; }
+        if tick == 2 {
+            connection_alive = false;
+        }
     }
     println!("WebSocket Connection Closed.");
 }
