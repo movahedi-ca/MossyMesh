@@ -309,4 +309,54 @@ mod tests {
         );
         assert_eq!(ledger.free_balance("alice"), 50);
     }
+
+    /// Ledger-level: second claim does not double-pay the receiver.
+    #[test]
+    fn no_double_claim_on_escrow() {
+        let mut ledger = CreditLedger::new();
+        ledger.mint("alice", 1_000);
+        ledger.mint("bob", 0);
+        let preimage = b"unique-job-proof";
+        let id = ledger
+            .open_escrow(escrow_params(6, "alice", "bob", 400, preimage))
+            .unwrap();
+
+        assert_eq!(ledger.claim_escrow(&id, preimage).unwrap(), 400);
+        assert_eq!(ledger.free_balance("bob"), 400);
+
+        assert!(matches!(
+            ledger.claim_escrow(&id, preimage),
+            Err(CreditError::Htlc(HtlcError::AlreadySettled))
+        ));
+        // Receiver balance unchanged after rejected second claim.
+        assert_eq!(ledger.free_balance("bob"), 400);
+        assert_eq!(ledger.escrow_state(&id), Some(HtlcState::Claimed));
+    }
+
+    /// VDF cancel before delay is rejected; after delay returns funds once.
+    #[test]
+    fn vdf_cancel_before_delay_rejected() {
+        let mut ledger = CreditLedger::new();
+        ledger.mint("alice", 500);
+        let id = ledger
+            .open_escrow(escrow_params(7, "alice", "bob", 200, b"d"))
+            .unwrap();
+
+        assert!(matches!(
+            ledger.vdf_cancel_escrow(&id),
+            Err(CreditError::Htlc(HtlcError::VdfNotComplete))
+        ));
+        assert_eq!(ledger.free_balance("alice"), 300);
+
+        ledger.advance_vdf(&id, 4).unwrap();
+        assert_eq!(ledger.vdf_cancel_escrow(&id).unwrap(), 200);
+        assert_eq!(ledger.free_balance("alice"), 500);
+
+        // No double cancel payout.
+        assert!(matches!(
+            ledger.vdf_cancel_escrow(&id),
+            Err(CreditError::Htlc(HtlcError::AlreadySettled))
+        ));
+        assert_eq!(ledger.free_balance("alice"), 500);
+    }
 }
