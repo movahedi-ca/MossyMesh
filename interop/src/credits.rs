@@ -184,6 +184,25 @@ impl CreditLedger {
     pub fn escrow_state(&self, id: &[u8; 32]) -> Option<HtlcState> {
         self.escrows.get(id).map(|h| h.state)
     }
+
+    /// Sum of free balances across all accounts.
+    pub fn total_free(&self) -> u64 {
+        self.accounts.values().map(|a| a.free).sum()
+    }
+
+    /// Sum of amounts still locked in `Funded` escrows.
+    pub fn total_escrowed(&self) -> u64 {
+        self.escrows
+            .values()
+            .filter(|h| h.is_open())
+            .map(|h| h.amount)
+            .sum()
+    }
+
+    /// Conservation quantity: free + open-escrowed (docs/math-htlc-twamm.md H6).
+    pub fn conserved_supply(&self) -> u64 {
+        self.total_free().saturating_add(self.total_escrowed())
+    }
 }
 
 #[cfg(test)]
@@ -358,5 +377,94 @@ mod tests {
             Err(CreditError::Htlc(HtlcError::AlreadySettled))
         ));
         assert_eq!(ledger.free_balance("alice"), 500);
+    }
+
+    // --- Formal invariants (docs/math-htlc-twamm.md §1.5) ---
+
+    /// H6: free + open escrow is conserved across open/claim (no mint).
+    #[test]
+    fn invariant_h6_supply_conserved_on_claim() {
+        let mut ledger = CreditLedger::new();
+        ledger.mint("alice", 10_000);
+        ledger.mint("bob", 100);
+        let supply0 = ledger.conserved_supply();
+        assert_eq!(supply0, 10_100);
+
+        let preimage = b"conserve-claim";
+        let id = ledger
+            .open_escrow(escrow_params(10, "alice", "bob", 2_500, preimage))
+            .unwrap();
+        assert_eq!(ledger.conserved_supply(), supply0);
+        assert_eq!(ledger.total_escrowed(), 2_500);
+        assert_eq!(ledger.free_balance("alice"), 7_500);
+
+        ledger.claim_escrow(&id, preimage).unwrap();
+        assert_eq!(ledger.total_escrowed(), 0);
+        assert_eq!(ledger.conserved_supply(), supply0);
+        assert_eq!(ledger.free_balance("bob"), 2_600);
+    }
+
+    /// H6: no double-spend — second claim does not re-credit receiver.
+    #[test]
+    fn invariant_h6_no_double_spend_after_claim() {
+        let mut ledger = CreditLedger::new();
+        ledger.mint("alice", 1_000);
+        let preimage = b"once-only";
+        let id = ledger
+            .open_escrow(escrow_params(11, "alice", "bob", 400, preimage))
+            .unwrap();
+        ledger.claim_escrow(&id, preimage).unwrap();
+        assert_eq!(ledger.free_balance("bob"), 400);
+
+        let err = ledger.claim_escrow(&id, preimage).unwrap_err();
+        assert!(matches!(
+            err,
+            CreditError::Htlc(HtlcError::AlreadySettled)
+        ));
+        assert_eq!(ledger.free_balance("bob"), 400);
+        assert_eq!(ledger.conserved_supply(), 1_000);
+    }
+
+    /// H6: refund and VDF cancel also conserve; dual settlement blocked.
+    #[test]
+    fn invariant_h6_refund_and_vdf_cancel_conserve() {
+        let mut ledger = CreditLedger::new();
+        ledger.mint("alice", 5_000);
+        let supply0 = ledger.conserved_supply();
+
+        let id_r = ledger
+            .open_escrow(escrow_params(12, "alice", "bob", 700, b"refund-path"))
+            .unwrap();
+        ledger.refund_escrow(&id_r, 100).unwrap();
+        assert_eq!(ledger.conserved_supply(), supply0);
+        assert_eq!(
+            ledger.refund_escrow(&id_r, 100).unwrap_err(),
+            CreditError::Htlc(HtlcError::AlreadySettled)
+        );
+
+        let id_v = ledger
+            .open_escrow(escrow_params(13, "alice", "bob", 300, b"vdf-path"))
+            .unwrap();
+        ledger.advance_vdf(&id_v, 4).unwrap();
+        ledger.vdf_cancel_escrow(&id_v).unwrap();
+        assert_eq!(ledger.conserved_supply(), supply0);
+        assert_eq!(
+            ledger.claim_escrow(&id_v, b"vdf-path").unwrap_err(),
+            CreditError::Htlc(HtlcError::AlreadySettled)
+        );
+        assert_eq!(ledger.free_balance("alice"), 5_000);
+    }
+
+    /// H7: duplicate escrow id rejected; balance unchanged.
+    #[test]
+    fn invariant_h7_unique_escrow_id() {
+        let mut ledger = CreditLedger::new();
+        ledger.mint("alice", 1_000);
+        let p = escrow_params(14, "alice", "bob", 100, b"dup");
+        ledger.open_escrow(p.clone()).unwrap();
+        let err = ledger.open_escrow(p).unwrap_err();
+        assert!(matches!(err, CreditError::DuplicateEscrow(_)));
+        assert_eq!(ledger.free_balance("alice"), 900);
+        assert_eq!(ledger.total_escrowed(), 100);
     }
 }

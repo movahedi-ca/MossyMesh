@@ -185,6 +185,11 @@ impl Htlc {
         if params.amount == 0 {
             return Err(HtlcError::InvalidAmount);
         }
+        // Reject the all-zero digest: not a plausible SHA-256 image for any preimage
+        // under normal use, and marks an uninitialized / missing hashlock.
+        if params.payment_hash == [0u8; 32] {
+            return Err(HtlcError::InvalidPaymentHash);
+        }
         let seed = params.vdf_seed.unwrap_or_else(|| {
             let mut buf = [0u8; 8];
             buf.copy_from_slice(&params.id[0..8]);
@@ -516,5 +521,80 @@ mod tests {
         assert_eq!(htlc.vdf.steps_completed, 8);
         htlc.vdf_cancel().expect("cancel after step counter complete");
         assert_eq!(htlc.state, HtlcState::VdfCancelled);
+    }
+
+    // --- Formal invariants (docs/math-htlc-twamm.md §1) ---
+
+    /// H1 + H5: claim settles exactly once; second claim is AlreadySettled.
+    #[test]
+    fn invariant_h1_h5_single_claim_settlement() {
+        let preimage = b"one-shot-preimage";
+        let mut htlc = funded_htlc(preimage, 100, 10);
+        htlc.claim(preimage).unwrap();
+        assert_eq!(htlc.state, HtlcState::Claimed);
+        assert_eq!(htlc.claim(preimage), Err(HtlcError::AlreadySettled));
+        assert_eq!(htlc.refund(100), Err(HtlcError::AlreadySettled));
+        assert_eq!(htlc.vdf_cancel(), Err(HtlcError::AlreadySettled));
+    }
+
+    /// H3: refund only when current_height ≥ timeout_height.
+    #[test]
+    fn invariant_h3_timelock_strict_boundary() {
+        let mut htlc = funded_htlc(b"tl", 10, 100);
+        assert_eq!(htlc.refund(9), Err(HtlcError::TimeoutNotReached));
+        htlc.refund(10).expect("equal height is allowed");
+        assert_eq!(htlc.state, HtlcState::Refunded);
+    }
+
+    /// H4: vdf_cancel only when steps_completed ≥ steps_required.
+    #[test]
+    fn invariant_h4_vdf_gate_strict() {
+        let steps = 7u64;
+        let mut htlc = funded_htlc(b"vdf-gate", 1_000, steps);
+        for done in 0..steps {
+            assert!(!htlc.vdf.is_complete());
+            assert_eq!(htlc.vdf.remaining(), steps - done);
+            assert_eq!(htlc.vdf_cancel(), Err(HtlcError::VdfNotComplete));
+            htlc.advance_vdf(1).unwrap();
+        }
+        assert!(htlc.vdf.is_complete());
+        htlc.vdf_cancel().unwrap();
+        assert_eq!(htlc.state, HtlcState::VdfCancelled);
+        // H5 after VDF cancel
+        assert_eq!(htlc.claim(b"vdf-gate"), Err(HtlcError::AlreadySettled));
+    }
+
+    /// H4 + claim race: after partial VDF, correct claim still wins; cancel blocked.
+    #[test]
+    fn invariant_claim_beats_incomplete_vdf_cancel() {
+        let preimage = b"race-preimage";
+        let mut htlc = funded_htlc(preimage, 10_000, 20);
+        htlc.advance_vdf(5).unwrap();
+        assert_eq!(htlc.vdf_cancel(), Err(HtlcError::VdfNotComplete));
+        htlc.claim(preimage).unwrap();
+        assert_eq!(htlc.advance_vdf(1), Err(HtlcError::AlreadySettled));
+        assert_eq!(htlc.vdf_cancel(), Err(HtlcError::AlreadySettled));
+    }
+
+    /// H8 + InvalidPaymentHash: zero amount / all-zero hash rejected.
+    #[test]
+    fn invariant_h8_zero_amount_and_zero_hash_rejected() {
+        assert_eq!(
+            Htlc::fund_with_preimage(sample_id(), "a", "b", 0, b"x", 10, 0, 1).unwrap_err(),
+            HtlcError::InvalidAmount
+        );
+        let err = Htlc::fund(HtlcParams {
+            id: sample_id(),
+            sender: "a".into(),
+            receiver: "b".into(),
+            amount: 1,
+            payment_hash: [0u8; 32],
+            timeout_height: 10,
+            funded_height: 0,
+            vdf_steps: 1,
+            vdf_seed: None,
+        })
+        .unwrap_err();
+        assert_eq!(err, HtlcError::InvalidPaymentHash);
     }
 }
