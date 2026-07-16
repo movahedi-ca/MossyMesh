@@ -7,5 +7,6 @@ members = [
     "interop",
     "governance",
     "ai",
+    "integration",
 ]
 resolver = "2"

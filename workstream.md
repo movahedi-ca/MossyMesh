@@ -1,72 +1,83 @@
 # MossyMesh Parallel Workstreams
 
-To allow multiple agents to work in parallel without merge conflicts, the work has been divided into independent workstreams based on the project phases outlined in the README. Each workstream is restricted to specific directories and technology stacks.
+To allow multiple agents to work in parallel without merge conflicts, work is divided into independent workstreams.  
+**Agent roster and file ownership:** [`AGENTS.md`](AGENTS.md)  
+**Interface contracts:** [`docs/interface-contracts.md`](docs/interface-contracts.md)  
+**SLA / DoD:** [`docs/sla-and-dod.md`](docs/sla-and-dod.md)
 
 ## Workstream A: Frontend Layer & Captive Portal
-**Directory Scope**: `/frontend` and `/captive-portal`
-**Core Technologies**: React, TypeScript, Vite, vite-plugin-pwa, nginx
-**Agent Allocation**: 2-3 Agents
+**Directory Scope**: `/frontend` and `/captive-portal`  
+**Core Technologies**: React, TypeScript, Vite, vite-plugin-pwa, nginx  
+**Agents**: 04 Portal, 15 Frontend UX  
 **Focus & Deliverables**:
-- Develop the offline-first PWA for the MessyMash Chess application.
-- Implement the Captive Portal redirection logic and UI.
-- Configure `nginx` (with `client_max_body_size 150M`) and docker compose setups for serving assets.
-- Build the React components for the chessboard and UI layout.
+- Offline-first PWA for MessyMash Chess.
+- Captive portal redirection and UI.
+- nginx (`client_max_body_size 150M`) and docker compose for assets.
+- Chessboard and network status UI consuming **host DTOs only** (see contracts §6–7).
 
 ## Workstream B: Mesh Transport & Network Layer
-**Directory Scope**: `/mesh-transport`
-**Core Technologies**: Rust, Kademlia DHT, `reticulum-rs`, `lxmf-rs`
-**Agent Allocation**: 3-4 Agents
+**Directory Scope**: `/mesh-transport`  
+**Core Technologies**: Rust, Kademlia DHT, reticulum-rs / lxmf-rs direction  
+**Agents**: 02 Transport, 03 Topology, 08 VDF (module), 13 Security  
 **Focus & Deliverables**:
-- Build the reticulum-rs daemon for identity-based routing.
-- Implement Kademlia DHT pathfinding.
-- Develop STUN-less hole punching for heavy lines and CSMA/CA / BLE wrappers for lightweight LoRa links.
-- Set up the offline Wi-Fi domain logic.
+- Identity-based routing daemon surface.
+- Kademlia DHT pathfinding.
+- STUN-less hole punching; LoRa CSMA/CA & BLE wrappers.
+- VRF assignment, VDF sybil gate, quarantine/honeypot/hash-chain.
+- File ownership split documented in `AGENTS.md`.
 
 ## Workstream C: Consensus & Ledger (Data Layer)
-**Directory Scope**: `/consensus` (needs to be created)
-**Core Technologies**: Rust, `trie-db`, `nova-snark`, `yrs` (YATA CRDT), `ipld-core`
-**Agent Allocation**: 3-4 Agents
+**Directory Scope**: `/consensus`  
+**Core Technologies**: Rust, trie-db path, nova-snark, yrs (YATA CRDT), ipld-core  
+**Agents**: 06 Trie, 07 SNARK, 09 CRDT  
 **Focus & Deliverables**:
-- Implement the Incremental Merkle-Patricia Trie datastore.
-- Integrate `nova-snark` for recursive ZK-SNARK folding schemes to keep proofs constant-sized.
-- Implement the `yrs` CRDT-based merging architecture for deterministic data sync across disconnected islands.
-- Ensure the active ledger fits within the strict 10 MB RAM overhead constraint.
+- Incremental Merkle-Patricia datastore.
+- Recursive ZK folding for constant-sized proofs.
+- Deterministic island merge via CRDT/binary deltas.
+- Active ledger ≤ **10 MB** (`MAX_LEDGER_SIZE`).
 
 ## Workstream D: Chess Engine Logic & WASM
-**Directory Scope**: `/engine` (needs to be created)
-**Core Technologies**: Rust, `shakmaty`, `wasm32-wasip1`
-**Agent Allocation**: 2-3 Agents
+**Directory Scope**: `/engine`  
+**Core Technologies**: Rust, shakmaty, wasm32-wasip1  
+**Agents**: 05 Logic  
 **Focus & Deliverables**:
-- Integrate the `shakmaty` engine for core bitboard evaluation.
-- Compile the chess logic loop to the `wasm32-wasip1` target.
-- Integrate `shakmaty-syzygy` for memory-mapped endgame tablebases.
-- Ensure the engine can benchmark at ~836 Mnps in a WASM environment.
+- shakmaty bitboard evaluation.
+- Compile loop to wasm32-wasip1 for sandbox load.
+- Syzygy mmap strategy; ~836 Mnps reference target.
+- Pure deterministic APIs for sandbox FFI.
 
 ## Workstream E: Sandbox & Execution Environment
-**Directory Scope**: `/sandbox` (needs to be created)
-**Core Technologies**: WAMR, WASI, `minroot-vdf-rs`
-**Agent Allocation**: 2-3 Agents
+**Directory Scope**: `/sandbox`  
+**Core Technologies**: WAMR, WASI, MinRoot VDF coordination  
+**Agents**: 08 Cryptography (VDF gate), 14 AI Quantization  
 **Focus & Deliverables**:
-- Deploy the WAMR (WebAssembly Micro Runtime) environment.
-- Enforce the Symmetric Static INT8 Quantization and Fixed-Block Memory Pools.
-- Enforce the 10 MB RAM cap via `wasm_runtime_full_init` and bounded aux stack (`-z stack-size=N`).
-- Integrate `minroot-vdf-rs` to require burning a 10-minute sequential VDF for Ephemeral Job DIDs to prevent Sybil attacks.
+- WAMR environment with fixed-block pools.
+- Symmetric static INT8 hooks.
+- Enforce 10 MB via `MEM_LIMIT` / `wasm_runtime_full_init` path.
+- Job admit only with VDF-backed Ephemeral Job DID.
 
-## Workstream F: Interop, AI Processing & Smart Contracts
-**Directory Scope**: `/interop` (needs to be created)
-**Core Technologies**: Rust, Reticulum_AsyncAPI_rs, Vulkan Compute
-**Agent Allocation**: 2-3 Agents
+## Workstream F: Interop, Credits & Bridges
+**Directory Scope**: `/interop`  
+**Core Technologies**: Rust, AsyncAPI/OpenAPI, HTLC, TWAMM  
+**Agents**: 10 Escrow, 11 DeFi/TWAMM, 12 Governance  
 **Focus & Deliverables**:
-- Build the `Reticulum_AsyncAPI_rs` endpoints.
-- Implement Hashed Timelock Contracts (HTLCs) protected by VDF-Delayed Cancellation for escrowed credits.
-- Spin up an OpenAPI gateway when internet reconnects.
-- Prepare the TWAMM orchestration for bridging local liquidity to a global AMM.
-- Standardize tensor formats and deterministic GPU computing.
+- AsyncAPI endpoints (`/api/v1/health`, `/api/v1/submit_job`, …).
+- HTLC escrow with VDF-delayed cancellation.
+- OpenAPI gateway on internet reconnect.
+- TWAMM orchestration; **≤ 2%** max-spread cap.
+- WoT / multi-sig decay / ZK vote hooks.
+
+## Cross-Cutting (not a product workstream)
+**Directory Scope**: `AGENTS.md`, `u/**`, `docs/**`, `workstream.md`, `integration/**`  
+**Agents**: 01 Architect, 16 DevOps/Auditor  
+**Focus**: contracts, SLA compliance, smoke harness, change control.
 
 ---
 
 ### Collaboration Rules for Agents
-1. **Directory Isolation**: Agents MUST ONLY modify files within their assigned `Directory Scope`.
-2. **Interface Contracts**: If a workstream needs to interact with another (e.g., Frontend calling Mesh Transport), agents must agree on the API/Trait interfaces first and mock the responses until the dependent workstream is ready.
-3. **No Centralized Assumptions**: Ensure all code strictly adheres to the "Out-of-Scope" rules in the README (no centralized IP addresses, DNS routing, or cloud databases).
-4. **Testing**: Each workstream must include its own isolated unit tests before integrating.
+1. **Directory Isolation**: Modify only your assigned Directory Scope (and owned files if sharing a crate).
+2. **Interface Contracts**: Agree on APIs in `docs/interface-contracts.md`; mock until the peer workstream is ready.
+3. **No Centralized Assumptions**: No centralized IP/DNS-as-sole-locator or cloud databases.
+4. **Testing**: Isolated unit tests per workstream; cross-crate smoke in `integration/`.
+5. **Branches**: `agent/NN-*` from `origin/main`; never force-push `main`.
+6. **Worktrees**: Prefer a dedicated git worktree per agent branch to avoid checkout thrash.
