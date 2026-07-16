@@ -237,7 +237,8 @@ mod tests {
         let peer = PeerId::from(key.public());
         let behaviour = build_mesh_behaviour(&key);
         assert!(!peer.to_string().is_empty());
-        let _ = format!("{:?}", behaviour.kademlia.mode());
+        // Behaviour is constructible; mode() is private on this libp2p version.
+        let _ = behaviour;
     }
 
     #[test]

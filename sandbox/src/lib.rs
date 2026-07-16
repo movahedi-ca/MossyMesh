@@ -37,8 +37,12 @@ pub mod wamr;
 
 // Re-exports for a compact public surface.
 pub use admit::{
-    admit_job, AdmitError, DomainSeparatedHashVdfStub, JobDid, VdfReceipt, VdfVerifier,
-    HASH_VDF_STUB_DEFAULT_MIN_STEPS, HASH_VDF_STUB_DOMAIN,
+    admit_job, admit_job_required, validate_minroot_modulus, AdmitError,
+    DomainSeparatedHashVdfStub, JobDid, MinRootVdfVerifier, VdfReceipt, VdfVerifier,
+    DEFAULT_TEST_ITERATIONS, DEFAULT_TEST_MODULUS, HASH_VDF_STUB_DEFAULT_MIN_STEPS,
+    HASH_VDF_STUB_DOMAIN, MAX_TEST_ITERATIONS, MODULUS_ID_HASH_STUB,
+    MODULUS_ID_PRODUCTION_MINROOT, MODULUS_ID_TEST_MINROOT, PRODUCTION_ITERATIONS,
+    PRODUCTION_MODULUS,
 };
 pub use host::{HostError, HostRuntime, AUX_STACK_SIZE};
 pub use job::{Job, JobError};
@@ -174,6 +178,9 @@ fn job_error_static(e: &JobError) -> &'static str {
         JobError::InvalidModule => "Host Error: Invalid or empty WASM module bytes.",
         JobError::AuxStackOverflow => "Host Error: Bounded aux stack overflow.",
         JobError::NotAdmitted => "Admit denied: job has no verified Job DID.",
+        JobError::Admit(AdmitError::MissingVdf) => {
+            "Admit denied: missing VDF proof / receipt."
+        }
         JobError::Admit(AdmitError::InvalidVdf) => {
             "Admit denied: VDF receipt verification failed."
         }
@@ -182,6 +189,9 @@ fn job_error_static(e: &JobError) -> &'static str {
         }
         JobError::Admit(AdmitError::InsufficientSteps) => {
             "Admit denied: VDF steps below minimum delay."
+        }
+        JobError::Admit(AdmitError::InvalidModulus) => {
+            "Admit denied: VDF modulus / parameter set invalid."
         }
         JobError::Admit(AdmitError::Rejected(_)) => "Admit denied: VDF receipt rejected.",
         JobError::Runtime(_) => "Host Error: runtime fault.",
