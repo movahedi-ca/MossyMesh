@@ -232,17 +232,22 @@ mod tests {
     #[test]
     fn smoke_ledger_bound_constant() {
         assert_eq!(consensus::MAX_LEDGER_SIZE, 10_000_000);
-        // SNARK fold hook exists; verify_snark is still a stub (returns false until Nova).
-        consensus::fold_snarks();
-        assert!(!consensus::verify_snark());
+        // Constant-size SNARK folding is wired (mock prover; real nova-snark optional).
         use consensus::SnarkFolder;
-        let mut folder = consensus::StubSnarkFolder::default();
-        folder
-            .fold(&consensus::SnarkProof {
-                proof_bytes: vec![1, 2, 3],
-            })
-            .expect("fold non-empty");
-        assert!(folder.verify(&[0u8; 32]).expect("stub verify"));
+        let genesis = [0u8; 32];
+        let mut folder = consensus::AccumulatorSnarkFolder::new(genesis);
+        let step = consensus::StepInstance {
+            prev_state_root: genesis,
+            next_state_root: [1u8; 32],
+            witness_digest: [2u8; 32],
+        };
+        folder.fold_step(&step).expect("fold step");
+        assert!(folder.verify(&[1u8; 32]).expect("verify folded"));
+        assert_eq!(
+            folder.accumulator().public_bytes().len(),
+            consensus::ANCHOR_PROOF_SIZE
+        );
+        assert!(consensus::verify_snark(folder.accumulator()));
     }
 
     // --- SMK-05 ---
