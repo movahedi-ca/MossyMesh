@@ -2,9 +2,26 @@
 name = "engine"
 version = "0.1.0"
 edition = "2021"
+description = "MossyMesh chess application logic (shakmaty) — deterministic, WASM-ready"
+license = "MIT OR Apache-2.0"
+# Target notes (wasm32-wasip1 readiness):
+#   rustup target add wasm32-wasip1
+#   cargo build -p engine --target wasm32-wasip1
+# Default features avoid mmap / OS-specific tablebase I/O so the crate compiles for WASI.
+# Enable native Syzygy probing (file-backed, optional mmap) with: --features syzygy
+# Aspirational native throughput target: ~836 Mnps (million nodes/sec) on strong hosts;
+# measured values come from benchmark_mnps() — never hard-coded. WASM will be lower.
+
+[features]
+default = []
+# Optional real Syzygy probing via shakmaty-syzygy (native-friendly; not default for WASI).
+syzygy = ["dep:shakmaty-syzygy"]
+# Use memmap2-backed tables when the syzygy crate supports it (native only).
+syzygy-mmap = ["syzygy", "shakmaty-syzygy/mmap"]
 
 [dependencies]
-# Dependencies for Phase 1
 serde = { version = "1.0", features = ["derive"] }
-shakmaty = "0.27"
-shakmaty-syzygy = "0.27"
+shakmaty = "0.27.2"
+# Feature-gated: keeps wasm32-wasip1 builds free of mmap/libc tablebase paths.
+# 0.25.x tracks shakmaty 0.27; newer syzygy releases require shakmaty 0.29+.
+shakmaty-syzygy = { version = "0.25", optional = true }
