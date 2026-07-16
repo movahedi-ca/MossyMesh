@@ -1,10 +1,24 @@
-//! Deterministic GPU/Vulkan compute abstraction with CPU fallback.
+//! # Deterministic compute backends
 //!
-//! The `ComputeBackend` trait mirrors a Vulkan compute dispatch surface
-//! (buffers in, buffers out, named ops) without requiring a GPU driver.
-//! `CpuBackend` implements all ops with pure Rust, bit-stable results:
-//! - FP32 matmul uses fixed left-to-right accumulation order
-//! - Attention toy op uses the same fixed-order reductions
+//! Vulkan-shaped compute abstraction with a **real** CPU path and an honest
+//! **Vulkan stub**.
+//!
+//! ## Feature flags (see `ai/Cargo.toml`)
+//!
+//! | Feature | Reality |
+//! | --- | --- |
+//! | *(default)* | Pure-Rust only; [`VulkanBackend`] is unavailable |
+//! | `vulkan-stub` | Documents stub usage at compile time — **still no ICD / shaders** |
+//!
+//! There is intentionally **no** `vulkan` feature that links `ash` or loads a
+//! driver. A future real GPU backend must introduce new optional deps and must
+//! not silently claim availability when only the stub is present.
+//!
+//! ## Ops
+//!
+//! - FP32 matmul: fixed left-to-right accumulation order (bit-stable)
+//! - Toy single-head attention: same fixed-order reductions + stable softmax
+//! - INT8 elementwise add: saturating arithmetic
 //!
 //! No network. No nondeterministic threads in the hot path.
 
@@ -15,9 +29,13 @@ use crate::sitf::{DType, SitfError, SitfTensor};
 /// Errors from compute backends.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ComputeError {
+    /// Named op is not implemented on this backend.
     UnsupportedOp(&'static str),
+    /// Shape / dtype validation failed.
     Shape(String),
+    /// Nested SITF error.
     Sitf(SitfError),
+    /// Backend is not present on this host (expected for the Vulkan stub).
     BackendUnavailable(&'static str),
 }
 
@@ -40,7 +58,7 @@ impl From<SitfError> for ComputeError {
     }
 }
 
-/// Matrix multiply descriptor: C[M,N] = A[M,K] × B[K,N]
+/// Matrix multiply descriptor: `C[M,N] = A[M,K] × B[K,N]`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MatMulOp {
     pub m: u32,
@@ -49,9 +67,9 @@ pub struct MatMulOp {
 }
 
 /// Toy scaled-dot-product attention over a single head:
-/// out = softmax(Q K^T / sqrt(d)) V
+/// `out = softmax(Q K^T / sqrt(d)) V`
 ///
-/// Q: [seq, d], K: [seq, d], V: [seq, d] → out: [seq, d]
+/// Q, K, V: `[seq, d]` → out: `[seq, d]`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AttentionOp {
     pub seq: u32,
@@ -61,15 +79,20 @@ pub struct AttentionOp {
 /// Vulkan-shaped compute trait: submit named ops over SITF buffers.
 ///
 /// A real Vulkan backend would map tensors to `VkBuffer`s and dispatch
-/// compute shaders; the CPU fallback stays pure Rust and deterministic.
+/// compute shaders; [`CpuBackend`] stays pure Rust and deterministic.
+/// [`VulkanBackend`] is a **stub** — see type docs and the `vulkan-stub` feature.
 pub trait ComputeBackend {
-    /// Human-readable backend name (e.g. "cpu", "vulkan").
+    /// Human-readable backend name (e.g. `"cpu"`, `"vulkan"`).
     fn name(&self) -> &'static str;
 
     /// Whether this backend is currently usable on the host.
+    ///
+    /// For [`VulkanBackend`], this is **false** unless tests set
+    /// `force_available` — never treat a true result as proof of a real ICD
+    /// unless a future non-stub feature is added.
     fn is_available(&self) -> bool;
 
-    /// FP32 matrix multiply. `a` shape [m,k], `b` shape [k,n] → [m,n].
+    /// FP32 matrix multiply. `a` shape `[m,k]`, `b` shape `[k,n]` → `[m,n]`.
     fn matmul_f32(
         &self,
         op: MatMulOp,
@@ -90,7 +113,10 @@ pub trait ComputeBackend {
     fn add_i8(&self, a: &SitfTensor, b: &SitfTensor) -> Result<SitfTensor, ComputeError>;
 }
 
-/// Pure-Rust deterministic CPU backend (Vulkan compute fallback).
+/// Pure-Rust deterministic CPU backend (the production offline path).
+///
+/// Also used as the fallback when the Vulkan stub is unavailable, and as the
+/// delegate when the stub is force-enabled for parity tests.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct CpuBackend;
 
@@ -230,15 +256,34 @@ impl ComputeBackend for CpuBackend {
     }
 }
 
-/// Stub Vulkan backend: reports availability false; all ops fall through error
-/// unless `force_available` is set (then delegates to CPU for shader parity).
+/// **Stub** Vulkan backend — not a real GPU path.
+///
+/// # Honesty contract
+///
+/// - Default [`VulkanBackend::new`] → `is_available() == false`
+/// - Ops return [`ComputeError::BackendUnavailable`] when unavailable
+/// - `force_available = true` is **test-only**: still runs on [`CpuBackend`],
+///   never allocates `VkBuffer` or loads an ICD
+/// - Crate feature `vulkan-stub` documents intent only; enabling it does not
+///   change runtime behavior or link Vulkan libraries
+///
+/// Prefer [`PreferredBackend::auto`] so production stays on [`CpuBackend`].
 #[derive(Debug, Default, Clone, Copy)]
 pub struct VulkanBackend {
-    /// Simulated presence of a Vulkan ICD (always false in pure-Rust offline builds).
+    /// Test-only switch that *pretends* a Vulkan ICD exists.
+    ///
+    /// Even when true, work is delegated to [`CpuBackend`] (CPU parity for
+    /// shader-shaped APIs). This is **not** GPU acceleration.
+    ///
+    /// Gated documentation: the `vulkan-stub` Cargo feature exists so call
+    /// sites can `cfg!(feature = "vulkan-stub")` when they intentionally use
+    /// this field; the field itself is always present so default builds keep
+    /// a single API surface.
     pub force_available: bool,
 }
 
 impl VulkanBackend {
+    /// Construct an unavailable stub (`is_available() == false`).
     pub fn new() -> Self {
         Self {
             force_available: false,
@@ -248,10 +293,13 @@ impl VulkanBackend {
 
 impl ComputeBackend for VulkanBackend {
     fn name(&self) -> &'static str {
+        // Name stays "vulkan" for API shape parity; availability is the truth signal.
         "vulkan"
     }
 
     fn is_available(&self) -> bool {
+        // Honest default: no ICD. Only force_available (tests) flips this.
+        // Future real integration must not set this true without a driver probe.
         self.force_available
     }
 
@@ -264,7 +312,7 @@ impl ComputeBackend for VulkanBackend {
         if !self.is_available() {
             return Err(ComputeError::BackendUnavailable("vulkan"));
         }
-        // When forced available, delegate to CPU for identical results (shader parity).
+        // Stub path: CPU delegate for identical bits (not a shader dispatch).
         CpuBackend.matmul_f32(op, a, b)
     }
 
@@ -293,11 +341,14 @@ impl ComputeBackend for VulkanBackend {
 #[derive(Debug, Clone, Copy)]
 pub enum PreferredBackend {
     Cpu(CpuBackend),
+    /// Only selected when the stub reports available (normally never).
     Vulkan(VulkanBackend),
 }
 
 impl PreferredBackend {
     /// Prefer Vulkan when marked available; otherwise CPU.
+    ///
+    /// With the default stub, this always returns [`PreferredBackend::Cpu`].
     pub fn auto(vulkan: VulkanBackend, cpu: CpuBackend) -> Self {
         if vulkan.is_available() {
             PreferredBackend::Vulkan(vulkan)
@@ -385,6 +436,26 @@ mod tests {
         assert_eq!(r1.data, r3.data);
     }
 
+    /// Golden LE payload bits for a small matmul (deterministic tensor ops).
+    #[test]
+    fn matmul_golden_payload_bits() {
+        let cpu = CpuBackend::new();
+        let a = SitfTensor::from_f32(vec![2, 2], &[1.0, 2.0, 3.0, 4.0]).unwrap();
+        let b = SitfTensor::from_f32(vec![2, 2], &[5.0, 6.0, 7.0, 8.0]).unwrap();
+        let c = cpu
+            .matmul_f32(MatMulOp { m: 2, k: 2, n: 2 }, &a, &b)
+            .unwrap();
+        let expected: Vec<u8> = [19.0f32, 22.0, 43.0, 50.0]
+            .into_iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
+        assert_eq!(c.data, expected);
+        // SITF encode of the result is also stable.
+        let wire1 = c.to_bytes().unwrap();
+        let wire2 = c.to_bytes().unwrap();
+        assert_eq!(wire1, wire2);
+    }
+
     #[test]
     fn attention_toy_deterministic() {
         let cpu = CpuBackend::new();
@@ -404,6 +475,29 @@ mod tests {
         }
     }
 
+    /// Attention is bit-stable across independent backend instances.
+    #[test]
+    fn attention_bit_stable_fresh_backends() {
+        let seq = 3u32;
+        let d = 2u32;
+        let q = SitfTensor::from_f32(
+            vec![seq, d],
+            &[0.5, 0.0, 0.0, 0.5, 0.25, 0.25],
+        )
+        .unwrap();
+        let k = q.clone();
+        let v = SitfTensor::from_f32(
+            vec![seq, d],
+            &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+        )
+        .unwrap();
+        let op = AttentionOp { seq, d };
+        let o1 = CpuBackend::new().attention_f32(op, &q, &k, &v).unwrap();
+        let o2 = CpuBackend::new().attention_f32(op, &q, &k, &v).unwrap();
+        assert_eq!(o1.data, o2.data);
+        assert_eq!(o1.to_bytes().unwrap(), o2.to_bytes().unwrap());
+    }
+
     #[test]
     fn add_i8_saturating() {
         let cpu = CpuBackend::new();
@@ -414,12 +508,33 @@ mod tests {
     }
 
     #[test]
+    fn add_i8_deterministic_bits() {
+        let cpu = CpuBackend::new();
+        let a = SitfTensor::from_i8(vec![4], &[1, 2, 3, 4]).unwrap();
+        let b = SitfTensor::from_i8(vec![4], &[10, 20, 30, 40]).unwrap();
+        let c1 = cpu.add_i8(&a, &b).unwrap();
+        let c2 = cpu.add_i8(&a, &b).unwrap();
+        assert_eq!(c1.data, c2.data);
+        assert_eq!(c1.as_i8_slice().unwrap(), &[11i8, 22, 33, 44]);
+    }
+
+    #[test]
     fn vulkan_unavailable_falls_back_policy() {
         let vk = VulkanBackend::new();
         let cpu = CpuBackend::new();
         assert!(!vk.is_available());
         let pref = PreferredBackend::auto(vk, cpu);
         assert_eq!(pref.as_dyn().name(), "cpu");
+    }
+
+    #[test]
+    fn vulkan_stub_ops_error_when_unavailable() {
+        let vk = VulkanBackend::new();
+        let a = SitfTensor::from_f32(vec![1, 1], &[1.0]).unwrap();
+        let err = vk
+            .matmul_f32(MatMulOp { m: 1, k: 1, n: 1 }, &a, &a)
+            .unwrap_err();
+        assert_eq!(err, ComputeError::BackendUnavailable("vulkan"));
     }
 
     #[test]
@@ -433,5 +548,15 @@ mod tests {
         let r_vk = vk.matmul_f32(op, &a, &b).unwrap();
         let r_cpu = cpu.matmul_f32(op, &a, &b).unwrap();
         assert_eq!(r_vk.data, r_cpu.data);
+    }
+
+    #[test]
+    fn vulkan_stub_feature_is_documentation_only() {
+        // Compiles whether or not `vulkan-stub` is enabled; documents that the
+        // feature does not imply a real ICD.
+        let _ = cfg!(feature = "vulkan-stub");
+        let vk = VulkanBackend::new();
+        assert!(!vk.is_available());
+        assert_eq!(vk.name(), "vulkan");
     }
 }
