@@ -3,3 +3,10 @@
 pub fn init_wifi_direct() {
     println!("Initializing Offline Wi-Fi Direct local domain mesh topology.");
 }
+
+pub enum WifiState {
+    Scanning,
+    GroupOwner,
+    Client,
+    Disconnected,
+}

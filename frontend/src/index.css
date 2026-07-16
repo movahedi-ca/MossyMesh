@@ -1,7 +1,11 @@
 @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;700&family=Inter:wght@400;500;600&display=swap');
 
 :root {
-  --bg-color: #0b0c10;
+  --bg-color: #121212;
+  --text-color: #e0e0e0;
+  --glass-bg: rgba(255, 255, 255, 0.05);
+  --glass-border: rgba(255, 255, 255, 0.1);
+  --font-family: 'Inter', system-ui, Avenir, Helvetica, Arial, sans-serif;
   --surface-color: rgba(255, 255, 255, 0.03);
   --surface-border: rgba(255, 255, 255, 0.08);
   --primary-color: #45f3ff;

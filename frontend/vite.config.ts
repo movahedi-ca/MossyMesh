@@ -8,6 +8,10 @@ export default defineConfig({
     react(),
     VitePWA({
       registerType: 'autoUpdate',
+      manifest: {
+        theme_color: '#000000',
+        background_color: '#1a1a1a',
+      },
       workbox: {
         globPatterns: ['**/*.{js,css,html,ico,png,svg,wasm}']
       }

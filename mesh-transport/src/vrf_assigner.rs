@@ -26,3 +26,8 @@ pub fn init_vrf_assigner() {
     let selected = is_selected_for_task(sample_hash, weight, total_weight);
     println!("VRF Sortition test -> Selected: {}", selected);
 }
+
+pub struct VrfProof {
+    pub hash: [u8; 32],
+    pub signature: [u8; 64],
+}

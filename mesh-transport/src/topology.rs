@@ -3,3 +3,8 @@
 pub fn init_topology() {
     println!("Initializing Dynamic Topology Mapping for the local mesh island.");
 }
+
+pub struct GraphNode {
+    pub id: String,
+    pub connections: Vec<String>,
+}

@@ -3,3 +3,8 @@
 pub fn init_quarantine() {
     println!("Initializing Statistical Anomaly Detection & Quarantine logic.");
 }
+
+pub enum FaultType {
+    CrashFault,
+    ByzantineFault,
+}

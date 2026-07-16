@@ -40,3 +40,12 @@ pub fn init_kademlia_routing() {
     let bucket = calculate_bucket_index(&dist);
     println!("Kademlia test XOR distance bucket: {}", bucket);
 }
+
+pub struct RoutingTable {
+    pub buckets: Vec<Vec<[u8; 32]>>,
+}
+
+pub fn find_node(target: &[u8; 32]) -> Option<[u8; 32]> {
+    // Stub
+    None
+}
