@@ -261,4 +261,93 @@ mod tests {
             Err(LiquidityError::NotGenesis)
         );
     }
+
+    // --- Formal invariants (docs/math-htlc-twamm.md §3) ---
+
+    /// L1–L3: offline accrual, online claim only.
+    #[test]
+    fn invariant_l1_l3_offline_online_boundary() {
+        let mut miner = LiquidityMiner::new();
+        miner.register_genesis("g1");
+        assert!(!miner.is_online());
+        assert_eq!(miner.accrue_offline_epochs("g1", 4).unwrap(), 400);
+        assert_eq!(
+            miner.claim_airdrop("g1"),
+            Err(LiquidityError::StillOffline)
+        );
+
+        miner.on_internet_reconnect();
+        assert_eq!(miner.accrue_offline_epochs("g1", 2).unwrap(), 0);
+        assert_eq!(miner.get("g1").unwrap().points, 400);
+
+        let tokens = miner.claim_airdrop("g1").unwrap();
+        assert_eq!(tokens, 400 * TOKENS_PER_POINT);
+    }
+
+    /// L4 + L5: per-account point conservation; no double claim.
+    #[test]
+    fn invariant_l4_l5_point_conservation_and_single_claim() {
+        let mut miner = LiquidityMiner::new();
+        miner.register_genesis("n");
+        miner.accrue_offline_epochs("n", 5).unwrap(); // 500 points
+        miner.on_internet_reconnect();
+
+        let acct = miner.get("n").unwrap();
+        let unclaimed = miner.unclaimed_points("n").unwrap();
+        let claimed_as_points = acct.claimed_tokens / TOKENS_PER_POINT;
+        assert_eq!(claimed_as_points + unclaimed, acct.points);
+
+        miner.claim_airdrop("n").unwrap();
+        let acct = miner.get("n").unwrap();
+        let unclaimed = miner.unclaimed_points("n").unwrap();
+        let claimed_as_points = acct.claimed_tokens / TOKENS_PER_POINT;
+        assert_eq!(unclaimed, 0);
+        assert_eq!(claimed_as_points + unclaimed, acct.points);
+        assert_eq!(claimed_as_points, 500);
+        assert_eq!(
+            miner.claim_airdrop("n"),
+            Err(LiquidityError::NothingToClaim)
+        );
+    }
+
+    /// L6 + L7: network totals and token–point link.
+    #[test]
+    fn invariant_l6_l7_network_conservation() {
+        let mut miner = LiquidityMiner::new();
+        miner.register_genesis("a");
+        miner.register_genesis("b");
+        miner.accrue_offline_epochs("a", 2).unwrap(); // 200
+        miner.accrue_offline_epochs("b", 3).unwrap(); // 300
+        assert_eq!(miner.total_points_issued, 500);
+
+        let sum_points: u64 = ["a", "b"]
+            .iter()
+            .map(|id| miner.get(id).unwrap().points)
+            .sum();
+        assert_eq!(sum_points, miner.total_points_issued);
+
+        miner.on_internet_reconnect();
+        miner.claim_airdrop("a").unwrap();
+        // b leaves points unclaimed
+        let sum_claimed: u64 = ["a", "b"]
+            .iter()
+            .map(|id| miner.get(id).map(|x| x.claimed_tokens).unwrap_or(0))
+            .sum();
+        assert_eq!(sum_claimed, miner.total_tokens_airdropped);
+        assert_eq!(miner.total_tokens_airdropped, 200 * TOKENS_PER_POINT);
+        assert!(
+            miner.total_tokens_airdropped <= TOKENS_PER_POINT * miner.total_points_issued
+        );
+    }
+
+    #[test]
+    fn invariant_l2_non_genesis_blocked() {
+        let mut miner = LiquidityMiner::new();
+        miner.register_standard("std");
+        assert_eq!(
+            miner.accrue_offline_epochs("std", 10),
+            Err(LiquidityError::NotGenesis)
+        );
+        assert_eq!(miner.total_points_issued, 0);
+    }
 }

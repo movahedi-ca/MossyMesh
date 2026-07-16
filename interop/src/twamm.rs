@@ -101,6 +101,11 @@ pub fn spread_bps(execution_price: u64, reference_price: u64) -> Result<u32, Twa
 ///
 /// Hard reject: any spread **strictly greater than** [`MAX_SPREAD_BPS`] (200 bps = 2%) fails.
 /// Exactly 200 bps is allowed.
+///
+/// Formal acceptance inequality (docs/math-htlc-twamm.md §2):
+/// \[
+/// \mathrm{spread\_bps}(e, r) \le \mathrm{MAX\_SPREAD\_BPS} = 200
+/// \]
 pub fn enforce_max_spread(execution_price: u64, reference_price: u64) -> Result<u32, TwammError> {
     let bps = spread_bps(execution_price, reference_price)?;
     if bps > MAX_SPREAD_BPS {
@@ -125,6 +130,16 @@ pub fn quote_with_spread_cap(
     let bps = enforce_max_spread(execution_price, reference_price)?;
     let (amount_out, _) = quote_fill(side, amount_in, execution_price)?;
     Ok((amount_out, bps))
+}
+
+/// Pure predicate for the max-spread inequality: `true` iff trade is allowed.
+///
+/// \[
+/// \mathsf{allowed}(e, r) \iff e > 0 \wedge r > 0 \wedge
+/// \left\lfloor |e-r|\cdot 10^4 / r \right\rfloor \le 200
+/// \]
+pub fn spread_within_cap(execution_price: u64, reference_price: u64) -> bool {
+    enforce_max_spread(execution_price, reference_price).is_ok()
 }
 
 /// Apply a buy or sell against a quoted execution price and return `(amount_out, execution_price)`.
@@ -477,5 +492,103 @@ mod tests {
             quote_with_spread_cap(OrderSide::Sell, 1_000_000, 1_000_000, 1_000_000).unwrap();
         assert_eq!(bps, 0);
         assert_eq!(out, 1_000_000);
+    }
+
+    // --- Formal invariants (docs/math-htlc-twamm.md §2) ---
+
+    /// T1: acceptance iff floor(|e-r|·10_000/r) ≤ 200.
+    ///
+    /// With integer division, exact 200 bps needs |e-r| ≥ ⌈200·r/10_000⌉ and
+    /// reject needs |e-r| ≥ ⌈201·r/10_000⌉ (for r=1e6: 20_000 and 20_100).
+    #[test]
+    fn invariant_t1_max_spread_inequality() {
+        let r = 1_000_000u64;
+        let at_cap_diff = (MAX_SPREAD_BPS as u64) * r / BPS_DENOM; // 20_000
+        let reject_diff = ((MAX_SPREAD_BPS as u64) + 1) * r / BPS_DENOM; // 20_100
+        assert_eq!(at_cap_diff, 20_000);
+        assert_eq!(reject_diff, 20_100);
+
+        // Exactly 200 bps (both sides of mid)
+        assert!(spread_within_cap(r + at_cap_diff, r));
+        assert!(spread_within_cap(r - at_cap_diff, r));
+        assert_eq!(spread_bps(r + at_cap_diff, r).unwrap(), MAX_SPREAD_BPS);
+        assert_eq!(spread_bps(r - at_cap_diff, r).unwrap(), MAX_SPREAD_BPS);
+
+        // First integer price that yields 201 bps → reject
+        let over = r + reject_diff;
+        assert!(!spread_within_cap(over, r));
+        let bps = spread_bps(over, r).unwrap();
+        assert!(bps > MAX_SPREAD_BPS, "bps={bps} must exceed cap");
+        assert!(matches!(
+            enforce_max_spread(over, r),
+            Err(TwammError::SpreadExceeded { spread_bps, max_bps })
+                if spread_bps == bps && max_bps == MAX_SPREAD_BPS
+        ));
+
+        // Just below reject threshold still floors to ≤ 200
+        assert!(spread_within_cap(r + reject_diff - 1, r));
+        assert!(spread_bps(r + reject_diff - 1, r).unwrap() <= MAX_SPREAD_BPS);
+
+        // Mid and 1 bp still ok
+        assert!(spread_within_cap(r, r));
+        assert!(spread_within_cap(r + r / BPS_DENOM, r));
+    }
+
+    /// T1 table: known (exec, ref, expected_ok) triples.
+    #[test]
+    fn invariant_t1_spread_table() {
+        let cases: &[(u64, u64, bool)] = &[
+            (1_000_000, 1_000_000, true),  // 0 bps
+            (1_010_000, 1_000_000, true),  // 100 bps
+            (1_020_000, 1_000_000, true),  // 200 bps = 2%
+            (1_020_100, 1_000_000, false), // 201 bps
+            (1_030_000, 1_000_000, false), // 300 bps
+            (980_000, 1_000_000, true),    // 200 bps downside
+            (979_900, 1_000_000, false),   // 201 bps downside
+            (0, 1_000_000, false),         // invalid
+            (1_000_000, 0, false),         // invalid
+        ];
+        for &(e, r, ok) in cases {
+            assert_eq!(
+                spread_within_cap(e, r),
+                ok,
+                "spread_within_cap({e}, {r}) expected {ok}"
+            );
+        }
+    }
+
+    /// T2: rejected stream leaves order size/slices unchanged.
+    #[test]
+    fn invariant_t2_reject_is_non_mutating() {
+        let mut eng = TwammEngine::new();
+        let id = eng
+            .submit_order(OrderSide::Buy, 400_000, 2, 2_000_000)
+            .unwrap();
+        let before = eng.get_order(&id).unwrap().clone();
+        // 5% over mid
+        let err = eng.stream_slice(&id, 2_100_000).unwrap_err();
+        assert!(matches!(err, TwammError::SpreadExceeded { .. }));
+        let after = eng.get_order(&id).unwrap();
+        assert_eq!(after.remaining_in, before.remaining_in);
+        assert_eq!(after.slices_remaining, before.slices_remaining);
+        assert_eq!(after.reference_price, before.reference_price);
+    }
+
+    /// T3 + T4: invalid price and exhaustion.
+    #[test]
+    fn invariant_t3_t4_invalid_and_exhausted() {
+        assert_eq!(
+            enforce_max_spread(0, 1),
+            Err(TwammError::InvalidPrice)
+        );
+        let mut eng = TwammEngine::new();
+        let id = eng
+            .submit_order(OrderSide::Sell, 50, 1, 1_000_000)
+            .unwrap();
+        eng.stream_slice(&id, 1_000_000).unwrap();
+        assert_eq!(
+            eng.stream_slice(&id, 1_000_000),
+            Err(TwammError::OrderExhausted)
+        );
     }
 }
