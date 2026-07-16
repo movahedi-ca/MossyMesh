@@ -13,3 +13,14 @@ reed-solomon-erasure = "6.0"
 blake3 = "1.5"
 # Compact CBOR serialization approximating DAG-CBOR for IPLD-style node encoding.
 serde_cbor = "0.11"
+# Deterministic mock commitments for Nova-style folding (real nova-snark is optional/heavy).
+sha2 = "0.10"
+
+# Optional soft-dep for real recursive SNARKs over Pallas/Vesta — not enabled by default
+# because it pulls a large proving stack unsuitable for constrained edge CI / Windows.
+# nova-snark = { version = "0.36", optional = true }
+
+[features]
+default = []
+# Enable when integrating real nova-snark circuits (feature-gated to avoid breaking trie builds).
+# real-nova = ["nova-snark"]
