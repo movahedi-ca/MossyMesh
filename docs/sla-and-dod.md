@@ -34,11 +34,11 @@ Crypto or memory allocation changes require written proof (doc or test) that SLA
 
 ### Deliverables
 
-- [ ] Captive portal serves offline PWA (nginx body size ≥ 150M).
-- [ ] Identity-based routing (no public DNS required for island traffic).
-- [ ] Smartphone test packet → translator → LoRa MAC framing.
-- [ ] Kademlia pathfinding to offline node (sim acceptable).
-- [ ] Unit tests for MAC/translate/DHT modules.
+- [x] Captive portal serves offline PWA (nginx body size ≥ 150M).
+- [x] Identity-based routing (no public DNS required for island traffic).
+- [x] Smartphone test packet → translator → LoRa MAC framing.
+- [x] Kademlia pathfinding to offline node (sim acceptable).
+- [x] Unit tests for MAC/translate/DHT modules.
 
 ### Acceptance
 
@@ -57,10 +57,10 @@ Crypto or memory allocation changes require written proof (doc or test) that SLA
 
 ### Deliverables
 
-- [ ] WAMR (or faithful stub → WAMR) with bounded linear memory.
-- [ ] Symmetric static INT8 policy hooks.
-- [ ] Ephemeral Job DID gated by ~10-minute sequential VDF.
-- [ ] `allocate` hard-fails past cap with deterministic error.
+- [x] WAMR (or faithful stub → WAMR) with bounded linear memory.
+- [x] Symmetric static INT8 policy hooks.
+- [x] Ephemeral Job DID gated by ~10-minute sequential VDF.
+- [x] `allocate` hard-fails past cap with deterministic error.
 
 ### Acceptance
 
@@ -79,10 +79,10 @@ Crypto or memory allocation changes require written proof (doc or test) that SLA
 
 ### Deliverables
 
-- [ ] Incremental Merkle-Patricia (or equivalent) active ledger.
-- [ ] Constant-size (or bounded sub-MB) edge verification proof.
-- [ ] Deterministic merge of divergent islands.
-- [ ] Active ledger size accounting vs SLA-RAM.
+- [x] Incremental Merkle-Patricia (or equivalent) active ledger.
+- [x] Constant-size (or bounded sub-MB) edge verification proof.
+- [x] Deterministic merge of divergent islands.
+- [x] Active ledger size accounting vs SLA-RAM.
 
 ### Acceptance
 
@@ -102,9 +102,9 @@ Crypto or memory allocation changes require written proof (doc or test) that SLA
 ### Deliverables
 
 - [ ] Engine compiles to wasm32-wasip1 and loads in sandbox.
-- [ ] Deterministic legal moves + evaluation.
-- [ ] Mnps harness (~836 target on reference profile).
-- [ ] HTLC + VDF-delayed cancellation.
+- [x] Deterministic legal moves + evaluation.
+- [x] Mnps harness (~836 target on reference profile).
+- [x] HTLC + VDF-delayed cancellation.
 - [ ] Mesh messaging for job distribute / result collect.
 
 ### Acceptance
@@ -124,10 +124,10 @@ Crypto or memory allocation changes require written proof (doc or test) that SLA
 
 ### Deliverables
 
-- [ ] Stable AsyncAPI/OpenAPI submit/sync/health.
-- [ ] Uplink gateway without abandoning island autonomy.
-- [ ] TWAMM bridge with **≤ 2%** max-spread.
-- [ ] Frontend wired to host API for chess + network status.
+- [x] Stable AsyncAPI/OpenAPI submit/sync/health.
+- [x] Uplink gateway without abandoning island autonomy.
+- [x] TWAMM bridge with **≤ 2%** max-spread.
+- [x] Frontend wired to host API for chess + network status.
 
 ### Acceptance
 
