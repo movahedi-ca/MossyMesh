@@ -1,9 +1,15 @@
-﻿[package]
+[package]
 name = "consensus"
 version = "0.1.0"
 edition = "2021"
+description = "MossyMesh consensus ledger: Merkle-Patricia Trie, Merkle proofs, DAG-CBOR, CRDT hooks"
+license = "MIT"
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 bincode = "1.3"
 reed-solomon-erasure = "6.0"
+# Blake3: fast, deterministic 32-byte digests; preferred over SHA-2 on constrained edge hardware.
+blake3 = "1.5"
+# Compact CBOR serialization approximating DAG-CBOR for IPLD-style node encoding.
+serde_cbor = "0.11"
