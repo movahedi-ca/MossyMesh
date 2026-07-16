@@ -1,5 +1,9 @@
 [workspace]
 members = [
     "mesh-transport",
+    "consensus",
+    "engine",
+    "sandbox",
+    "interop",
 ]
 resolver = "2"
