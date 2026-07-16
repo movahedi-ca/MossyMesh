@@ -1,0 +1,17 @@
+[package]
+name = "integration"
+version = "0.1.0"
+edition = "2021"
+description = "Cross-crate smoke tests for MossyMesh (Architect / DevOps harness)"
+publish = false
+
+[dependencies]
+consensus = { path = "../consensus" }
+engine = { path = "../engine" }
+sandbox = { path = "../sandbox" }
+interop = { path = "../interop" }
+mesh-transport = { path = "../mesh-transport", optional = true }
+
+[features]
+default = []
+transport = ["dep:mesh-transport"]
