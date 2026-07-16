@@ -287,9 +287,12 @@ mod tests {
 
     #[test]
     fn test_vrf_overflow_protection() {
-        let max_hash = u64::MAX;
-        let vrf_hash = max_hash - 1000;
+        // High weights that would overflow naive u64 scaling (u128 intermediate required).
+        // Threshold ≈ 99.9999% of u64::MAX; a mid-range hash must still be selected.
+        let vrf_hash = u64::MAX / 2;
         assert!(is_selected_for_task(vrf_hash, 999_999, 1_000_000));
+        // Zero total weight is a safe reject (no panic / no division by zero).
+        assert!(!is_selected_for_task(vrf_hash, 1, 0));
     }
 
     #[test]

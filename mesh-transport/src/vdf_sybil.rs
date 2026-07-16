@@ -66,23 +66,28 @@ impl VdfParams {
     pub fn production() -> Self {
         Self {
             // Portable u64 stand-in; production curves (e.g. Pallas) would use a big-int field.
-            // 1_000_000_007 is prime and 1_000_000_007 % 5 == 2 (≢ 1), so MinRoot `d` is well-defined.
-            modulus: 1_000_000_007,
+            // Require `p ≡ 3 (mod 5)` so classical MinRoot exponent `d = (2p − 1) / 5` is integral.
+            // 1_000_000_033 ≡ 3 (mod 5).
+            modulus: 1_000_000_033,
             iterations: PRODUCTION_ITERATIONS,
         }
     }
 
-    /// Exponent `d = (2p − 1) / 5` used for the fifth-root map when valid.
+    /// Exponent for the fifth-root map when valid.
+    ///
+    /// Prefer the classical MinRoot closed form `d = (2p − 1) / 5` (requires `p ≡ 3 (mod 5)`).
+    /// Otherwise fall back to modular inverse of 5 modulo `(p − 1)` when `p ≢ 1 (mod 5)`.
     pub fn fifth_root_exponent(&self) -> Option<u64> {
         let p = self.modulus;
         if p < 5 || p % 5 == 1 {
             return None;
         }
         let num = 2u128 * p as u128 - 1;
-        if num % 5 != 0 {
-            return None;
+        if num % 5 == 0 {
+            return Some((num / 5) as u64);
         }
-        Some((num / 5) as u64)
+        // d ≡ 5^{-1} (mod p-1)
+        mod_inverse(5, p - 1)
     }
 }
 
@@ -110,6 +115,27 @@ impl EphemeralJobDid {
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
+}
+
+/// Modular inverse of `a` modulo `m` via extended Euclidean algorithm.
+fn mod_inverse(a: u64, m: u64) -> Option<u64> {
+    if m == 0 {
+        return None;
+    }
+    let (mut t, mut new_t) = (0i128, 1i128);
+    let (mut r, mut new_r) = (m as i128, (a % m) as i128);
+    while new_r != 0 {
+        let q = r / new_r;
+        (t, new_t) = (new_t, t - q * new_t);
+        (r, new_r) = (new_r, r - q * new_r);
+    }
+    if r > 1 {
+        return None;
+    }
+    if t < 0 {
+        t += m as i128;
+    }
+    Some(t as u64)
 }
 
 /// Modular exponentiation: `(base^exp) % modulus` using u128 intermediates.
