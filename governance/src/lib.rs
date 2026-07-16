@@ -8,6 +8,16 @@
 //!
 //! DOC: Network starts with admin multi-sig; control transitions to blind edge
 //! voters as admin weight reaches zero after the decay window.
+//!
+//! # Cryptography honesty
+//!
+//! Several hooks use **deterministic hash stubs** so tests stay offline and
+//! free of key material:
+//! - [`multisig::Signature`] — domain-separated SHA-256 “signatures”, not ed25519
+//! - [`voting::BlindingProof`] — commitment binding digest, not a SNARK
+//!
+//! Threshold counting, authority decay, proposal validation, and commit–reveal
+//! integrity are fully enforced. Replace stub crypto before production.
 
 pub mod multisig;
 pub mod staking;
@@ -16,7 +26,7 @@ pub mod wot;
 
 pub use multisig::{AdminMultisig, MultisigError, MultisigProposal, Signature};
 pub use staking::{CollateralLock, QuadraticStaking, StakingError};
-pub use voting::{BallotChoice, BlindedBallot, VotingError, ZkBlindedVoting};
+pub use voting::{BallotChoice, BlindedBallot, BlindingProof, VotingError, ZkBlindedVoting};
 pub use wot::{NodeId, VoucherEdge, WotError, WotGraph};
 
 /// Days until admin multi-sig authority is fully extinguished.
