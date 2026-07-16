@@ -1,0 +1,9 @@
+[package]
+name = "ai"
+version = "0.1.0"
+edition = "2021"
+description = "MossyMesh AI Processing: SITF tensors, Edge PagedAttention, deterministic compute"
+license = "MIT"
+
+[dependencies]
+# Pure-Rust only; no network/cloud crates. Zero external runtime deps for determinism.
