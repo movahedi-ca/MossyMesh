@@ -48,7 +48,11 @@ impl From<PoolError> for HostError {
     fn from(value: PoolError) -> Self {
         match value {
             PoolError::OutOfMemory => HostError::OutOfMemory,
-            other => HostError::Pool(other),
+            // Construction / config faults surface as pool errors (stable string).
+            PoolError::LimitExceedsGlobal
+            | PoolError::InvalidBlockSize
+            | PoolError::ZeroSize
+            | PoolError::InvalidHandle => HostError::Pool(value),
         }
     }
 }
