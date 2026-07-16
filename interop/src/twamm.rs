@@ -98,6 +98,9 @@ pub fn spread_bps(execution_price: u64, reference_price: u64) -> Result<u32, Twa
 }
 
 /// Returns `Ok(spread_bps)` if within the 2% cap, otherwise `Err(SpreadExceeded)`.
+///
+/// Hard reject: any spread **strictly greater than** [`MAX_SPREAD_BPS`] (200 bps = 2%) fails.
+/// Exactly 200 bps is allowed.
 pub fn enforce_max_spread(execution_price: u64, reference_price: u64) -> Result<u32, TwammError> {
     let bps = spread_bps(execution_price, reference_price)?;
     if bps > MAX_SPREAD_BPS {
@@ -107,6 +110,21 @@ pub fn enforce_max_spread(execution_price: u64, reference_price: u64) -> Result<
         });
     }
     Ok(bps)
+}
+
+/// Quote a fill under the hard 2% max-spread cap **without** mutating order state.
+///
+/// Used by both pure quote paths and execution (`stream_slice`) so no TWAMM
+/// quote or fill can exceed 200 bps versus the reference mid.
+pub fn quote_with_spread_cap(
+    side: OrderSide,
+    amount_in: u64,
+    execution_price: u64,
+    reference_price: u64,
+) -> Result<(u64, u32), TwammError> {
+    let bps = enforce_max_spread(execution_price, reference_price)?;
+    let (amount_out, _) = quote_fill(side, amount_in, execution_price)?;
+    Ok((amount_out, bps))
 }
 
 /// Apply a buy or sell against a quoted execution price and return `(amount_out, execution_price)`.
@@ -174,48 +192,68 @@ impl TwammEngine {
         Ok(id)
     }
 
+    /// Preview (quote) the next slice without mutating the book.
+    /// Hard-rejects if the execution price would exceed the 2% max-spread cap.
+    pub fn quote_slice(
+        &self,
+        order_id: &str,
+        execution_price: u64,
+    ) -> Result<StreamFill, TwammError> {
+        let order = self
+            .orders
+            .iter()
+            .find(|o| o.id == order_id)
+            .ok_or(TwammError::OrderNotFound)?;
+
+        if order.slices_remaining == 0 || order.remaining_in == 0 {
+            return Err(TwammError::OrderExhausted);
+        }
+
+        let slices = order.slices_remaining as u64;
+        let amount_in = if slices == 1 {
+            order.remaining_in
+        } else {
+            order.remaining_in / slices
+        };
+        if amount_in == 0 {
+            return Err(TwammError::ZeroAmount);
+        }
+
+        let (amount_out, bps) =
+            quote_with_spread_cap(order.side, amount_in, execution_price, order.reference_price)?;
+
+        Ok(StreamFill {
+            order_id: order_id.to_string(),
+            amount_in,
+            amount_out,
+            execution_price,
+            spread_bps: bps,
+        })
+    }
+
     /// Stream one slice of `order_id` at the given execution price.
-    /// Enforces the global 2% max-spread cap before filling.
+    /// Enforces the global 2% max-spread cap before filling (quote-then-fill).
+    /// On spread rejection the order is left unchanged.
     pub fn stream_slice(
         &mut self,
         order_id: &str,
         execution_price: u64,
     ) -> Result<StreamFill, TwammError> {
+        // Quote path hard-rejects > 200 bps; no mutation on failure.
+        let fill = self.quote_slice(order_id, execution_price)?;
+
         let idx = self
             .orders
             .iter()
             .position(|o| o.id == order_id)
             .ok_or(TwammError::OrderNotFound)?;
 
-        if self.orders[idx].slices_remaining == 0 || self.orders[idx].remaining_in == 0 {
-            return Err(TwammError::OrderExhausted);
-        }
-
-        let bps = enforce_max_spread(execution_price, self.orders[idx].reference_price)?;
-
-        let slices = self.orders[idx].slices_remaining as u64;
-        let amount_in = if slices == 1 {
-            self.orders[idx].remaining_in
-        } else {
-            self.orders[idx].remaining_in / slices
-        };
-        if amount_in == 0 {
-            return Err(TwammError::ZeroAmount);
-        }
-
-        let side = self.orders[idx].side;
-        let (amount_out, exec) = quote_fill(side, amount_in, execution_price)?;
-
-        self.orders[idx].remaining_in = self.orders[idx].remaining_in.saturating_sub(amount_in);
+        self.orders[idx].remaining_in = self.orders[idx]
+            .remaining_in
+            .saturating_sub(fill.amount_in);
         self.orders[idx].slices_remaining -= 1;
 
-        Ok(StreamFill {
-            order_id: order_id.to_string(),
-            amount_in,
-            amount_out,
-            execution_price: exec,
-            spread_bps: bps,
-        })
+        Ok(fill)
     }
 
     /// Peek at an order by id.
@@ -376,5 +414,68 @@ mod tests {
     #[test]
     fn max_spread_constant_is_two_percent() {
         assert_eq!(MAX_SPREAD_BPS, 200);
+    }
+
+    #[test]
+    fn quote_slice_happy_path_within_cap() {
+        let mut eng = TwammEngine::new();
+        let id = eng
+            .submit_order(OrderSide::Sell, 1_000_000, 2, 1_000_000)
+            .unwrap();
+        // 2.00% exactly — allowed
+        let q = eng.quote_slice(&id, 1_020_000).unwrap();
+        assert_eq!(q.spread_bps, 200);
+        assert_eq!(q.amount_in, 500_000);
+        // Quote must not mutate remaining
+        let order = eng.get_order(&id).unwrap();
+        assert_eq!(order.remaining_in, 1_000_000);
+        assert_eq!(order.slices_remaining, 2);
+    }
+
+    #[test]
+    fn quote_and_stream_hard_reject_over_two_percent() {
+        let mut eng = TwammEngine::new();
+        let id = eng
+            .submit_order(OrderSide::Buy, 500_000, 1, 1_000_000)
+            .unwrap();
+
+        // 2.5% = 250 bps
+        let q_err = eng.quote_slice(&id, 1_025_000).unwrap_err();
+        assert!(matches!(
+            q_err,
+            TwammError::SpreadExceeded {
+                spread_bps: 250,
+                max_bps: 200
+            }
+        ));
+
+        let s_err = eng.stream_slice(&id, 1_025_000).unwrap_err();
+        assert!(matches!(s_err, TwammError::SpreadExceeded { .. }));
+
+        // Still fully open after rejections
+        let order = eng.get_order(&id).unwrap();
+        assert_eq!(order.remaining_in, 500_000);
+        assert_eq!(order.slices_remaining, 1);
+
+        // Happy path still works after rejection
+        let fill = eng.stream_slice(&id, 1_010_000).unwrap();
+        assert_eq!(fill.spread_bps, 100);
+    }
+
+    #[test]
+    fn quote_with_spread_cap_rejects_standalone() {
+        let err = quote_with_spread_cap(OrderSide::Sell, 1_000, 1_050_000, 1_000_000).unwrap_err();
+        match err {
+            TwammError::SpreadExceeded { spread_bps, max_bps } => {
+                assert_eq!(spread_bps, 500);
+                assert_eq!(max_bps, MAX_SPREAD_BPS);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+
+        let (out, bps) =
+            quote_with_spread_cap(OrderSide::Sell, 1_000_000, 1_000_000, 1_000_000).unwrap();
+        assert_eq!(bps, 0);
+        assert_eq!(out, 1_000_000);
     }
 }

@@ -271,7 +271,8 @@ impl Htlc {
     /// Cancel via the VDF-delayed path once the sequential delay is complete.
     ///
     /// Unlike timeout refund, this does not wait on chain height — it requires
-    /// burning sequential VDF work, which cannot be parallelized.
+    /// burning sequential VDF work (or an equivalent step counter), which cannot
+    /// be parallelized. Immediate cancel is never allowed.
     pub fn vdf_cancel(&mut self) -> Result<(), HtlcError> {
         match self.state {
             HtlcState::Funded => {}
@@ -284,6 +285,19 @@ impl Htlc {
         }
         self.state = HtlcState::VdfCancelled;
         Ok(())
+    }
+
+    /// Delayed cancel alias: only succeeds after the VDF / step-counter delay.
+    ///
+    /// Equivalent to [`Self::vdf_cancel`]. Prefer this name when the delay
+    /// backend is a generic step counter rather than a cryptographic VDF.
+    pub fn cancel_after_delay(&mut self) -> Result<(), HtlcError> {
+        self.vdf_cancel()
+    }
+
+    /// Whether the VDF / step-counter delay condition for cancel is satisfied.
+    pub fn delay_satisfied(&self) -> bool {
+        self.vdf.is_complete()
     }
 
     /// Whether the contract still holds escrowed funds.
@@ -428,5 +442,79 @@ mod tests {
         a.advance(10);
         assert_eq!(a.current, tip);
         assert_eq!(a.steps_completed, 4);
+    }
+
+    /// No double claim: second claim after a successful preimage reveal fails hard.
+    #[test]
+    fn no_double_claim() {
+        let preimage = b"once-only-preimage";
+        let mut htlc = funded_htlc(preimage, 100, 10);
+
+        htlc.claim(preimage).expect("first claim");
+        assert_eq!(htlc.state, HtlcState::Claimed);
+
+        assert_eq!(
+            htlc.claim(preimage),
+            Err(HtlcError::AlreadySettled),
+            "second claim with same preimage must fail"
+        );
+        assert_eq!(
+            htlc.claim(b"other"),
+            Err(HtlcError::AlreadySettled),
+            "second claim with any preimage must fail"
+        );
+        // State unchanged; cannot refund or cancel after claim either.
+        assert_eq!(htlc.refund(100), Err(HtlcError::AlreadySettled));
+        assert_eq!(htlc.vdf_cancel(), Err(HtlcError::AlreadySettled));
+        assert_eq!(htlc.state, HtlcState::Claimed);
+    }
+
+    /// Cancel is rejected until the VDF / step-counter delay is fully burned.
+    #[test]
+    fn cancel_requires_delay_then_succeeds() {
+        let preimage = b"delay-gate";
+        let mut htlc = funded_htlc(preimage, 10_000, 3);
+
+        assert!(!htlc.delay_satisfied());
+        assert_eq!(
+            htlc.cancel_after_delay(),
+            Err(HtlcError::VdfNotComplete),
+            "cancel before delay must fail"
+        );
+
+        // Partial progress still blocked.
+        htlc.advance_vdf(1).unwrap();
+        assert!(!htlc.delay_satisfied());
+        assert_eq!(htlc.cancel_after_delay(), Err(HtlcError::VdfNotComplete));
+
+        // Complete the remaining steps.
+        htlc.advance_vdf(2).unwrap();
+        assert!(htlc.delay_satisfied());
+        htlc.cancel_after_delay().expect("cancel after delay");
+        assert_eq!(htlc.state, HtlcState::VdfCancelled);
+
+        // No double cancel / no claim after cancel.
+        assert_eq!(htlc.cancel_after_delay(), Err(HtlcError::AlreadySettled));
+        assert_eq!(htlc.claim(preimage), Err(HtlcError::AlreadySettled));
+    }
+
+    /// Step-counter delay (zero-seed sequential counter) gates cancel the same way.
+    #[test]
+    fn step_counter_delay_gates_cancel() {
+        let preimage = b"step-counter";
+        let mut htlc = funded_htlc(preimage, 999, 8);
+        // Treat MockVdf purely as a step counter.
+        assert_eq!(htlc.vdf.steps_completed, 0);
+        assert_eq!(htlc.vdf.remaining(), 8);
+
+        for i in 1..=7 {
+            htlc.advance_vdf(1).unwrap();
+            assert_eq!(htlc.vdf.steps_completed, i);
+            assert_eq!(htlc.vdf_cancel(), Err(HtlcError::VdfNotComplete));
+        }
+        htlc.advance_vdf(1).unwrap();
+        assert_eq!(htlc.vdf.steps_completed, 8);
+        htlc.vdf_cancel().expect("cancel after step counter complete");
+        assert_eq!(htlc.state, HtlcState::VdfCancelled);
     }
 }
