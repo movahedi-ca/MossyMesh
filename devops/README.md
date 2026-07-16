@@ -29,6 +29,19 @@ Portal listens on port 80 by default (`PORTAL_PORT` overrides).
 
 ## CI
 
-GitHub Actions (`.github/workflows/ci.yml`) builds `frontend` and
-`captive-portal`, best-effort `cargo check` per workspace crate, and the
-portal Docker image.
+GitHub Actions (`.github/workflows/ci.yml`) on push/PR to `main` (and push to
+`agent/**`):
+
+| Job | What it runs |
+| --- | --- |
+| Frontend + portal | `npm ci` + build for `frontend` and `captive-portal` |
+| **Cargo test (workspace lib)** | `cargo test --workspace --lib` on `ubuntu-latest` / Rust stable (30m timeout, cargo cache) |
+| Docker portal image | Builds `captive-portal` image after frontend jobs |
+
+**Rust gate notes:** CI uses `--lib` only (unit tests in library crates), not
+`--all-targets`, so bin/integration tests that need RF hardware or long runtime
+do not block the monorepo. If a single crate is known broken, exclude it with
+`cargo test --workspace --lib --exclude <crate>` in the workflow and list it
+here — do not paper over failures with `continue-on-error`.
+
+**Currently excluded:** none.
