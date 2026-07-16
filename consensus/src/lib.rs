@@ -2,6 +2,10 @@
 //! Consensus engine handling state transitions and Merkle-Patricia Trie storage.
 //! DOC 26: This crate implements the decentralized offline ledger using CRDTs and Nova-SNARK proofs.
 
+pub mod crdt;
+pub mod erasure;
+pub mod ring_buffer;
+
 pub fn init_consensus() {
     println!("Consensus (stub): Initializing Trie-DB and Nova SNARKs with 10MB RAM cap rules...");
 }
@@ -38,7 +42,7 @@ impl TrieNode {
         child.insert_node(&key[1..], value);
         
         // Recompute hash (stub)
-        /// DOC 31: The parent node's hash is the keccak256 hash of its children's hashes.
+        // DOC 31: The parent node's hash is the keccak256 hash of its children's hashes.
         self.hash = hash_node();
     }
 
