@@ -4,9 +4,14 @@
 //! edge tensor probes) under a hard **10 MB** RAM ceiling.
 //!
 //! ## Guarantees
-//! - [`MEM_LIMIT`] is an unyielding host-side boundary; pool growth never exceeds it.
+//! - [`MEM_LIMIT`] is an unyielding host-side boundary; pool growth never exceeds it
+//!   (`FixedBlockPool` rejects ceilings above [`MEM_LIMIT`] and OOMs deterministically).
 //! - Memory is served from a **fixed-block** pool ([`pool::FixedBlockPool`]); block
 //!   size is configurable per job.
+//! - **Job admit gate** ([`admit`]): require a verified [`admit::VdfReceipt`] /
+//!   [`admit::JobDid`] before trusted invoke ([`job::Job::admit_and_load`],
+//!   [`job::Job::invoke_admitted`]). Full MinRoot is owned by transport; the
+//!   sandbox ships a domain-separated hash PoW **stub** for local tests.
 //! - **Symmetric Static INT8** helpers ([`quant`]) prepare tensor payloads for edge AI.
 //! - **Job API** ([`job::Job`]): load module bytes → invoke exports → deterministic
 //!   errors on OOM / missing exports.
@@ -21,6 +26,7 @@
 
 #![deny(unsafe_code)]
 
+pub mod admit;
 pub mod host;
 pub mod job;
 pub mod pool;
@@ -30,6 +36,10 @@ pub mod quant;
 pub mod wamr;
 
 // Re-exports for a compact public surface.
+pub use admit::{
+    admit_job, AdmitError, DomainSeparatedHashVdfStub, JobDid, VdfReceipt, VdfVerifier,
+    HASH_VDF_STUB_DEFAULT_MIN_STEPS, HASH_VDF_STUB_DOMAIN,
+};
 pub use host::{HostError, HostRuntime, AUX_STACK_SIZE};
 pub use job::{Job, JobError};
 pub use pool::{BlockHandle, FixedBlockPool, PoolError};
@@ -40,7 +50,10 @@ pub use quant::{
 
 /// DOC 47: The MEM_LIMIT is an unyielding boundary. Any execution crossing 10MB
 /// triggers a deterministic out-of-memory fault (WASM trap equivalent).
-pub const MEM_LIMIT: usize = 1024 * 1024 * 10; // 10 MiB
+///
+/// Value: `10 * 1024 * 1024` (10 MiB). All guest heap paths allocate only through
+/// [`FixedBlockPool`], which refuses ceilings above this constant.
+pub const MEM_LIMIT: usize = 10 * 1024 * 1024; // 10 MiB
 
 /// Default fixed-block size for guest heaps (4 KiB pages).
 pub const DEFAULT_BLOCK_SIZE: usize = 4096;
@@ -89,6 +102,26 @@ impl WamrInstance {
         }
     }
 
+    /// Build an instance only after the VDF / Job DID admit gate succeeds.
+    pub fn admit_new(
+        receipt: &VdfReceipt,
+        verifier: &impl VdfVerifier,
+        module_bytes: Vec<u8>,
+    ) -> Result<Self, JobError> {
+        let bytes = if module_bytes.is_empty() {
+            return Err(JobError::InvalidModule);
+        } else {
+            module_bytes
+        };
+        let job = Job::admit_and_load(receipt, verifier, bytes.clone())?;
+        Ok(WamrInstance {
+            job,
+            memory: Vec::new(),
+            allocated_bytes: 0,
+            module_bytes: bytes,
+        })
+    }
+
     /// Deterministic allocator enforcing the 10MB limit via the fixed-block pool.
     /// DOC 49/50: returns a deterministic `Err` so all network nodes agree on OOM.
     pub fn allocate(&mut self, size: usize) -> Result<usize, &'static str> {
@@ -113,6 +146,25 @@ impl WamrInstance {
             .invoke(func_name, args)
             .map_err(|e| job_error_static(&e))
     }
+
+    /// Invoke only when this instance was admitted (Job DID bound).
+    pub fn invoke_admitted(
+        &mut self,
+        func_name: &str,
+        args: &[u8],
+    ) -> Result<Vec<u8>, &'static str> {
+        self.job
+            .invoke_admitted(func_name, args)
+            .map_err(|e| job_error_static(&e))
+    }
+
+    pub fn is_admitted(&self) -> bool {
+        self.job.is_admitted()
+    }
+
+    pub fn job_did(&self) -> Option<JobDid> {
+        self.job.job_did()
+    }
 }
 
 fn job_error_static(e: &JobError) -> &'static str {
@@ -121,6 +173,17 @@ fn job_error_static(e: &JobError) -> &'static str {
         JobError::ExportNotFound => "FFI Error: Exported function not found in WASM module.",
         JobError::InvalidModule => "Host Error: Invalid or empty WASM module bytes.",
         JobError::AuxStackOverflow => "Host Error: Bounded aux stack overflow.",
+        JobError::NotAdmitted => "Admit denied: job has no verified Job DID.",
+        JobError::Admit(AdmitError::InvalidVdf) => {
+            "Admit denied: VDF receipt verification failed."
+        }
+        JobError::Admit(AdmitError::DidMismatch) => {
+            "Admit denied: Job DID does not match VDF receipt."
+        }
+        JobError::Admit(AdmitError::InsufficientSteps) => {
+            "Admit denied: VDF steps below minimum delay."
+        }
+        JobError::Admit(AdmitError::Rejected(_)) => "Admit denied: VDF receipt rejected.",
         JobError::Runtime(_) => "Host Error: runtime fault.",
     }
 }
@@ -159,6 +222,14 @@ mod tests {
         let err = pool.allocate(1).unwrap_err();
         assert_eq!(err, PoolError::OutOfMemory);
         assert_eq!(err.as_str(), "Allocation failed: 10MB memory limit exceeded.");
+    }
+
+    #[test]
+    fn pool_rejects_over_global_mem_limit() {
+        assert_eq!(
+            FixedBlockPool::with_limit(4096, MEM_LIMIT + 1).unwrap_err(),
+            PoolError::LimitExceedsGlobal
+        );
     }
 
     #[test]
@@ -242,6 +313,23 @@ mod tests {
         let mut inst = WamrInstance::new(b"\0asm".to_vec());
         let err = inst.invoke_wasm_function("nope", &[]).unwrap_err();
         assert_eq!(err, "FFI Error: Exported function not found in WASM module.");
+    }
+
+    #[test]
+    fn wamr_instance_admit_gate() {
+        let stub = DomainSeparatedHashVdfStub::new(8);
+        let receipt = stub.issue(99, 16, 7, b"wamr-admit");
+        let mut inst = WamrInstance::admit_new(&receipt, &stub, b"\0asm".to_vec()).unwrap();
+        assert!(inst.is_admitted());
+        assert_eq!(inst.job_did(), Some(receipt.job_did));
+        let out = inst.invoke_admitted("get_best_move", &[]).unwrap();
+        assert_eq!(out, vec![0xE2, 0xE4]);
+
+        // Unadmitted legacy instance cannot use invoke_admitted.
+        let mut legacy = WamrInstance::new(b"\0asm".to_vec());
+        assert!(!legacy.is_admitted());
+        let err = legacy.invoke_admitted("get_best_move", &[]).unwrap_err();
+        assert_eq!(err, "Admit denied: job has no verified Job DID.");
     }
 
     #[test]
