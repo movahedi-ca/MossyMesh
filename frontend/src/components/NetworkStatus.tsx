@@ -1,34 +1,31 @@
-import React, { useEffect, useState } from 'react';
+import { useMeshNetwork, type MeshLinkMode } from "../hooks/useMeshNetwork";
 
-export const NetworkStatus: React.FC = () => {
-  const [isOnline, setIsOnline] = useState(navigator.onLine);
+function labelFor(mode: MeshLinkMode, islandName: string): { text: string; tone: "online" | "island" | "local" } {
+  switch (mode) {
+    case "internet": return { text: "Mesh Bridged · WAN", tone: "online" };
+    case "island": return { text: `Island · ${islandName}`, tone: "island" };
+    default: return { text: "Offline · Local Island", tone: "local" };
+  }
+}
 
-  useEffect(() => {
-    const handleOnline = () => setIsOnline(true);
-    const handleOffline = () => setIsOnline(false);
-
-    window.addEventListener('online', handleOnline);
-    window.addEventListener('offline', handleOffline);
-
-    return () => {
-      window.removeEventListener('online', handleOnline);
-      window.removeEventListener('offline', handleOffline);
-    };
-  }, []);
-
+export const NetworkStatus = () => {
+  const mesh = useMeshNetwork();
+  const badge = labelFor(mesh.linkMode, mesh.islandName);
   return (
-    <div style={{ position: 'absolute', top: '1rem', right: '1rem', zIndex: 100 }}>
-      {isOnline ? (
-        <div className="status-badge" style={{ borderColor: 'rgba(69, 243, 255, 0.4)', background: 'rgba(69, 243, 255, 0.1)' }}>
-          <span className="status-dot"></span>
-          Mesh Linked
-        </div>
-      ) : (
-        <div className="status-badge" style={{ borderColor: 'rgba(251, 45, 127, 0.4)', background: 'rgba(251, 45, 127, 0.1)', color: '#fb2d7f' }}>
-          <span className="status-dot" style={{ backgroundColor: '#fb2d7f', boxShadow: '0 0 10px #fb2d7f', animation: 'none' }}></span>
-          Offline (Local Island)
-        </div>
-      )}
+    <div className="network-status-stack">
+      <div className={`status-badge mesh-link mesh-link--${badge.tone}`}>
+        <span className={`status-dot mesh-dot--${badge.tone}`} />
+        {badge.text}
+      </div>
+      <div className="mesh-metrics" title={mesh.lastSyncLabel}>
+        <span><strong>{mesh.peerCount}</strong> peers</span>
+        <span className="mesh-metrics-sep">·</span>
+        <span><strong>{mesh.loraPeers}</strong> LoRa</span>
+        <span className="mesh-metrics-sep">·</span>
+        <span className={mesh.dhtReady ? "dht-ready" : "dht-boot"}>
+          {mesh.dhtReady ? "DHT ready" : "DHT…"}
+        </span>
+      </div>
     </div>
   );
 };
