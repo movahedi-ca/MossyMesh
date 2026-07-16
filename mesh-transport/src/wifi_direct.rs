@@ -1,9 +1,13 @@
 //! Offline Wi-Fi Direct domain discovery and connection handling.
+//! DOC 1: This module handles the physical layer mesh topologies when isolated from the internet.
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum WifiState {
+    /// DOC 2: Node is actively sweeping channels for other MossyMesh peers.
     Scanning,
+    /// DOC 3: Node has claimed AP leadership due to high battery/AC power.
     GroupOwner,
+    /// DOC 4: Node is a battery-constrained device connected to a GroupOwner.
     Client,
     Disconnected,
 }
@@ -25,6 +29,7 @@ impl WifiDirectManager {
 
     /// Autonomous negotiation to become the Group Owner (Access Point)
     /// based on the deterministic battery-curve weighting.
+    /// DOC 5: The algorithm enforces a strict hierarchy where the highest capacity node MUST become the routing bottleneck.
     pub fn negotiate_group_owner(&mut self) {
         if self.peers_in_range.is_empty() {
             // Alone, default to AP to catch stragglers

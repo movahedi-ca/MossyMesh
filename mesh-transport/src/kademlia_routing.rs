@@ -1,8 +1,10 @@
 //! Advanced DHT pathfinding and nearest-neighbor logic.
 //! Math Problem 2: Kademlia XOR Metric Distance
+//! DOC 6: The DHT relies entirely on the XOR mathematical distance metric to map nodes without DNS.
 
 /// Computes the XOR logical distance between two 256-bit PeerIDs.
 /// The distance metric determines the routing table buckets in Kademlia.
+/// DOC 7: XOR ensures symmetry: d(A,B) == d(B,A).
 pub fn xor_distance(node_a: &[u8; 32], node_b: &[u8; 32]) -> [u8; 32] {
     let mut distance = [0u8; 32];
     for i in 0..32 {
@@ -13,6 +15,7 @@ pub fn xor_distance(node_a: &[u8; 32], node_b: &[u8; 32]) -> [u8; 32] {
 
 /// Helper function to calculate the leading zeros of the XOR distance.
 /// This determines which bucket the node belongs to.
+/// DOC 8: By counting leading zeros, we mathematically partition the 256-bit keyspace into exactly 256 buckets.
 pub fn calculate_bucket_index(distance: &[u8; 32]) -> usize {
     let mut leading_zeros = 0;
     for &byte in distance.iter() {
@@ -55,6 +58,7 @@ impl RoutingTable {
 
     /// Insert a node into the appropriate k-bucket.
     /// Kademlia constant k = 20.
+    /// DOC 9: The k=20 limit ensures maximum network resilience while preventing unbounded RAM growth per bucket.
     pub fn insert_node(&mut self, local_id: &[u8; 32], remote_id: &[u8; 32]) {
         let dist = xor_distance(local_id, remote_id);
         let bucket_idx = calculate_bucket_index(&dist);
@@ -81,6 +85,7 @@ impl RoutingTable {
     }
 }
 
+/// DOC 10: Recursive node lookup stub for $\mathcal{O}(\log N)$ resolution.
 pub fn find_node(target: &[u8; 32]) -> Option<[u8; 32]> {
     // Stub
     None
