@@ -2,7 +2,16 @@
 name = "sandbox"
 version = "0.1.0"
 edition = "2021"
+description = "WAMR/WASI execution sandbox with 10 MB RAM cap, fixed-block pools, and INT8 quantization"
+license = "MIT"
+
+[features]
+default = []
+# Optional native WAMR FFI surface. Default builds use the pure-Rust host
+# simulation so `cargo test -p sandbox` works without system WAMR libraries.
+# Enabling `wamr` exposes integration hooks; it does not link native WAMR
+# unless a future `wamr-sys` dependency is added for your platform.
+wamr = []
 
 [dependencies]
-# Stub dependencies for Phase 1
 serde = { version = "1.0", features = ["derive"] }
