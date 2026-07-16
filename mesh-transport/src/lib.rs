@@ -3,6 +3,7 @@ pub mod ble_mesh;
 pub mod kademlia_routing;
 pub mod stun_hole_punch;
 pub mod identity_manager;
+pub mod network;
 pub mod wifi_direct;
 pub mod packet_translator;
 pub mod encryption_layer;
@@ -14,17 +15,21 @@ pub mod honeypot;
 pub mod hash_chain;
 pub mod vdf_sybil;
 pub mod topology;
+pub mod simulation;
 
 pub fn init_mesh_transport() {
-    // Placeholder for reticulum-rs initialization
+    // Placeholder for reticulum-rs initialization (libp2p Kademlia used instead)
     println!("Mesh Transport layer initialized.");
-    
-    // Initialize 16-agent transport layers
-    lora_mac::init_lora_mac();
-    ble_mesh::init_ble_mesh();
+
+    // Core identity-based routing stack (TransportAgent)
+    identity_manager::init_identity_manager();
     kademlia_routing::init_kademlia_routing();
     stun_hole_punch::init_stun_hole_punch();
-    identity_manager::init_identity_manager();
+    network::init_network();
+
+    // Remaining transport layers (owned by other agents)
+    lora_mac::init_lora_mac();
+    ble_mesh::init_ble_mesh();
     wifi_direct::init_wifi_direct();
     packet_translator::init_packet_translator();
     encryption_layer::init_encryption_layer();
