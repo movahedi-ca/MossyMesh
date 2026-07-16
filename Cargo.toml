@@ -1,9 +1,10 @@
-[workspace]
+﻿[workspace]
 members = [
     "mesh-transport",
     "consensus",
     "engine",
     "sandbox",
     "interop",
+    "ai",
 ]
 resolver = "2"
