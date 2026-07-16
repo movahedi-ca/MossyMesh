@@ -42,3 +42,33 @@ pub fn init_vdf_sybil() {
     let step1 = compute_minroot_step(start, 1, p);
     println!("VDF Step 1 (p={}): {} -> {}", p, start, step1);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_modular_exponentiation() {
+        let base = 5;
+        let exp = 3;
+        let p = 13;
+        // 5^3 = 125. 125 % 13 = 8.
+        let res = mod_exp(base, exp, p);
+        assert_eq!(res, 8);
+    }
+
+    #[test]
+    fn test_minroot_sequential_delay() {
+        let p = 101; // safe prime
+        let start = 42;
+        
+        let step1 = compute_minroot_step(start, 1, p);
+        let step2 = compute_minroot_step(step1, 2, p);
+        let step3 = compute_minroot_step(step2, 3, p);
+        
+        // Verifying exactly 3 steps works
+        assert!(verify_vdf(start, 3, step3, p));
+        // Verifying invalid output fails
+        assert!(!verify_vdf(start, 3, step2, p));
+    }
+}

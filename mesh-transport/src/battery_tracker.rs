@@ -52,3 +52,38 @@ pub fn init_battery_tracker() {
     let w_high = calculate_battery_weight(50);
     println!("Battery weights -> 15%: {}, 20%: {}, 50%: {}", w_low, w_mid, w_high);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_battery_threshold_death() {
+        // Battery is heavily penalized below 20%. Specifically 10% is fully dead (0 weight).
+        let weight = calculate_battery_weight(9);
+        assert_eq!(weight, 0);
+    }
+
+    #[test]
+    fn test_battery_ac_power() {
+        // Battery >= 30% acts as AC power (max weight 1000).
+        let weight = calculate_battery_weight(100);
+        assert_eq!(weight, 1000);
+        let weight_30 = calculate_battery_weight(30);
+        assert_eq!(weight_30, 1000);
+    }
+
+    #[test]
+    fn test_battery_curve_determinism() {
+        // Curve scaling verification
+        let w_15 = calculate_battery_weight(15);
+        let w_20 = calculate_battery_weight(20); // The threshold
+        let w_25 = calculate_battery_weight(25);
+        
+        assert!(w_15 < w_20);
+        assert!(w_20 < w_25);
+        
+        // Exact integer mapping for the 20% cliff
+        assert_eq!(w_20, 500); // exactly at 20% diff = 0, weight = 500
+    }
+}

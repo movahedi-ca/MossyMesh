@@ -36,3 +36,34 @@ pub struct VrfProof {
     pub hash: [u8; 32],
     pub signature: [u8; 64],
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_vrf_sortition_selection() {
+        let max_hash = u64::MAX;
+        
+        // If node has 50% of the network weight, threshold should be ~50% of max_hash
+        // Let's use a hash that is exactly 25% of max_hash.
+        let vrf_hash = max_hash / 4;
+        
+        // Node with 50% network weight (100 out of 200) -> selected (25% < 50%)
+        assert!(is_selected_for_task(vrf_hash, 100, 200));
+        
+        // Node with 10% network weight (20 out of 200) -> rejected (25% > 10%)
+        assert!(!is_selected_for_task(vrf_hash, 20, 200));
+    }
+
+    #[test]
+    fn test_vrf_overflow_protection() {
+        // High weights that might overflow standard u64 scaling
+        let max_hash = u64::MAX;
+        let vrf_hash = max_hash - 1000;
+        
+        // Very high node weight, close to total. 
+        // Should not panic (because we use u128 intermediate).
+        assert!(is_selected_for_task(vrf_hash, 999_999, 1_000_000));
+    }
+}

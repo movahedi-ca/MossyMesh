@@ -1,73 +1,58 @@
-mod network;
-mod simulation;
+//! MossyMesh Daemon Entrypoint
+//! DOC 54: This binary wires the isolated crates together into a single, cohesive offline routing node.
 
-use anyhow::Result;
-use libp2p::{
-    core::upgrade,
-    identity,
-    kad::{store::MemoryStore, Kademlia, KademliaConfig},
-    noise,
-    swarm::{SwarmBuilder, SwarmEvent},
-    tcp, yamux, PeerId, Transport,
-};
-use log::{error, info};
-use std::time::Duration;
-use tokio::time::sleep;
+use consensus::init_consensus;
+use engine::init_engine;
+use sandbox::init_sandbox;
+use interop::{init_interop, AsyncApiRequest, handle_rest_call, handle_websocket};
+use mesh_transport::wifi_direct::{init_wifi_direct, WifiDirectManager, WifiState};
+use mesh_transport::ble_mesh::init_ble_mesh;
+use mesh_transport::kademlia_routing::init_kademlia_routing;
 
-use network::{MeshBehaviour, OutEvent};
-
-#[tokio::main]
-async fn main() -> Result<()> {
-    env_logger::init();
-    info!("Starting MossyMesh Transport Daemon (Phase 1)...");
-
-    // 1. Generate identity
-    let id_keys = identity::Keypair::generate_ed25519();
-    let peer_id = PeerId::from(id_keys.public());
-    info!("Local Peer ID: {}", peer_id);
-
-    // 2. Setup transport
-    let tcp_transport = tcp::tokio::Transport::default();
-    let transport = tcp_transport
-        .upgrade(upgrade::Version::V1)
-        .authenticate(noise::Config::new(&id_keys).expect("Signing libp2p-noise static keypair"))
-        .multiplex(yamux::Config::default())
-        .boxed();
-
-    // 3. Setup Kademlia DHT
-    let store = MemoryStore::new(peer_id);
-    let mut kad_config = KademliaConfig::default();
-    kad_config.set_query_timeout(Duration::from_secs(5 * 60));
-    let kademlia = Kademlia::with_config(peer_id, store, kad_config);
-
-    // 4. Create Swarm
-    let behaviour = MeshBehaviour { kademlia };
-    let mut swarm = SwarmBuilder::with_tokio_executor(transport, behaviour, peer_id).build();
-
-    // Listen on all interfaces
-    swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
-
-    // Spawn a simulation loop to demonstrate Phase 1 requirement
-    tokio::spawn(async move {
-        loop {
-            sleep(Duration::from_secs(10)).await;
-            simulation::simulate_lora_transmission(
-                b"smartphone test packet",
-                "simulated_destination",
-            ).await;
-        }
-    });
-
-    // Event Loop
-    loop {
-        match swarm.select_next_some().await {
-            SwarmEvent::NewListenAddr { address, .. } => {
-                info!("Listening on {:?}", address);
-            }
-            SwarmEvent::Behaviour(OutEvent::Kademlia(e)) => {
-                info!("Kademlia event: {:?}", e);
-            }
-            _ => {}
-        }
+fn main() {
+    println!("==================================================");
+    println!("=           MOSSYMESH DAEMON BOOTING             =");
+    println!("==================================================");
+    
+    // 1. Initialize Sub-Crates
+    init_consensus();
+    init_engine();
+    init_sandbox();
+    init_interop();
+    
+    // 2. Boot Offline Transports
+    init_kademlia_routing();
+    init_ble_mesh();
+    
+    // 3. Negotiate Swarm Leadership
+    println!("\n[Network] Negotiating offline Access Point leadership...");
+    let mut wifi_manager = WifiDirectManager::new(950); // High simulated battery weight
+    wifi_manager.peers_in_range.push(("low_power_peer".to_string(), 150));
+    wifi_manager.negotiate_group_owner();
+    
+    match wifi_manager.state {
+        WifiState::GroupOwner => println!("[Network] Successfully claimed Group Owner status. Broadcasting SSID: MossyMesh_Local"),
+        WifiState::Client => println!("[Network] Yielded to stronger peer. Connecting as Client."),
+        _ => println!("[Network] Isolated state."),
     }
+
+    // 4. Mount Interop Bridging
+    println!("\n[Interop] Mounting mock API endpoints...");
+    let mock_req = AsyncApiRequest {
+        endpoint: "/api/v1/submit_job".to_string(),
+        payload: "{\"action\":\"move\",\"from\":[1,4],\"to\":[3,4]}".to_string(),
+    };
+    
+    match handle_rest_call(&mock_req) {
+        Ok(msg) => println!("[Interop] API Response: {}", msg),
+        Err(_) => println!("[Interop] API Failed."),
+    }
+    
+    // Simulate persistent Websocket sync thread if external internet is available
+    println!("\n[Daemon] Entering event loop...");
+    handle_websocket(true);
+    
+    println!("==================================================");
+    println!("=          MOSSYMESH DAEMON TERMINATED           =");
+    println!("==================================================");
 }

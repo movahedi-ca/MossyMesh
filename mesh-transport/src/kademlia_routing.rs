@@ -90,3 +90,37 @@ pub fn find_node(target: &[u8; 32]) -> Option<[u8; 32]> {
     // Stub
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_xor_symmetry() {
+        let a = [0b10101010; 32];
+        let b = [0b01010101; 32];
+        let dist_ab = xor_distance(&a, &b);
+        let dist_ba = xor_distance(&b, &a);
+        
+        // Proof: Distance is symmetric.
+        assert_eq!(dist_ab, dist_ba);
+        
+        // Proof: Distance to self is 0.
+        let dist_aa = xor_distance(&a, &a);
+        assert_eq!(dist_aa, [0u8; 32]);
+    }
+
+    #[test]
+    fn test_bucket_index() {
+        let mut dist = [0u8; 32];
+        dist[31] = 1; // Least significant bit set (distance 1)
+        
+        let bucket = calculate_bucket_index(&dist);
+        assert_eq!(bucket, 0); // Should be in bucket 0
+
+        let mut dist2 = [0u8; 32];
+        dist2[0] = 0b10000000; // Most significant bit set
+        let bucket2 = calculate_bucket_index(&dist2);
+        assert_eq!(bucket2, 255); // Should be in highest bucket (255)
+    }
+}
