@@ -45,6 +45,42 @@ pub struct RoutingTable {
     pub buckets: Vec<Vec<[u8; 32]>>,
 }
 
+impl RoutingTable {
+    pub fn new() -> Self {
+        // 256 buckets for 256-bit space
+        RoutingTable {
+            buckets: vec![Vec::new(); 256],
+        }
+    }
+
+    /// Insert a node into the appropriate k-bucket.
+    /// Kademlia constant k = 20.
+    pub fn insert_node(&mut self, local_id: &[u8; 32], remote_id: &[u8; 32]) {
+        let dist = xor_distance(local_id, remote_id);
+        let bucket_idx = calculate_bucket_index(&dist);
+        
+        let bucket = &mut self.buckets[bucket_idx];
+        
+        // Eviction / update logic
+        if let Some(pos) = bucket.iter().position(|id| id == remote_id) {
+            // Node exists, move to tail (most recently seen)
+            let node = bucket.remove(pos);
+            bucket.push(node);
+        } else {
+            if bucket.len() < 20 {
+                // Space available, insert at tail
+                bucket.push(remote_id.clone());
+            } else {
+                // Bucket full (k=20 limit reached). 
+                // In full Kademlia, we'd ping the head (oldest). If it responds, drop new.
+                // If it fails, drop head and push new. 
+                // For Phase 1 constraint mapping, we simulate dropping the new node.
+                println!("Bucket {} full, eviction policy triggered.", bucket_idx);
+            }
+        }
+    }
+}
+
 pub fn find_node(target: &[u8; 32]) -> Option<[u8; 32]> {
     // Stub
     None
