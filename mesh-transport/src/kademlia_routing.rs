@@ -157,8 +157,8 @@ impl RoutingTable {
         }
 
         let idx = bucket_for(&self.local_id, &contact.id);
-        let bucket = &mut self.buckets[idx];
         contact.last_seen = self.next_tick();
+        let bucket = &mut self.buckets[idx];
 
         if let Some(pos) = bucket.iter().position(|c| c.id == contact.id) {
             // Move to tail (most recently seen).

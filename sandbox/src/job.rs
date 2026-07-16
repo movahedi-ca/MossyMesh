@@ -109,12 +109,26 @@ impl Job {
     /// Verify a VDF receipt, then load the module under the global MEM_LIMIT pool.
     ///
     /// This is the Phase-2 production entry: no guest work without a Job DID.
+    /// Verification is mandatory (`verify_receipt` / MinRoot or stub).
     pub fn admit_and_load(
         receipt: &VdfReceipt,
         verifier: &impl VdfVerifier,
         module_bytes: impl Into<Vec<u8>>,
     ) -> Result<Self, JobError> {
         Self::admit_and_load_with_config(receipt, verifier, module_bytes, DEFAULT_BLOCK_SIZE, MEM_LIMIT)
+    }
+
+    /// Admit when a receipt may be absent: `None` → [`AdmitError::MissingVdf`].
+    pub fn admit_and_load_required(
+        receipt: Option<&VdfReceipt>,
+        verifier: &impl VdfVerifier,
+        module_bytes: impl Into<Vec<u8>>,
+    ) -> Result<Self, JobError> {
+        use crate::admit::admit_job_required;
+        let did = admit_job_required(receipt, verifier)?;
+        let mut job = Self::load_with_config(module_bytes, DEFAULT_BLOCK_SIZE, MEM_LIMIT)?;
+        job.admitted_did = Some(did);
+        Ok(job)
     }
 
     /// Admit + load with custom block size / mem ceiling (tests).
@@ -125,6 +139,7 @@ impl Job {
         block_size: usize,
         mem_limit: usize,
     ) -> Result<Self, JobError> {
+        // Gate: sequential VDF / stub verify is required before any module load.
         let did = admit_job(receipt, verifier)?;
         let mut job = Self::load_with_config(module_bytes, block_size, mem_limit)?;
         job.admitted_did = Some(did);
@@ -221,5 +236,30 @@ mod tests {
         receipt.final_x = receipt.final_x.wrapping_add(1);
         let err = Job::admit_and_load(&receipt, &stub, b"\0asm").unwrap_err();
         assert!(matches!(err, JobError::Admit(AdmitError::InvalidVdf)));
+        if let JobError::Admit(e) = err {
+            assert_eq!(e.code(), "INVALID_VDF");
+        }
+    }
+
+    #[test]
+    fn missing_receipt_never_loads_module() {
+        let stub = DomainSeparatedHashVdfStub::default();
+        let err = Job::admit_and_load_required(None, &stub, b"\0asm").unwrap_err();
+        assert!(matches!(err, JobError::Admit(AdmitError::MissingVdf)));
+        if let JobError::Admit(e) = err {
+            assert_eq!(e.code(), "MISSING_VDF");
+        }
+    }
+
+    #[test]
+    fn minroot_admit_and_load() {
+        use crate::admit::MinRootVdfVerifier;
+        let v = MinRootVdfVerifier::for_tests(8);
+        let receipt = v.issue_test(11, 16, b"chess-eval").unwrap();
+        let mut job = Job::admit_and_load(&receipt, &v, b"\0asm").unwrap();
+        assert!(job.is_admitted());
+        assert_eq!(job.job_did(), Some(receipt.job_did));
+        let out = job.invoke_admitted("get_best_move", &[]).unwrap();
+        assert_eq!(out, vec![0xE2, 0xE4]);
     }
 }

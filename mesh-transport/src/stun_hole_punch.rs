@@ -301,7 +301,7 @@ impl HolePunchSession {
     }
 
     /// Drive the machine until terminal state or `max_ticks`.
-    pub fn run_until_done<C: Clock, H: NatHeuristic, T: PunchTransport>(
+    pub fn run_until_done<H: NatHeuristic, T: PunchTransport>(
         &mut self,
         clock: &mut StepClock,
         heuristic: &H,
