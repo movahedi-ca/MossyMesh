@@ -1,0 +1,11 @@
+**/node_modules
+**/dist
+**/target
+**/.git
+**/.github
+**/swarm/__pycache__
+**/*.pyc
+**/.env
+**/.DS_Store
+MossyMesh/
+u/

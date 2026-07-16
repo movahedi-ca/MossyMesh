@@ -1,121 +1,63 @@
-import { useState } from 'react'
-import reactLogo from './assets/react.svg'
-import viteLogo from './assets/vite.svg'
-import heroImg from './assets/hero.png'
 import './App.css'
 
+/**
+ * MessyMash captive-portal landing.
+ * Shown when devices join the offline mesh Wi-Fi AP and OS connectivity
+ * checks are redirected by nginx (see nginx.conf).
+ */
 function App() {
-  const [count, setCount] = useState(0)
-
   return (
-    <>
-      <section id="center">
-        <div className="hero">
-          <img src={heroImg} className="base" width="170" height="179" alt="" />
-          <img src={reactLogo} className="framework" alt="React logo" />
-          <img src={viteLogo} className="vite" alt="Vite logo" />
+    <div className="shell">
+      <div className="glass-panel">
+        <div className="status-badge" role="status">
+          <span className="status-dot" aria-hidden="true" />
+          CAPTIVE PORTAL ACTIVE
         </div>
-        <div>
-          <h1>Get started</h1>
-          <p>
-            Edit <code>src/App.tsx</code> and save to test <code>HMR</code>
-          </p>
-        </div>
-        <button
-          type="button"
-          className="counter"
-          onClick={() => setCount((count) => count + 1)}
-        >
-          Count is {count}
-        </button>
-      </section>
 
-      <div className="ticks"></div>
-
-      <section id="next-steps">
-        <div id="docs">
-          <svg className="icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#documentation-icon"></use>
-          </svg>
-          <h2>Documentation</h2>
-          <p>Your questions, answered</p>
-          <ul>
-            <li>
-              <a href="https://vite.dev/" target="_blank">
-                <img className="logo" src={viteLogo} alt="" />
-                Explore Vite
-              </a>
-            </li>
-            <li>
-              <a href="https://react.dev/" target="_blank">
-                <img className="button-icon" src={reactLogo} alt="" />
-                Learn more
-              </a>
-            </li>
-          </ul>
+        <div className="brand-mark" aria-hidden="true">
+          <span className="brand-glyph">M</span>
         </div>
-        <div id="social">
-          <svg className="icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#social-icon"></use>
-          </svg>
-          <h2>Connect with us</h2>
-          <p>Join the Vite community</p>
-          <ul>
-            <li>
-              <a href="https://github.com/vitejs/vite" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#github-icon"></use>
-                </svg>
-                GitHub
-              </a>
-            </li>
-            <li>
-              <a href="https://chat.vite.dev/" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#discord-icon"></use>
-                </svg>
-                Discord
-              </a>
-            </li>
-            <li>
-              <a href="https://x.com/vite_js" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#x-icon"></use>
-                </svg>
-                X.com
-              </a>
-            </li>
-            <li>
-              <a href="https://bsky.app/profile/vite.dev" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#bluesky-icon"></use>
-                </svg>
-                Bluesky
-              </a>
-            </li>
-          </ul>
-        </div>
-      </section>
 
-      <div className="ticks"></div>
-      <section id="spacer"></section>
-    </>
+        <h1>MessyMash</h1>
+        <p className="subtitle">Offline-First Decentralized Chess Grid</p>
+
+        <p className="lede">
+          Welcome to the offline Captive Portal. You are connected to an
+          isolated mesh island. No internet is required — packets route locally
+          via Kademlia DHT, BLE, and LoRa.
+        </p>
+
+        <div className="actions">
+          <a className="btn btn-primary" href="/app/">
+            Enter Chess Grid
+          </a>
+          <a className="btn btn-ghost" href="/app/#network">
+            View Mesh Status
+          </a>
+        </div>
+
+        <ul className="feature-list">
+          <li>
+            <strong>Serverless</strong>
+            <span>No ISP, DNS, or cloud dependency</span>
+          </li>
+          <li>
+            <strong>Deterministic</strong>
+            <span>Cross-device state transitions for chess PoC</span>
+          </li>
+          <li>
+            <strong>Edge-ready</strong>
+            <span>Pi, phone, and ESP32 mesh nodes</span>
+          </li>
+        </ul>
+
+        <footer className="portal-footer">
+          <span>MossyMesh · MessyMash.com</span>
+          <span className="sep">·</span>
+          <span>150M asset transfers enabled</span>
+        </footer>
+      </div>
+    </div>
   )
 }
 
