@@ -4,7 +4,15 @@
 
 pub mod crdt;
 pub mod erasure;
+pub mod folding;
 pub mod ring_buffer;
+pub mod snark;
+
+pub use folding::{fold_proofs, fold_sequence, fold_snarks, verify_folded_proof, verify_preprocessing};
+pub use snark::{
+    MicroSpartanPreprocessing, PublicInput, SnarkProof, StepInstance, ANCHOR_PROOF_SIZE,
+    MAX_VERIFICATION_PAYLOAD_BYTES, MICROSPARTAN_GATE_COUNT, MICROSPARTAN_PREPROCESS_META_BYTES,
+};
 
 pub fn init_consensus() {
     println!("Consensus (stub): Initializing Trie-DB and Nova SNARKs with 10MB RAM cap rules...");
@@ -83,17 +91,15 @@ pub struct MerkleProof {
 pub fn verify_proof() -> bool { true }
 pub fn hash_node() -> [u8; 32] { [0; 32] }
 
-pub struct SnarkProof {
-    /// DOC 33: SNARK proofs are serialized zero-knowledge constructs validating the correct execution of WASM steps.
-    pub proof_bytes: Vec<u8>,
+/// DOC 33: Compatibility wrapper — verify a SNARK public blob is well-formed and constant-size.
+pub fn verify_snark(proof: &SnarkProof) -> bool {
+    snark::verify_snark(proof)
 }
-pub fn verify_snark() -> bool { true }
-
-/// DOC 34: Nova-SNARK folding allows us to compress an infinite sequence of state transitions into a single, constant-sized proof.
-pub fn fold_snarks() {}
 
 /// DOC 35: The strict 10MB memory limit ensures that even the lowest-end IoT devices can maintain the active ledger state.
 pub const MAX_LEDGER_SIZE: usize = 10_000_000;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ConsensusError {
     InvalidProof,
     OutOfMemory,
