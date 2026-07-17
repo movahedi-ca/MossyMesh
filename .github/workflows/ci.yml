@@ -45,19 +45,13 @@ jobs:
             npm run build
           fi
 
-  rust:
-    name: Cargo check (${{ matrix.crate }})
+  # Workspace lib unit tests only (--lib): skips integration/bin tests that are
+  # heavier or environment-dependent. Prefer --exclude <crate> (and document in
+  # devops/README.md) over continue-on-error if a single crate is known broken.
+  rust-lib:
+    name: Cargo test (workspace lib)
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        # Best-effort matrix over workspace members
-        crate:
-          - mesh-transport
-          - consensus
-          - engine
-          - sandbox
-          - interop
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -66,29 +60,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: '. -> target'
-          shared-key: ${{ matrix.crate }}
+          shared-key: workspace-lib
 
-      - name: cargo check -p ${{ matrix.crate }}
-        # Best-effort: do not fail the whole matrix on one crate while stubs evolve
-        continue-on-error: true
-        run: cargo check -p ${{ matrix.crate }} --all-targets
-
-  rust-workspace:
-    name: Cargo check (workspace)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: '. -> target'
-          shared-key: workspace
-
-      - name: cargo check --workspace
-        continue-on-error: true
-        run: cargo check --workspace --all-targets
+      - name: cargo test --workspace --lib
+        run: cargo test --workspace --lib
 
   docker-portal:
     name: Docker portal image
