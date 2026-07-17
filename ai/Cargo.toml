@@ -7,3 +7,21 @@ license = "MIT"
 
 [dependencies]
 # Pure-Rust only; no network/cloud crates. Zero external runtime deps for determinism.
+
+[features]
+default = []
+# ---------------------------------------------------------------------------
+# Vulkan / GPU
+# ---------------------------------------------------------------------------
+# There is NO real Vulkan ICD, ash, or shader pipeline in this crate.
+# `VulkanBackend` is always a pure-Rust *stub*:
+#   - `is_available()` is false unless `force_available` is set for tests
+#   - when forced, ops delegate to `CpuBackend` (CPU parity, not GPU)
+#
+# The `vulkan-stub` feature exists only to document that intent and to give
+# call-sites a compile-time flag for "I know I'm using the stub path".
+# Enabling it does **not** link drivers, allocate VkBuffers, or accelerate
+# matmul/attention. A future real backend would use a separate feature
+# (e.g. `vulkan`) with optional deps — do not conflate the two.
+# ---------------------------------------------------------------------------
+vulkan-stub = []

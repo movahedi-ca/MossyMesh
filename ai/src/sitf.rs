@@ -1,29 +1,44 @@
-//! SITF — Simple Intermediate Tensor Format
+//! # SITF — Simple Intermediate Tensor Format
 //!
-//! A compact, endian-aware on-wire tensor blob for edge AI transfer and
-//! deterministic replay. Layout (little-endian):
+//! Compact, endian-aware on-wire tensor blob for edge AI transfer and
+//! deterministic replay. Fully offline; no external dependencies.
+//!
+//! ## On-wire layout (little-endian)
 //!
 //! ```text
 //! magic:      4 bytes  b"SITF"
-//! version:    u16
+//! version:    u16      (currently [`SITF_VERSION`] = 1)
 //! dtype:      u8       (0 = INT8, 1 = FP32)
-//! rank:       u8       (number of dimensions, 0..=8)
+//! rank:       u8       (number of dimensions, 0..=[`MAX_RANK`])
 //! shape:      rank × u32
-//! nbytes:     u64      (payload length)
+//! nbytes:     u64      (payload length in bytes)
 //! data:       nbytes bytes (row-major, little-endian elements)
 //! ```
+//!
+//! ## Public API
+//!
+//! | Construct | Wire | Inspect |
+//! | --- | --- | --- |
+//! | [`SitfTensor::new`], [`zeros`](SitfTensor::zeros), [`from_f32`](SitfTensor::from_f32), [`from_i8`](SitfTensor::from_i8) | [`to_bytes`](SitfTensor::to_bytes) / [`from_bytes`](SitfTensor::from_bytes) | [`numel`](SitfTensor::numel), [`as_f32_vec`](SitfTensor::as_f32_vec), [`as_i8_slice`](SitfTensor::as_i8_slice) |
+//!
+//! Encoding the same tensor twice yields **identical** byte sequences (deterministic).
 
 use std::fmt;
 
 /// Supported element types for SITF tensors.
+///
+/// Tags are stable on the wire (`as_u8` / `from_u8`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum DType {
+    /// Symmetric / static INT8 quantization path (1 byte per element).
     Int8 = 0,
+    /// IEEE-754 binary32, little-endian on the wire (4 bytes per element).
     Fp32 = 1,
 }
 
 impl DType {
+    /// Parse a wire dtype tag. Returns `None` for unknown tags.
     pub fn from_u8(v: u8) -> Option<Self> {
         match v {
             0 => Some(DType::Int8),
@@ -32,6 +47,7 @@ impl DType {
         }
     }
 
+    /// Size in bytes of one scalar element.
     pub fn element_size(self) -> usize {
         match self {
             DType::Int8 => 1,
@@ -39,6 +55,7 @@ impl DType {
         }
     }
 
+    /// Wire tag for this dtype.
     pub fn as_u8(self) -> u8 {
         self as u8
     }
@@ -50,18 +67,25 @@ pub const MAX_RANK: usize = 8;
 /// Format version written by this crate.
 pub const SITF_VERSION: u16 = 1;
 
-/// Magic bytes identifying a SITF blob.
+/// Magic bytes identifying a SITF blob (`b"SITF"`).
 pub const SITF_MAGIC: &[u8; 4] = b"SITF";
 
 /// Errors produced while encoding or decoding SITF tensors.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SitfError {
+    /// Buffer does not start with [`SITF_MAGIC`].
     BadMagic,
+    /// Header version is not [`SITF_VERSION`].
     UnsupportedVersion(u16),
+    /// Dtype tag is not a known [`DType`].
     UnknownDType(u8),
+    /// Rank exceeds [`MAX_RANK`].
     RankTooLarge(usize),
+    /// Payload length does not match `∏shape × element_size`.
     ShapeMismatch { expected_elems: usize, data_len: usize },
+    /// Buffer shorter than header + claimed payload.
     Truncated { needed: usize, got: usize },
+    /// Shape product or length arithmetic overflowed.
     Overflow,
 }
 
@@ -90,10 +114,20 @@ impl fmt::Display for SitfError {
 impl std::error::Error for SitfError {}
 
 /// Owned SITF tensor: shape + dtype + contiguous row-major payload.
+///
+/// Invariants (enforced by constructors):
+/// - `shape.len() ≤ MAX_RANK`
+/// - `data.len() == element_count(shape) * dtype.element_size()`
+///
+/// Fields are public for inspection and mesh hand-off; prefer constructors
+/// over manual field assembly so size checks stay consistent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SitfTensor {
+    /// Dimension sizes (row-major; empty shape = one scalar element).
     pub shape: Vec<u32>,
+    /// Element type (INT8 or FP32).
     pub dtype: DType,
+    /// Raw payload bytes (LE elements for FP32).
     pub data: Vec<u8>,
 }
 
@@ -125,12 +159,14 @@ impl SitfTensor {
         Self::new(shape, dtype, vec![0u8; nbytes])
     }
 
-    /// Number of scalar elements.
+    /// Number of scalar elements (`∏ shape`, or `1` for rank-0).
     pub fn numel(&self) -> usize {
         element_count(&self.shape).unwrap_or(0)
     }
 
     /// Serialize to the SITF binary layout (little-endian).
+    ///
+    /// Deterministic: same tensor fields always produce the same byte vector.
     pub fn to_bytes(&self) -> Result<Vec<u8>, SitfError> {
         if self.shape.len() > MAX_RANK {
             return Err(SitfError::RankTooLarge(self.shape.len()));
@@ -214,7 +250,7 @@ impl SitfTensor {
         Self::new(shape, dtype, data)
     }
 
-    /// View payload as `i8` slices when dtype is INT8.
+    /// View payload as `i8` when dtype is INT8.
     pub fn as_i8_slice(&self) -> Option<&[i8]> {
         if self.dtype != DType::Int8 {
             return None;
@@ -239,7 +275,7 @@ impl SitfTensor {
         )
     }
 
-    /// Build an FP32 tensor from `f32` values.
+    /// Build an FP32 tensor from `f32` values (encoded little-endian).
     pub fn from_f32(shape: Vec<u32>, values: &[f32]) -> Result<Self, SitfError> {
         let elems = element_count(&shape)?;
         if values.len() != elems {
@@ -343,5 +379,47 @@ mod tests {
             .unwrap();
         let err = SitfTensor::from_bytes(&bytes[..10]);
         assert!(matches!(err, Err(SitfError::Truncated { .. })));
+    }
+
+    /// Encoding is bit-stable across repeated calls (deterministic tensor ops).
+    #[test]
+    fn encode_deterministic_across_runs() {
+        let t = SitfTensor::from_f32(vec![2, 2], &[1.25, -0.5, 3.0, 0.0]).unwrap();
+        let b1 = t.to_bytes().unwrap();
+        let b2 = t.to_bytes().unwrap();
+        assert_eq!(b1, b2);
+        // Magic + version header is fixed.
+        assert_eq!(&b1[0..4], b"SITF");
+        assert_eq!(u16::from_le_bytes([b1[4], b1[5]]), SITF_VERSION);
+        assert_eq!(b1[6], DType::Fp32.as_u8());
+        assert_eq!(b1[7], 2); // rank
+    }
+
+    /// Golden on-wire header for a known INT8 vector (layout regression).
+    #[test]
+    fn golden_int8_wire_header() {
+        let t = SitfTensor::from_i8(vec![2], &[10, -20]).unwrap();
+        let bytes = t.to_bytes().unwrap();
+        // magic + ver + dtype + rank + shape(2) + nbytes(2) + data
+        assert_eq!(&bytes[0..4], b"SITF");
+        assert_eq!(bytes[6], 0); // Int8
+        assert_eq!(bytes[7], 1); // rank 1
+        assert_eq!(u32::from_le_bytes(bytes[8..12].try_into().unwrap()), 2);
+        assert_eq!(u64::from_le_bytes(bytes[12..20].try_into().unwrap()), 2);
+        assert_eq!(bytes[20], 10u8);
+        assert_eq!(bytes[21], (-20i8) as u8);
+    }
+
+    #[test]
+    fn scalar_rank0_numel() {
+        let t = SitfTensor::from_i8(vec![], &[42]).unwrap();
+        assert_eq!(t.numel(), 1);
+        assert_eq!(element_count(&[]).unwrap(), 1);
+    }
+
+    #[test]
+    fn fp32_le_payload_bits() {
+        let t = SitfTensor::from_f32(vec![1], &[1.0f32]).unwrap();
+        assert_eq!(t.data, 1.0f32.to_le_bytes().to_vec());
     }
 }

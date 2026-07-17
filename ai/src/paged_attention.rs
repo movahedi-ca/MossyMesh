@@ -1,11 +1,41 @@
-//! Edge PagedAttention — page table for disk-mapped / memory-backed context windows.
+//! # Edge PagedAttention
 //!
-//! Simulates vLLM-style paged KV cache management without GPU drivers:
-//! - Logical token slots map to fixed-size physical pages.
-//! - Pages may live in RAM or on a memory-mapped file (disk-mapped context).
-//! - Eviction is deterministic LRU by generation counter (no wall-clock).
+//! Page table for disk-mapped / memory-backed context windows.
+//!
+//! Simulates vLLM-style paged KV cache management **without GPU drivers**:
+//!
+//! - Logical token slots map to fixed-size physical pages
+//! - Pages may live in RAM ([`PageTable::new_memory`]) or on a file
+//!   ([`PageTable::new_file`] — disk-mapped *simulation*, not OS `mmap`)
+//! - Eviction is **deterministic LRU** by a monotonic generation counter
+//!   (no wall-clock; same op sequence → same victim)
 //!
 //! Fully offline; no network.
+//!
+//! ## Public API
+//!
+//! ### High-level: [`PagedAttention`]
+//!
+//! Token-oriented helper (one page per token for stable addressing):
+//!
+//! 1. [`PagedAttention::new_memory`] / [`PagedAttention::new_file`]
+//! 2. [`PagedAttention::append_token`] or [`PagedAttention::append_tensor`]
+//! 3. [`PagedAttention::gather`] / [`PagedAttention::gather_fp32_tensor`]
+//! 4. Optional [`PagedAttention::clear`]
+//!
+//! ### Low-level: [`PageTable`]
+//!
+//! Slot → physical page map with explicit lifecycle:
+//!
+//! - [`PageTable::map_slot`] / [`PageTable::unmap_slot`]
+//! - [`PageTable::write_slot`] / [`PageTable::read_slot`]
+//! - Inspect: [`PageTable::snapshot`], [`PageTable::mapped_count`], [`PageTable::backend_kind`]
+//!
+//! ### Types
+//!
+//! - [`PageId`] — opaque physical page handle
+//! - [`PageBackendKind`] — `Memory` vs `File`
+//! - [`PagedAttentionError`] — full / missing page / bad slot / I/O / SITF
 
 use std::collections::HashMap;
 use std::fmt;
@@ -22,11 +52,18 @@ pub struct PageId(pub u32);
 /// Errors for page table / paged attention operations.
 #[derive(Debug)]
 pub enum PagedAttentionError {
+    /// No free physical pages and eviction could not satisfy the request,
+    /// or the logical context window is full ([`PagedAttention::append_token`]).
     Full,
+    /// Referenced page is not present in the in-memory pool.
     MissingPage(PageId),
+    /// Logical slot index is outside the configured capacity.
     BadSlot { slot: usize, capacity: usize },
+    /// File-backed I/O failure.
     Io(std::io::Error),
+    /// Nested SITF construction / shape error.
     Sitf(SitfError),
+    /// `page_size` / token byte length is zero or mismatched write length.
     InvalidPageSize,
 }
 
@@ -84,6 +121,10 @@ struct PhysicalPage {
 ///
 /// Logical layout: `capacity_slots` contiguous token/context slots.
 /// Each slot holds exactly one page of `page_size` bytes.
+///
+/// When the physical pool (`max_physical_pages`) is smaller than the logical
+/// window, [`PageTable::map_slot`] / writes may evict the least-recently-used
+/// page (lowest `last_used` generation) and clear its slot mapping.
 #[derive(Debug)]
 pub struct PageTable {
     page_size: usize,
@@ -128,9 +169,10 @@ impl PageTable {
         })
     }
 
-    /// Create a file-backed page table. Pages are written/read at fixed offsets
-    /// in `path` (simulates mmap'd context without requiring OS-specific APIs
-    /// for the logical path).
+    /// Create a file-backed page table.
+    ///
+    /// Pages are written/read at fixed offsets in `path` (simulates mmap'd
+    /// context without requiring OS-specific APIs on the logical path).
     pub fn new_file(
         path: impl AsRef<Path>,
         page_size: usize,
@@ -166,20 +208,24 @@ impl PageTable {
         })
     }
 
+    /// Bytes per physical page.
     pub fn page_size(&self) -> usize {
         self.page_size
     }
 
+    /// Number of logical slots in the context window.
     pub fn capacity_slots(&self) -> usize {
         self.capacity_slots
     }
 
+    /// Memory vs file storage backend.
     pub fn backend_kind(&self) -> PageBackendKind {
         self.backend
     }
 
     /// Allocate (or reuse) a physical page and map it to `slot`.
-    /// Returns the PageId assigned. Existing mapping at slot is freed first.
+    ///
+    /// Returns the [`PageId`] assigned. Any existing mapping at `slot` is freed first.
     pub fn map_slot(&mut self, slot: usize) -> Result<PageId, PagedAttentionError> {
         if slot >= self.capacity_slots {
             return Err(PagedAttentionError::BadSlot {
@@ -200,6 +246,8 @@ impl PageTable {
     }
 
     /// Write `data` (must be exactly `page_size`) into the page mapped at `slot`.
+    ///
+    /// Auto-maps the slot if it is currently unmapped.
     pub fn write_slot(&mut self, slot: usize, data: &[u8]) -> Result<(), PagedAttentionError> {
         if data.len() != self.page_size {
             return Err(PagedAttentionError::InvalidPageSize);
@@ -390,6 +438,9 @@ impl PageTable {
 
 /// High-level Edge PagedAttention helper: stores per-token key/value slices
 /// in the page table and gathers a contiguous context window.
+///
+/// One token occupies one page (`token_bytes == page_size`) for simple,
+/// stable addressing suitable for edge offline replay.
 #[derive(Debug)]
 pub struct PagedAttention {
     table: PageTable,
@@ -404,7 +455,8 @@ pub struct PagedAttention {
 impl PagedAttention {
     /// Create a memory-backed paged attention context.
     ///
-    /// `token_bytes` is the serialized KV size per token (e.g. 2 * head_dim * sizeof(f32)).
+    /// `token_bytes` is the serialized KV size per token
+    /// (e.g. `2 * head_dim * size_of::<f32>()`).
     pub fn new_memory(
         token_bytes: usize,
         max_tokens: usize,
@@ -444,23 +496,29 @@ impl PagedAttention {
         })
     }
 
+    /// Number of tokens currently stored (`0..max_tokens`).
     pub fn len(&self) -> usize {
         self.next_token
     }
 
+    /// Whether the context window has no tokens.
     pub fn is_empty(&self) -> bool {
         self.next_token == 0
     }
 
+    /// Configured maximum token count for this window.
     pub fn max_tokens(&self) -> usize {
         self.max_tokens
     }
 
+    /// Borrow the underlying page table (inspection / advanced control).
     pub fn page_table(&self) -> &PageTable {
         &self.table
     }
 
     /// Append a token's KV bytes to the context. Returns the token index.
+    ///
+    /// Errors if `kv.len() != token_bytes` or the window is full.
     pub fn append_token(&mut self, kv: &[u8]) -> Result<usize, PagedAttentionError> {
         if kv.len() != self.token_bytes {
             return Err(PagedAttentionError::InvalidPageSize);
@@ -475,6 +533,8 @@ impl PagedAttention {
     }
 
     /// Append from an INT8 or FP32 SITF tensor (raw payload used as KV bytes).
+    ///
+    /// Payload length must equal `token_bytes`.
     pub fn append_tensor(&mut self, t: &SitfTensor) -> Result<usize, PagedAttentionError> {
         if t.data.len() != self.token_bytes {
             return Err(PagedAttentionError::InvalidPageSize);
@@ -498,7 +558,7 @@ impl PagedAttention {
     }
 
     /// Gather as a rank-2 SITF FP32 tensor if payload length is a multiple of 4:
-    /// shape = [num_tokens, floats_per_token].
+    /// shape = `[num_tokens, floats_per_token]`.
     pub fn gather_fp32_tensor(
         &mut self,
         start: usize,
@@ -596,5 +656,44 @@ mod tests {
         let out = pa.gather_fp32_tensor(0, 1).unwrap();
         let vals = out.as_f32_vec().unwrap();
         assert_eq!(vals, vec![1.5, -2.5]);
+    }
+
+    /// Same append sequence always gathers the same bytes (deterministic context).
+    #[test]
+    fn gather_deterministic_across_runs() {
+        let kv = [
+            [1u8, 2, 3, 4],
+            [5, 6, 7, 8],
+            [9, 10, 11, 12],
+        ];
+        let mut g1 = {
+            let mut pa = PagedAttention::new_memory(4, 8, 8).unwrap();
+            for row in &kv {
+                pa.append_token(row).unwrap();
+            }
+            pa.gather(0, 3).unwrap()
+        };
+        let g2 = {
+            let mut pa = PagedAttention::new_memory(4, 8, 8).unwrap();
+            for row in &kv {
+                pa.append_token(row).unwrap();
+            }
+            pa.gather(0, 3).unwrap()
+        };
+        assert_eq!(g1, g2);
+        g1.clear(); // ensure we didn't alias
+        assert_eq!(g2.len(), 12);
+    }
+
+    #[test]
+    fn snapshot_maps_slots_deterministically() {
+        let mut pt = PageTable::new_memory(4, 3, 3).unwrap();
+        let id0 = pt.map_slot(0).unwrap();
+        let id1 = pt.map_slot(1).unwrap();
+        let snap = pt.snapshot();
+        assert_eq!(snap[0], Some(id0));
+        assert_eq!(snap[1], Some(id1));
+        assert_eq!(snap[2], None);
+        assert_eq!(pt.backend_kind(), PageBackendKind::Memory);
     }
 }
