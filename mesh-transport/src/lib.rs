@@ -41,4 +41,5 @@ pub fn init_mesh_transport() {
     hash_chain::init_hash_chain();
     vdf_sybil::init_vdf_sybil();
     topology::init_topology();
+    simulation::init_simulation();
 }
