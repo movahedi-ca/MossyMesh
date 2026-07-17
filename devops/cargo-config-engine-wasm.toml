@@ -1,0 +1,17 @@
+# Optional Cargo config fragment for engine wasm32-wasip1 work.
+#
+# NOT applied automatically. Merge into workspace `.cargo/config.toml` only when
+# you need a WASI test runner, or pass equivalent flags via:
+#
+#   cargo build -p engine --target wasm32-wasip1 \
+#     --config 'target.wasm32-wasip1.runner="wasmtime"'
+#
+# CRITICAL: do not set [build] target = "wasm32-wasip1".
+# Host `cargo test -p engine` and default builds must remain native.
+
+[target.wasm32-wasip1]
+# Uncomment when wasmtime (or another WASI runner) is on PATH:
+# runner = "wasmtime"
+
+# Optional: prefer rust-lld if your host linker path is awkward (usually unnecessary).
+# linker = "rust-lld"
