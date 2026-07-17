@@ -5,6 +5,10 @@
 //!
 //! See `docs/integration-smoke-plan.md` for SMK-01…SMK-08 IDs.
 //! This crate only adds thin glue; product logic lives in peer crates.
+//!
+//! The job pipeline is a **real offline cross-crate path** (not host-only stubs):
+//! interop accept → test MinRoot VDF admit → sandbox invoke → engine startpos/eval
+//! → consensus ledger insert + Merkle proof verify.
 
 /// SMK-01 style bootstrap: crate inits must remain panic-free.
 pub fn smoke_bootstrap() {
@@ -16,19 +20,132 @@ pub fn smoke_bootstrap() {
     mesh_transport::init_mesh_transport();
 }
 
-/// Logical job pipeline used by SMK-06 (interop admit → sandbox invoke).
-pub fn stub_job_pipeline(module_bytes: Vec<u8>) -> Result<Vec<u8>, String> {
+// ─── Real job pipeline (SMK-06) ──────────────────────────────────────────────
+
+/// Deterministic offline result of the multi-crate job pipeline.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JobPipelineResult {
+    /// Ephemeral Job DID minted from the verified VDF receipt.
+    pub job_did: sandbox::JobDid,
+    /// Guest export bytes from admitted sandbox invoke (`get_best_move`).
+    pub sandbox_output: Vec<u8>,
+    /// Engine legal-move count at startpos.
+    pub legal_moves: usize,
+    /// Engine evaluation (centipawns, white perspective) at startpos.
+    pub eval_cp: i32,
+    /// Merkle-Patricia root after committing the job result.
+    pub ledger_root: [u8; 32],
+    /// Whether the inclusion proof verified against `ledger_root`.
+    pub proof_ok: bool,
+    /// Active ledger size estimate (must stay ≤ [`consensus::MAX_LEDGER_SIZE`]).
+    pub ledger_bytes: usize,
+}
+
+/// Real cross-crate job pipeline (offline / fast).
+///
+/// ```text
+/// interop::handle_rest_call(/api/v1/submit_job)
+///   → sandbox::MinRootVdfVerifier::for_tests + Job::admit_and_load
+///   → Job::invoke_admitted("get_best_move")
+///   → engine::EngineState startpos eval + legal moves
+///   → consensus::MerklePatriciaTrie insert + prove + verify_proof
+/// ```
+///
+/// Uses test MinRoot (small iteration count), never production 50M steps.
+pub fn job_pipeline(module_bytes: Vec<u8>) -> Result<JobPipelineResult, String> {
+    // 1) Interop gateway accepts the job (REST surface).
     let req = interop::AsyncApiRequest {
         endpoint: "/api/v1/submit_job".to_string(),
         payload: "startpos".to_string(),
     };
-    interop::handle_rest_call(&req).map_err(|_| "interop rejected job".to_string())?;
+    let accept = interop::handle_rest_call(&req).map_err(|_| "interop rejected job".to_string())?;
+    if accept.is_empty() {
+        return Err("interop empty accept body".to_string());
+    }
 
-    let mut instance = sandbox::WamrInstance::new(module_bytes);
-    instance
-        .invoke_wasm_function("get_best_move", &[])
-        .map_err(|e| e.to_string())
+    // 2) Sandbox admit gate with **test** MinRoot VDF (fast, offline).
+    let verifier = sandbox::MinRootVdfVerifier::for_tests(8);
+    let receipt = verifier
+        .issue_test(11, 16, b"integration-job-startpos")
+        .map_err(|e| format!("vdf issue: {}", e.as_str()))?;
+    let mut job = sandbox::Job::admit_and_load(&receipt, &verifier, module_bytes)
+        .map_err(|e| format!("admit_and_load: {}", e.as_str()))?;
+    if !job.is_admitted() {
+        return Err("job not marked admitted after VDF gate".to_string());
+    }
+    let job_did = job
+        .job_did()
+        .ok_or_else(|| "missing Job DID after admit".to_string())?;
+    assert_eq!(job_did, receipt.job_did);
+
+    // 3) Admitted invoke only (unadmitted jobs must refuse this path).
+    let sandbox_output = job
+        .invoke_admitted("get_best_move", &[])
+        .map_err(|e| format!("invoke_admitted: {}", e.as_str()))?;
+    if sandbox_output.is_empty() {
+        return Err("sandbox returned empty get_best_move".to_string());
+    }
+
+    // 4) Engine public API: startpos legal moves + deterministic eval.
+    let eng = engine::EngineState::new();
+    let legal_moves = eng.legal_move_count();
+    let eval_cp = eng.evaluate_position();
+    // Sanity: startpos is well-formed.
+    if legal_moves == 0 {
+        return Err("engine startpos has zero legal moves".to_string());
+    }
+    // Eval must be stable (no wall clock / RNG).
+    if eng.evaluate_position() != eval_cp {
+        return Err("engine eval non-deterministic".to_string());
+    }
+
+    // 5) Consensus: commit job result under DID-keyed path, prove inclusion.
+    let mut ledger = consensus::MerklePatriciaTrie::new();
+    // Key binds the Job DID so the ledger entry is job-scoped.
+    let mut key = b"job/result/".to_vec();
+    key.extend_from_slice(job_did.as_bytes());
+    // Value: sandbox output || eval LE bytes (compact offline receipt).
+    let mut value = sandbox_output.clone();
+    value.extend_from_slice(&eval_cp.to_le_bytes());
+    value.extend_from_slice(&(legal_moves as u32).to_le_bytes());
+
+    ledger
+        .insert(&key, value)
+        .map_err(|e| format!("ledger insert: {e:?}"))?;
+    let ledger_root = ledger.root_hash();
+    let proof = ledger
+        .prove(&key)
+        .map_err(|e| format!("ledger prove: {e:?}"))?;
+    let proof_ok = consensus::verify_proof(&proof, &ledger_root)
+        .map_err(|e| format!("verify_proof: {e:?}"))?;
+    let ledger_bytes = ledger.size_bytes();
+    if ledger_bytes > consensus::MAX_LEDGER_SIZE {
+        return Err("ledger exceeds MAX_LEDGER_SIZE".to_string());
+    }
+    if !proof_ok {
+        return Err("merkle proof failed verification".to_string());
+    }
+
+    Ok(JobPipelineResult {
+        job_did,
+        sandbox_output,
+        legal_moves,
+        eval_cp,
+        ledger_root,
+        proof_ok,
+        ledger_bytes,
+    })
 }
+
+/// Thin legacy alias: same as [`job_pipeline`] but returns only sandbox output bytes.
+///
+/// Prefer [`job_pipeline`] for new harness code. Kept so older SMK-06 call sites
+/// and docs that mention a "stub" still have a drop-in that is no longer stub-only.
+pub fn stub_job_pipeline(module_bytes: Vec<u8>) -> Result<Vec<u8>, String> {
+    job_pipeline(module_bytes).map(|r| r.sandbox_output)
+}
+
+// ─── Focused glue helpers (used by companion SMK tests) ─────────────────────
 
 /// Cross-crate glue: engine legal-move count for a FEN (or startpos).
 pub fn engine_legal_move_count(fen: Option<&str>) -> Result<usize, String> {
@@ -37,6 +154,42 @@ pub fn engine_legal_move_count(fen: Option<&str>) -> Result<usize, String> {
         None => engine::EngineState::new(),
     };
     Ok(eng.legal_move_count())
+}
+
+/// Cross-crate glue: startpos evaluation (white perspective, centipawns).
+pub fn engine_startpos_eval() -> i32 {
+    engine::EngineState::new().evaluate_position()
+}
+
+/// Cross-crate glue: Merkle insert + prove + verify for a single key/value.
+/// Returns `(root_hash, proof_ok)`.
+pub fn consensus_insert_and_prove(key: &[u8], value: Vec<u8>) -> Result<([u8; 32], bool), String> {
+    let mut ledger = consensus::MerklePatriciaTrie::new();
+    ledger
+        .insert(key, value)
+        .map_err(|e| format!("insert: {e:?}"))?;
+    let root = ledger.root_hash();
+    let proof = ledger.prove(key).map_err(|e| format!("prove: {e:?}"))?;
+    let ok = consensus::verify_proof(&proof, &root).map_err(|e| format!("verify: {e:?}"))?;
+    Ok((root, ok))
+}
+
+/// Cross-crate glue: sandbox admit with test MinRoot VDF, then admitted invoke.
+pub fn sandbox_admit_invoke(
+    export: &str,
+    args: &[u8],
+    module_bytes: Vec<u8>,
+) -> Result<(sandbox::JobDid, Vec<u8>), String> {
+    let verifier = sandbox::MinRootVdfVerifier::for_tests(8);
+    let receipt = verifier
+        .issue_test(42, 16, b"sandbox-admit-smoke")
+        .map_err(|e| format!("vdf issue: {}", e.as_str()))?;
+    let mut job = sandbox::Job::admit_and_load(&receipt, &verifier, module_bytes)
+        .map_err(|e| format!("admit: {}", e.as_str()))?;
+    let out = job
+        .invoke_admitted(export, args)
+        .map_err(|e| format!("invoke: {}", e.as_str()))?;
+    Ok((receipt.job_did, out))
 }
 
 /// Cross-crate glue: CRDT island merge via public `consensus::crdt::Doc` API.
@@ -126,7 +279,7 @@ mod tests {
     }
 
     // --- SMK-03 ---
-    /// SMK-03: `smoke_engine_startpos` — startpos has 20 legal moves.
+    /// SMK-03: `smoke_engine_startpos` — startpos has 20 legal moves + stable eval.
     #[test]
     fn smoke_engine_startpos() {
         let eng = engine::EngineState::new();
@@ -138,6 +291,13 @@ mod tests {
         assert_eq!(via_fen.legal_move_count(), 20);
         let reloaded = engine::EngineState::from_fen(&eng.to_fen()).expect("to_fen");
         assert_eq!(reloaded.legal_move_count(), 20);
+        // Eval surface: deterministic white-perspective score at startpos.
+        let eval = eng.evaluate_position();
+        assert_eq!(eval, engine_startpos_eval());
+        assert_eq!(eval, via_fen.evaluate_position());
+        assert_eq!(eval, eng.evaluate_stm()); // white to move
+        assert!(!eng.is_game_over());
+        assert!(!eng.is_check());
     }
 
     /// SMK-03 companion: make/unmake + shallow search stay deterministic offline.
@@ -161,6 +321,7 @@ mod tests {
         // Eval is stable (no RNG / wall clock).
         assert_eq!(eng.evaluate_position(), eng.evaluate_position());
         assert_eq!(engine::MAX_DEPTH, 64);
+        assert!(engine::DEFAULT_SEARCH_DEPTH <= engine::MAX_DEPTH);
     }
 
     // --- SMK-04 ---
@@ -201,6 +362,12 @@ mod tests {
         assert_eq!(ledger.get(b"account/2").as_deref(), Some(b"500".as_slice()));
         assert_ne!(ledger.root_hash(), root);
         assert!(ledger.size_bytes() <= consensus::MAX_LEDGER_SIZE);
+
+        // Focused glue: insert + prove + verify in one call.
+        let (r2, ok) =
+            consensus_insert_and_prove(b"smoke/key", b"value".to_vec()).expect("glue prove");
+        assert!(ok);
+        assert_ne!(r2, [0u8; 32]);
     }
 
     /// SMK-04 companion: real YATA/RGA CRDT Doc merge converges across islands.
@@ -288,13 +455,54 @@ mod tests {
     }
 
     // --- SMK-06 ---
-    /// SMK-06: `smoke_job_pipeline_stub` — submit_job → sandbox get_best_move non-empty.
+    /// SMK-06: real job pipeline — interop → MinRoot admit → sandbox → engine → consensus.
     #[test]
-    fn smoke_job_pipeline_stub() {
-        let out = stub_job_pipeline(vec![0x00, 0x61, 0x73, 0x6d]).expect("pipeline");
-        assert!(!out.is_empty());
-        // Host sim returns stub best-move bytes for get_best_move.
+    fn smoke_job_pipeline() {
+        let result = job_pipeline(vec![0x00, 0x61, 0x73, 0x6d]).expect("pipeline");
+        // Sandbox host sim returns stub best-move bytes for get_best_move.
+        assert_eq!(result.sandbox_output, vec![0xE2, 0xE4]);
+        assert_ne!(*result.job_did.as_bytes(), [0u8; 32]);
+        // Engine startpos surfaces.
+        assert_eq!(result.legal_moves, 20);
+        assert_eq!(result.eval_cp, engine_startpos_eval());
+        // Consensus proof verified and ledger within SLA.
+        assert!(result.proof_ok);
+        assert!(result.ledger_bytes <= consensus::MAX_LEDGER_SIZE);
+        assert_ne!(result.ledger_root, [0u8; 32]);
+
+        // Legacy thin alias still returns non-empty guest bytes.
+        let out = stub_job_pipeline(vec![0x00, 0x61, 0x73, 0x6d]).expect("alias");
+        assert_eq!(out, result.sandbox_output);
+    }
+
+    /// SMK-06 companion: sandbox admit with test MinRoot is required for trusted invoke.
+    #[test]
+    fn smoke_sandbox_vdf_admit() {
+        let (did, out) =
+            sandbox_admit_invoke("get_best_move", &[], b"\0asm".to_vec()).expect("admit invoke");
         assert_eq!(out, vec![0xE2, 0xE4]);
+        assert_ne!(*did.as_bytes(), [0u8; 32]);
+
+        // Unadmitted job refuses invoke_admitted.
+        let mut bare = sandbox::Job::load(b"\0asm".to_vec()).expect("load");
+        assert!(!bare.is_admitted());
+        assert_eq!(
+            bare.invoke_admitted("get_best_move", &[]).unwrap_err(),
+            sandbox::JobError::NotAdmitted
+        );
+
+        // Tampered receipt never loads.
+        let v = sandbox::MinRootVdfVerifier::for_tests(8);
+        let mut bad = v.issue_test(1, 16, b"x").expect("issue");
+        bad.final_x = bad.final_x.wrapping_add(1);
+        let err = sandbox::Job::admit_and_load(&bad, &v, b"\0asm").unwrap_err();
+        assert!(matches!(
+            err,
+            sandbox::JobError::Admit(sandbox::AdmitError::InvalidVdf)
+        ));
+        // Test constants stay separated from production delay.
+        assert!(sandbox::DEFAULT_TEST_ITERATIONS < sandbox::PRODUCTION_ITERATIONS);
+        assert_eq!(sandbox::PRODUCTION_ITERATIONS, 50_000_000);
     }
 
     /// SMK-06 companion: evaluate_move export also returns non-empty via Job path.
@@ -318,7 +526,9 @@ mod tests {
         assert!(path.total_cost > 0);
         // Direct LoRa is expensive; multi-hop Wifi+Ble should be preferred.
         assert!(
-            path.hops.iter().all(|h| h.link != mesh_transport::topology::LinkType::LoRa)
+            path.hops
+                .iter()
+                .all(|h| h.link != mesh_transport::topology::LinkType::LoRa)
                 || path.total_cost
                     <= mesh_transport::topology::compute_edge_cost(
                         mesh_transport::topology::LinkType::LoRa,
