@@ -2,8 +2,27 @@
 //!
 //! Ballots use a commit–reveal scheme. The commit blinds the choice with a
 //! nonce and optional blinding factor; reveal opens the ballot for tallying.
-//! Full zero-knowledge proofs are stubbed behind [`BlindingProof`] but the
-//! commit–reveal integrity and tally logic are fully tested.
+//!
+//! # Cryptography status (honest stub)
+//!
+//! [`BlindingProof`] is **not** a zero-knowledge proof. It is a deterministic
+//! SHA-256 binding of `(domain || commitment || voter)` that lets unit tests
+//! reject tampered commits without network or a proving system. Production
+//! must replace [`BlindingProof::stub`] / [`BlindingProof::verify`] with a real
+//! SNARK (or similar) that proves the commitment was well-formed without
+//! revealing the choice until the reveal phase.
+//!
+//! Commitments themselves are fully specified and deterministic:
+//! ```text
+//! H( domain
+//!    || le64(proposal_id)
+//!    || voter[32]
+//!    || choice_byte
+//!    || le64(nonce_len) || nonce
+//!    || le64(blinding_len) || blinding )
+//! ```
+//! Length prefixes make the encoding unambiguous. Commit–reveal integrity and
+//! tally logic are fully tested offline (no network).
 
 use std::collections::HashMap;
 
@@ -11,6 +30,12 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::wot::NodeId;
+
+/// Domain tag for ballot commitments (versioned; changing it invalidates all commits).
+pub const COMMIT_DOMAIN: &[u8] = b"mm-zk-ballot-v1";
+
+/// Domain tag for stub blinding proofs.
+pub const PROOF_DOMAIN: &[u8] = b"mm-blind-proof-v1";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum BallotChoice {
@@ -20,7 +45,7 @@ pub enum BallotChoice {
 }
 
 impl BallotChoice {
-    fn as_byte(self) -> u8 {
+    pub fn as_byte(self) -> u8 {
         match self {
             BallotChoice::Yes => 1,
             BallotChoice::No => 2,
@@ -28,7 +53,7 @@ impl BallotChoice {
         }
     }
 
-    fn from_byte(b: u8) -> Option<Self> {
+    pub fn from_byte(b: u8) -> Option<Self> {
         match b {
             1 => Some(BallotChoice::Yes),
             2 => Some(BallotChoice::No),
@@ -38,28 +63,39 @@ impl BallotChoice {
     }
 }
 
-/// Stub ZK blinding proof: attests the commit was formed correctly without
-/// revealing the choice until the reveal phase. Production would attach a SNARK.
+/// Stub ZK blinding proof: attests the commit was formed under a known domain
+/// binding without revealing the choice until reveal.
+///
+/// **Not a SNARK.** See module docs.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BlindingProof {
-    /// Hash of (commitment || voter) — placeholder "proof" object.
+    /// `SHA-256(PROOF_DOMAIN || commitment || voter)` — placeholder "proof".
     pub proof_digest: [u8; 32],
 }
 
 impl BlindingProof {
+    /// Build the deterministic stub proof for `(commitment, voter)`.
     pub fn stub(commitment: &[u8; 32], voter: &NodeId) -> Self {
+        Self {
+            proof_digest: Self::digest(commitment, voter),
+        }
+    }
+
+    /// Pure digest used by stub and verify (deterministic, no I/O).
+    pub fn digest(commitment: &[u8; 32], voter: &NodeId) -> [u8; 32] {
         let mut h = Sha256::new();
-        h.update(b"mm-blind-proof-v1");
+        h.update(PROOF_DOMAIN);
         h.update(commitment);
         h.update(voter.0);
         let out = h.finalize();
         let mut proof_digest = [0u8; 32];
         proof_digest.copy_from_slice(&out);
-        Self { proof_digest }
+        proof_digest
     }
 
+    /// Verify stub proof binds exactly this commitment and voter.
     pub fn verify(&self, commitment: &[u8; 32], voter: &NodeId) -> bool {
-        Self::stub(commitment, voter).proof_digest == self.proof_digest
+        self.proof_digest == Self::digest(commitment, voter)
     }
 }
 
@@ -150,7 +186,11 @@ impl ZkBlindedVoting {
         self.eligible.get(voter).copied().unwrap_or(false)
     }
 
-    /// Create a commitment = H(domain || proposal_id || voter || choice || nonce || blinding).
+    /// Create a commitment with length-prefixed nonce/blinding (deterministic).
+    ///
+    /// Encoding:
+    /// `H(COMMIT_DOMAIN || le64(proposal_id) || voter || choice
+    ///    || le64(nonce_len) || nonce || le64(blinding_len) || blinding)`
     pub fn make_commitment(
         proposal_id: u64,
         voter: &NodeId,
@@ -159,11 +199,13 @@ impl ZkBlindedVoting {
         blinding: &[u8],
     ) -> [u8; 32] {
         let mut h = Sha256::new();
-        h.update(b"mm-zk-ballot-v1");
+        h.update(COMMIT_DOMAIN);
         h.update(proposal_id.to_le_bytes());
         h.update(voter.0);
         h.update([choice.as_byte()]);
+        h.update((nonce.len() as u64).to_le_bytes());
         h.update(nonce);
+        h.update((blinding.len() as u64).to_le_bytes());
         h.update(blinding);
         let out = h.finalize();
         let mut commitment = [0u8; 32];
@@ -259,12 +301,14 @@ impl ZkBlindedVoting {
             .filter(|(p, _)| *p == proposal_id)
             .count()
     }
-}
 
-// Keep from_byte reachable for serialization helpers / future use.
-#[allow(dead_code)]
-fn _choice_roundtrip(c: BallotChoice) -> Option<BallotChoice> {
-    BallotChoice::from_byte(c.as_byte())
+    pub fn has_commitment(&self, proposal_id: u64, voter: &NodeId) -> bool {
+        self.commits.contains_key(&(proposal_id, *voter))
+    }
+
+    pub fn is_revealed(&self, proposal_id: u64, voter: &NodeId) -> bool {
+        self.reveals.contains_key(&(proposal_id, *voter))
+    }
 }
 
 #[cfg(test)]
@@ -337,6 +381,11 @@ mod tests {
             v.reveal(a, 1, BallotChoice::Yes, b"wrong", b"blind"),
             Err(VotingError::InvalidReveal)
         );
+        // Wrong blinding
+        assert_eq!(
+            v.reveal(a, 1, BallotChoice::Yes, b"nonce", b"wrong"),
+            Err(VotingError::InvalidReveal)
+        );
     }
 
     #[test]
@@ -366,6 +415,10 @@ mod tests {
         assert!(proof.verify(&c, &voter));
         let other = NodeId::from_label("other");
         assert!(!proof.verify(&c, &other));
+        // Tampered commitment
+        let mut c2 = c;
+        c2[0] ^= 1;
+        assert!(!proof.verify(&c2, &voter));
     }
 
     #[test]
@@ -378,5 +431,113 @@ mod tests {
         let ballot =
             ZkBlindedVoting::prepare_ballot(a, 1, BallotChoice::Abstain, b"n", b"b");
         assert_eq!(v.commit(ballot), Err(VotingError::VotingClosed));
+    }
+
+    #[test]
+    fn commitment_is_deterministic_and_sensitive() {
+        let voter = NodeId::from_label("alice");
+        let c1 = ZkBlindedVoting::make_commitment(1, &voter, BallotChoice::Yes, b"n", b"b");
+        let c2 = ZkBlindedVoting::make_commitment(1, &voter, BallotChoice::Yes, b"n", b"b");
+        assert_eq!(c1, c2);
+
+        // Different inputs → different commits
+        assert_ne!(
+            c1,
+            ZkBlindedVoting::make_commitment(2, &voter, BallotChoice::Yes, b"n", b"b")
+        );
+        assert_ne!(
+            c1,
+            ZkBlindedVoting::make_commitment(1, &voter, BallotChoice::No, b"n", b"b")
+        );
+        assert_ne!(
+            c1,
+            ZkBlindedVoting::make_commitment(1, &voter, BallotChoice::Yes, b"nX", b"b")
+        );
+        assert_ne!(
+            c1,
+            ZkBlindedVoting::make_commitment(1, &voter, BallotChoice::Yes, b"n", b"bX")
+        );
+        let other = NodeId::from_label("bob");
+        assert_ne!(
+            c1,
+            ZkBlindedVoting::make_commitment(1, &other, BallotChoice::Yes, b"n", b"b")
+        );
+    }
+
+    #[test]
+    fn length_prefix_prevents_nonce_blinding_ambiguity() {
+        let voter = NodeId::from_label("alice");
+        // Without length prefixes, ("ab","c") and ("a","bc") can collide.
+        // With prefixes they must differ.
+        let c1 = ZkBlindedVoting::make_commitment(1, &voter, BallotChoice::Yes, b"ab", b"c");
+        let c2 = ZkBlindedVoting::make_commitment(1, &voter, BallotChoice::Yes, b"a", b"bc");
+        assert_ne!(c1, c2);
+    }
+
+    #[test]
+    fn invalid_proof_rejected_on_commit() {
+        let (mut v, a, _, _) = setup_three_voters();
+        let mut ballot =
+            ZkBlindedVoting::prepare_ballot(a, 1, BallotChoice::Yes, b"n", b"b");
+        ballot.proof.proof_digest[0] ^= 0xff;
+        assert_eq!(v.commit(ballot), Err(VotingError::InvalidProof));
+    }
+
+    #[test]
+    fn double_reveal_rejected() {
+        let (mut v, a, _, _) = setup_three_voters();
+        let ballot =
+            ZkBlindedVoting::prepare_ballot(a, 1, BallotChoice::Yes, b"n", b"b");
+        v.commit(ballot).unwrap();
+        v.reveal(a, 1, BallotChoice::Yes, b"n", b"b").unwrap();
+        assert!(v.is_revealed(1, &a));
+        assert_eq!(
+            v.reveal(a, 1, BallotChoice::Yes, b"n", b"b"),
+            Err(VotingError::AlreadyRevealed)
+        );
+    }
+
+    #[test]
+    fn reveal_without_commit_fails() {
+        let (mut v, a, _, _) = setup_three_voters();
+        assert_eq!(
+            v.reveal(a, 1, BallotChoice::Yes, b"n", b"b"),
+            Err(VotingError::NoCommitment)
+        );
+    }
+
+    #[test]
+    fn prepare_ballot_proof_matches_commitment() {
+        let voter = NodeId::from_label("edge1");
+        let ballot =
+            ZkBlindedVoting::prepare_ballot(voter, 42, BallotChoice::Abstain, b"nonce", b"blind");
+        assert!(ballot.proof.verify(&ballot.commitment, &ballot.voter));
+        let expected = ZkBlindedVoting::make_commitment(
+            42,
+            &voter,
+            BallotChoice::Abstain,
+            b"nonce",
+            b"blind",
+        );
+        assert_eq!(ballot.commitment, expected);
+    }
+
+    #[test]
+    fn ballot_choice_byte_roundtrip() {
+        for c in [BallotChoice::Yes, BallotChoice::No, BallotChoice::Abstain] {
+            assert_eq!(BallotChoice::from_byte(c.as_byte()), Some(c));
+        }
+        assert_eq!(BallotChoice::from_byte(0), None);
+        assert_eq!(BallotChoice::from_byte(4), None);
+    }
+
+    #[test]
+    fn blinding_proof_digest_is_deterministic() {
+        let voter = NodeId::from_label("v");
+        let c = [7u8; 32];
+        assert_eq!(BlindingProof::digest(&c, &voter), BlindingProof::digest(&c, &voter));
+        let p1 = BlindingProof::stub(&c, &voter);
+        let p2 = BlindingProof::stub(&c, &voter);
+        assert_eq!(p1, p2);
     }
 }
