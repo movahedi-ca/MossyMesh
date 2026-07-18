@@ -14,7 +14,8 @@ use mesh_transport::kademlia_routing::{
 use mesh_transport::network::{init_network, MeshNode};
 use mesh_transport::stun_hole_punch::init_stun_hole_punch;
 
-fn main() {
+#[tokio::main]
+async fn main() {
     println!("==================================================");
     println!("=           MOSSYMESH DAEMON BOOTING             =");
     println!("==================================================");
@@ -67,20 +68,16 @@ fn main() {
     }
 
     // 4. Mount Interop Bridging
-    println!("\n[Interop] Mounting mock API endpoints...");
-    let mock_req = AsyncApiRequest {
-        endpoint: "/api/v1/submit_job".to_string(),
-        payload: "{\"action\":\"move\",\"from\":[1,4],\"to\":[3,4]}".to_string(),
-    };
-
-    match handle_rest_call(&mock_req) {
-        Ok(msg) => println!("[Interop] API Response: {}", msg),
-        Err(_) => println!("[Interop] API Failed."),
-    }
+    println!("\n[Interop] Mounting HTTP API endpoints...");
+    
+    let server_handle = tokio::spawn(async {
+        interop::run_http_server().await;
+    });
 
     // Simulate persistent Websocket sync thread if external internet is available
     println!("\n[Daemon] Entering event loop...");
-    handle_websocket(true);
+    // We let the HTTP server run indefinitely
+    server_handle.await.unwrap();
 
     println!("==================================================");
     println!("=          MOSSYMESH DAEMON TERMINATED           =");

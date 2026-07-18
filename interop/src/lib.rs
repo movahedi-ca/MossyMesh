@@ -8,6 +8,8 @@ pub mod openapi_gateway;
 pub mod twamm;
 
 use std::sync::{Mutex, OnceLock};
+use axum::{routing::{get, post}, Router, Json, extract::State};
+use serde::{Deserialize, Serialize};
 
 use liquidity::LiquidityMiner;
 use openapi_gateway::OpenApiGateway;
@@ -71,6 +73,38 @@ pub fn signal_internet_disconnect() {
 pub struct AsyncApiRequest {
     pub endpoint: String,
     pub payload: String,
+}
+
+#[derive(Deserialize)]
+pub struct GenericPayload {
+    #[serde(default)]
+    action: String,
+    #[serde(default)]
+    from: String,
+    #[serde(default)]
+    to: String,
+    #[serde(default)]
+    fen: String,
+}
+
+/// Starts an Axum HTTP server on port 8080 for the frontend.
+pub async fn run_http_server() {
+    let app = Router::new()
+        .route("/api/v1/health", get(health_handler).post(health_handler))
+        .route("/api/v1/submit_job", post(submit_job_handler));
+
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await.unwrap();
+    println!("Interop: HTTP Server listening on 0.0.0.0:8080");
+    axum::serve(listener, app).await.unwrap();
+}
+
+async fn health_handler() -> &'static str {
+    "Mesh Island Active"
+}
+
+async fn submit_job_handler(body: String) -> &'static str {
+    println!("Routing job payload [{}] into Kademlia DHT/Sandbox...", body);
+    "Job Accepted"
 }
 
 /// Simulates routing an incoming HTTP REST request to the offline Mesh network.
