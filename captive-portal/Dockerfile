@@ -15,8 +15,9 @@ WORKDIR /src/frontend
 COPY frontend/package.json frontend/package-lock.json ./
 RUN npm ci
 COPY frontend/ ./
-# Base path /app/ so assets resolve when served under /app/ by nginx
-RUN npx tsc -b && npx vite build --base=/app/
+# Base path /app/ so assets + PWA scope resolve under /app/ (nginx)
+# (frontend vite.config defaults production base to /app/)
+RUN npm run build
 
 # ---------- runtime ----------
 FROM nginx:1.27-alpine

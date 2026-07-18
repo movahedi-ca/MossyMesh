@@ -1,5 +1,6 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Chess, type Square, type Move } from "chess.js";
+import { submitJob } from "../lib/meshApi";
 import "./Chessboard.css";
 
 const FILES = ["a", "b", "c", "d", "e", "f", "g", "h"] as const;
@@ -28,7 +29,12 @@ function describeStatus(game: Chess): string {
   return game.turn() === "w" ? "White to move" : "Black to move";
 }
 
-export const Chessboard = () => {
+export interface ChessboardProps {
+  /** Optional FEN change callback (e.g. job submit panel). */
+  onFenChange?: (fen: string) => void;
+}
+
+export const Chessboard = ({ onFenChange }: ChessboardProps = {}) => {
   const [game, setGame] = useState(() => new Chess());
   const [selected, setSelected] = useState<Square | null>(null);
   const [legalTargets, setLegalTargets] = useState<Square[]>([]);
@@ -41,6 +47,10 @@ export const Chessboard = () => {
   const board = useMemo(() => game.board(), [game]);
   const fen = useMemo(() => game.fen(), [game]);
 
+  useEffect(() => {
+    onFenChange?.(fen);
+  }, [fen, onFenChange]);
+
   const clearSelection = useCallback(() => {
     setSelected(null);
     setLegalTargets([]);
@@ -48,25 +58,24 @@ export const Chessboard = () => {
 
   const publishMove = useCallback(
     async (from: Square, to: Square) => {
-      if (!navigator.onLine || mode === "offline") {
-        setMeshNote(
-          mode === "lora"
-            ? "Offline: move queued for LoRa / local DHT relay"
-            : "Offline: move applied locally (no internet required)",
-        );
+      // Pure local play — never require WAN. Captive APs often set
+      // navigator.onLine=false even when the mesh host answers /api.
+      if (mode === "offline") {
+        setMeshNote("Offline: move applied locally (no internet required)");
         return;
       }
-      setMeshNote("Submitting move to mesh…");
-      try {
-        const response = await fetch("/api/v1/submit_job", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ action: "move", from, to, fen }),
-        });
-        if (response.ok) setMeshNote("Move confirmed by swarm");
-        else setMeshNote("Swarm rejected ack — kept local state");
-      } catch {
-        setMeshNote("Mesh unreachable — kept local (DHT island mode)");
+      setMeshNote("Submitting move to mesh host…");
+      const result = await submitJob({ action: "move", from, to, fen });
+      if (result.ok) {
+        setMeshNote(
+          result.body
+            ? `Move confirmed: ${result.body.slice(0, 80)}`
+            : "Move confirmed by swarm",
+        );
+      } else if (result.status === 0) {
+        setMeshNote("Mesh unreachable — queued local (DHT island mode)");
+      } else {
+        setMeshNote(`Host ${result.status} — kept local state`);
       }
     },
     [fen, mode],

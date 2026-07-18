@@ -1,8 +1,10 @@
+import { useCallback, useState } from "react";
 import "./App.css";
 import { NetworkVisualizer } from "./components/NetworkVisualizer";
 import { Chessboard } from "./components/Chessboard";
 import { NetworkStatus } from "./components/NetworkStatus";
 import { ErrorBoundary } from "./components/ErrorBoundary";
+import { JobSubmit } from "./components/JobSubmit";
 import { MeshProvider, useOnlineStatus } from "./hooks/useMeshNetwork";
 
 const OfflineFallback = () => (
@@ -20,6 +22,8 @@ const NotFound = () => (
 function PortalBody() {
   const path = window.location.pathname;
   const online = useOnlineStatus();
+  const [fen, setFen] = useState<string | undefined>(undefined);
+  const onFenChange = useCallback((next: string) => setFen(next), []);
 
   return (
     <div className="app-shell">
@@ -38,8 +42,9 @@ function PortalBody() {
           No internet is required. Game state lives on-device; peers sync via Kademlia DHT and LoRa
           when available.
         </p>
-        <Chessboard />
-        <div className="visualizer-section">
+        <Chessboard onFenChange={onFenChange} />
+        <JobSubmit fen={fen} />
+        <div id="network" className="visualizer-section">
           <NetworkVisualizer />
         </div>
       </div>

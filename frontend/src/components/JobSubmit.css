@@ -1,0 +1,134 @@
+.job-submit {
+  width: 100%;
+  max-width: 400px;
+  margin: 0.5rem auto 0;
+  padding: 1rem 1.1rem;
+  text-align: left;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--surface-border);
+  backdrop-filter: blur(8px);
+}
+
+.job-submit-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.5rem;
+}
+
+.job-submit-title {
+  margin: 0;
+  font-size: 1.05rem;
+  letter-spacing: -0.02em;
+  background: linear-gradient(135deg, #fff 0%, #a8b0c0 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.job-host {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.75rem;
+  font-family: var(--font-display);
+  letter-spacing: 0.03em;
+  padding: 0.3rem 0.65rem;
+  border-radius: 999px;
+  border: 1px solid var(--surface-border);
+  color: var(--text-muted);
+}
+
+.job-host--up {
+  color: var(--primary-color);
+  border-color: rgba(69, 243, 255, 0.35);
+  background: rgba(69, 243, 255, 0.08);
+}
+
+.job-host--up .status-dot {
+  background-color: var(--primary-color);
+  box-shadow: 0 0 8px var(--primary-color);
+}
+
+.job-host--down {
+  color: #fb2d7f;
+  border-color: rgba(251, 45, 127, 0.35);
+  background: rgba(251, 45, 127, 0.08);
+}
+
+.job-host--down .status-dot {
+  background-color: #fb2d7f;
+  animation: none;
+}
+
+.job-host--unknown .status-dot {
+  background-color: #c72dfb;
+}
+
+.job-submit-lede {
+  margin: 0 0 0.75rem;
+  font-size: 0.8rem;
+  line-height: 1.45;
+  color: var(--text-muted);
+}
+
+.job-submit-lede code {
+  font-family: ui-monospace, "Cascadia Code", Menlo, monospace;
+  font-size: 0.78em;
+  color: var(--primary-color);
+}
+
+.job-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  margin-bottom: 0.65rem;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-family: var(--font-display);
+}
+
+.job-field input {
+  padding: 0.55rem 0.75rem;
+  border-radius: 10px;
+  border: 1px solid var(--surface-border);
+  background: rgba(0, 0, 0, 0.25);
+  color: var(--text-main);
+  font-family: ui-monospace, "Cascadia Code", Menlo, monospace;
+  font-size: 0.85rem;
+  text-transform: none;
+  letter-spacing: normal;
+}
+
+.job-field input:focus {
+  outline: none;
+  border-color: rgba(69, 243, 255, 0.45);
+  box-shadow: 0 0 0 2px rgba(69, 243, 255, 0.12);
+}
+
+.job-fen {
+  font-family: ui-monospace, "Cascadia Code", Menlo, monospace;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  margin-bottom: 0.75rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.job-submit-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.55rem;
+}
+
+.job-submit-note {
+  margin-top: 0.65rem;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  min-height: 1.2em;
+}

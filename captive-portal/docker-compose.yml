@@ -1,8 +1,13 @@
 # Local captive-portal stack (bind-mount mode).
 # Prefer root docker-compose.yml for full multi-stage builds.
-# Requires pre-built assets:
+#
+# From repo root:
 #   (cd captive-portal && npm ci && npm run build)
-#   (cd frontend && npm ci && npx tsc -b && npx vite build --base=/app/)
+#   (cd frontend && npm ci && npm run build)   # produces dist with base=/app/
+#   docker compose -f captive-portal/docker-compose.yml up
+#
+# Paths in `volumes` are relative to this file's directory.
+# /api/* proxies to host.docker.internal:8787 (mesh interop host when up).
 
 services:
   captive-portal:
@@ -10,6 +15,8 @@ services:
     container_name: messymash-captive-portal
     ports:
       - "${PORTAL_PORT:-80}:80"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./nginx.conf:/etc/nginx/nginx.conf:ro
       - ./dist:/usr/share/nginx/html:ro
@@ -20,3 +27,4 @@ services:
       interval: 30s
       timeout: 3s
       retries: 3
+      start_period: 5s

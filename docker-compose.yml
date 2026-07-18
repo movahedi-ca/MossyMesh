@@ -1,6 +1,15 @@
 # MessyMash / MossyMesh — local & Pi edge compose
 # Serves captive portal landing (/) and chess frontend PWA (/app/).
 # nginx client_max_body_size: 150M (see captive-portal/nginx.conf)
+# /api/* is reverse-proxied to the mesh host (default host:8787).
+#
+# Usage:
+#   docker compose up --build portal          # multi-stage image
+#   docker compose --profile bind up portal-bind   # bind-mount prebuilt dist
+#
+# Mesh API host: Compose maps host.docker.internal → host-gateway so nginx
+# can reach a process on the host at :8787.
+# On Pi with network_mode: host, edit nginx upstream to 127.0.0.1:8787.
 
 services:
   portal:
@@ -11,9 +20,12 @@ services:
     container_name: messymash-portal
     ports:
       - "${PORTAL_PORT:-80}:80"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     restart: unless-stopped
     # Uncomment for host networking on Raspberry Pi AP setups:
     # network_mode: host
+    # (then change captive-portal/nginx.conf upstream to 127.0.0.1:8787)
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1/healthz"]
       interval: 30s
@@ -22,6 +34,9 @@ services:
       start_period: 10s
 
   # Bind-mount prebuilt dist dirs for faster Pi iteration
+  # Prerequisites:
+  #   (cd captive-portal && npm ci && npm run build)
+  #   (cd frontend && npm ci && npm run build)   # base /app/ by default
   # Usage: docker compose --profile bind up portal-bind
   portal-bind:
     profiles: ["bind"]
@@ -29,8 +44,16 @@ services:
     container_name: messymash-portal-bind
     ports:
       - "${PORTAL_PORT:-80}:80"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./captive-portal/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./captive-portal/dist:/usr/share/nginx/html:ro
       - ./frontend/dist:/usr/share/nginx/html/app:ro
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/healthz"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
