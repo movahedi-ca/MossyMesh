@@ -126,6 +126,67 @@ TraceHash     = 32-byte hash-chain link of WASM execution trace
 
 **Current stubs:** `mesh_transport::init_mesh_transport()`, `sandbox::WamrInstance::{new, allocate, invoke_wasm_function}`, `sandbox::MEM_LIMIT`.
 
+### 2a. Job messaging (Phase 4 — P4-MSG)
+
+**Module:** `mesh_transport::messaging` (agent 02; topology route hooks agent 03).
+
+In-memory island bus is OK for unit/smoke; later wire LXMF/libp2p. **No DNS/IP** in keys — only `NodeId = [u8; 32]`.
+
+| Op | Signature (logical) | Notes |
+| --- | --- | --- |
+| Distribute | `distribute_job(envelope: JobEnvelope, workers: &[[u8;32]]) -> Result<(), MsgError>` | Queue one delivery per assigned worker inbox |
+| Poll | `JobMeshBus::poll_inbox(worker) -> Option<JobDelivery>` | Worker pulls next job |
+| Submit | `submit_result(result: ExecutionResult) -> Result<(), MsgError>` | Worker must be assigned; no double-submit |
+| Collect one | `collect_result(job_id) -> Result<ExecutionResult, MsgError>` | First available result |
+| Collect all | `collect_all_results(job_id) -> Result<Vec<ExecutionResult>, MsgError>` | Replica quorum path |
+
+**Types (serde):** `JobEnvelope`, `ExecutionResult`, `JobDelivery { envelope, worker }`, `MsgError`.
+
+**MsgError tokens (stable):** `NoWorkers`, `UnknownJob`, `NoResult`, `AlreadySubmitted`, `WorkerNotAssigned`, `EmptyPayload`, `LockPoisoned`.
+
+**Pipeline:**
+
+```text
+interop submit → VDF admit → VRF assign → messaging::distribute_job
+  → worker poll_inbox → sandbox Job::admit_and_load / invoke
+  → messaging::submit_result → collect_result → consensus CommitReceipt
+```
+
+**Init:** `messaging::init_messaging()` called from `init_mesh_transport()`.
+
+**Topology (03):** route workers via Kademlia / `topology` cost; messaging only needs `NodeId` list — must not require multiaddrs or public DNS.
+
+### 2b. WASM load API (Phase 4 — P4-WASM)
+
+**Sandbox (14):** load real engine module bytes (not only host-sim stub).
+
+| Op | Signature | Notes |
+| --- | --- | --- |
+| Load (test) | `Job::load(module_bytes) -> Result<Job, JobError>` | No VDF gate |
+| Admit+load | `Job::admit_and_load(receipt, verifier, module_bytes) -> Result<Job, JobError>` | Production path |
+| Invoke | `Job::invoke` / `invoke_admitted(fn, args) -> Result<Vec<u8>, JobError>` | Admitted required for trusted path |
+
+**Module validation (required for checkbox):**
+
+1. Reject empty bytes → `JobError::InvalidModule` / `HostError::InvalidModule`.
+2. Prefer magic `\0asm` (WASM binary preamble) check on load; invalid → same stable error string.
+3. Guest heap still capped by `MEM_LIMIT = 10 MiB`.
+
+**Engine (05):**
+
+```text
+cargo build -p engine --target wasm32-wasip1
+# preferred: cdylib → target/wasm32-wasip1/release/engine.wasm (or libengine.so.wasm)
+# today docs note rlib-only; P4-WASM needs loadable .wasm for sandbox Job::load
+```
+
+| WASM export | Args | Returns | Semantics |
+| --- | --- | --- | --- |
+| `evaluate_move` | position + move | score / validity bytes | Deterministic eval |
+| `get_best_move` | position + depth | move bytes | Search within `MAX_DEPTH` |
+
+Optional marker for host-sim discovery: ASCII `MOSSYMESH_EXPORTS:name1,name2` in module bytes (sandbox host sim only).
+
 ---
 
 ## 3. sandbox ↔ engine
@@ -138,6 +199,8 @@ TraceHash     = 32-byte hash-chain link of WASM execution trace
 **Native crate API:** `engine::EngineState::{new, from_fen, get_moves, make_move, evaluate_position}`, `engine::benchmark_mnps()`, `engine::MAX_DEPTH = 64`.
 
 **Determinism:** no wall-clock; no RNG without explicit seed in job args; integer scores preferred.
+
+**Build:** default features WASM-safe (no `syzygy` / `syzygy-mmap` on wasip1). See `devops/engine-wasm.md`.
 
 ---
 
