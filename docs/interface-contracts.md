@@ -52,13 +52,15 @@ TraceHash     = 32-byte hash-chain link of WASM execution trace
 
 | Field | Type | Notes |
 | --- | --- | --- |
-| `job_id` | `JobId` | Requires valid VDF proof attachment |
+| `job_id` | `JobId` | Ephemeral Job DID; must match VDF mint (`final_x` + `job_meta`) |
 | `submitter` | `NodeId` | Identity of requester |
 | `payload_cid` | `ContentId` | WASM module or chess FEN/job blob |
 | `fn_name` | `string` | Exported WASM symbol (e.g. `evaluate_move`) |
 | `args` | `bytes` | Opaque to transport |
 | `replicas` | `u8` | Primaries default 3 + standbys default 2 |
 | `max_wall_ms` | `u64` | Contributes to <5% timeout SLA |
+| `job_meta` | `bytes` | Bound into Job DID mint (with VDF output); default empty |
+| `vdf` | `Option<AttachedVdfProof>` | **Required** for `messaging::distribute_job`; missing → `MISSING_VDF` |
 
 ### `VdfProof`
 
@@ -128,33 +130,50 @@ TraceHash     = 32-byte hash-chain link of WASM execution trace
 
 ### 2a. Job messaging (Phase 4 — P4-MSG)
 
-**Module:** `mesh_transport::messaging` (agent 02; topology route hooks agent 03).
+**Module:** `mesh_transport::messaging` (agent 02; VDF gate via `vdf_sybil` agent 08; topology route hooks agent 03).
 
 In-memory island bus is OK for unit/smoke; later wire LXMF/libp2p. **No DNS/IP** in keys — only `NodeId = [u8; 32]`.
 
 | Op | Signature (logical) | Notes |
 | --- | --- | --- |
-| Distribute | `distribute_job(envelope: JobEnvelope, workers: &[[u8;32]]) -> Result<(), MsgError>` | Queue one delivery per assigned worker inbox |
+| Distribute | `JobMeshBus::distribute_job(envelope, workers) -> Result<(), MsgError>` | **VDF admit first** (`verify_job_admit`); then queue one delivery per worker |
 | Poll | `JobMeshBus::poll_inbox(worker) -> Option<JobDelivery>` | Worker pulls next job |
 | Submit | `submit_result(result: ExecutionResult) -> Result<(), MsgError>` | Worker must be assigned; no double-submit |
 | Collect one | `collect_result(job_id) -> Result<ExecutionResult, MsgError>` | First available result |
 | Collect all | `collect_all_results(job_id) -> Result<Vec<ExecutionResult>, MsgError>` | Replica quorum path |
 
-**Types (serde):** `JobEnvelope`, `ExecutionResult`, `JobDelivery { envelope, worker }`, `MsgError`.
+**Types (serde):** `JobEnvelope` (+ `job_meta`, `vdf`), `ExecutionResult`, `JobDelivery { envelope, worker }`, `MsgError`, `AttachedVdfProof` (from `vdf_sybil`).
 
-**MsgError tokens (stable):** `NoWorkers`, `UnknownJob`, `NoResult`, `AlreadySubmitted`, `WorkerNotAssigned`, `EmptyPayload`, `LockPoisoned`.
+**Bus policy:** `JobMeshBus::new()` → test MinRoot floor; `with_policy(JobAdmitPolicy)` for prod params.
+
+**MsgError stable codes (`MsgError::code`):**
+
+| Variant | Code |
+| --- | --- |
+| `NoWorkers` | `NO_WORKERS` |
+| `UnknownJob` | `UNKNOWN_JOB` |
+| `NoResult` | `NO_RESULT` |
+| `AlreadySubmitted` | `ALREADY_SUBMITTED` |
+| `WorkerNotAssigned` | `WORKER_NOT_ASSIGNED` |
+| `EmptyPayload` | `EMPTY_PAYLOAD` |
+| `LockPoisoned` | `LOCK_POISONED` |
+| `MissingVdf` | `MISSING_VDF` |
+| `VdfAdmit(_)` | passthrough `JobAdmitError::code()` (`INVALID_VDF`, `DID_MISMATCH`, …) |
 
 **Pipeline:**
 
 ```text
-interop submit → VDF admit → VRF assign → messaging::distribute_job
+interop submit → mint Job DID + attach VDF → VRF assign NodeIds
+  → messaging::distribute_job (verify_job_admit)
   → worker poll_inbox → sandbox Job::admit_and_load / invoke
   → messaging::submit_result → collect_result → consensus CommitReceipt
 ```
 
-**Init:** `messaging::init_messaging()` called from `init_mesh_transport()`.
+**Init / re-exports:** `messaging::init_messaging()` from `init_mesh_transport()`; crate re-exports `distribute_job`, `submit_result`, `collect_result`, envelope types, and VDF admit helpers.
 
 **Topology (03):** route workers via Kademlia / `topology` cost; messaging only needs `NodeId` list — must not require multiaddrs or public DNS.
+
+**Land status:** WIP may exist in shared worktree (`messaging.rs`); P4-MSG box stays **open** until committed on `agent/02-transport` (or main) with green tests + SMK-10.
 
 ### 2b. WASM load API (Phase 4 — P4-WASM)
 

@@ -85,8 +85,10 @@ JobEnvelope → messaging::distribute_job(env, workers)
 
 | Step | Assert |
 | --- | --- |
+| 0 | Envelope without `vdf` → `MsgError::MissingVdf` / code `MISSING_VDF` |
+| 0b | Bad VDF / DID mismatch → `MsgError::VdfAdmit` (stable code) |
 | 1 | Empty workers → `MsgError::NoWorkers` |
-| 2 | Distribute to ≥1 `NodeId`; each inbox depth ≥ 1 |
+| 2 | Valid VDF + distribute to ≥1 `NodeId`; each inbox depth ≥ 1 |
 | 3 | Unassigned worker submit → `WorkerNotAssigned` |
 | 4 | Double submit same worker → `AlreadySubmitted` |
 | 5 | One ok submit → `collect_result` returns same `output` / `trace_hash` |

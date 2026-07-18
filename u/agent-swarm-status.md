@@ -2,19 +2,19 @@
 
 **Mode:** caveman (short, ship, push)
 **Goal:** finish open PR boxes, never lose work near weekly limit
-**Last architect poll:** 2026-07-17 (agent/01-architect)
+**Last architect poll:** 2026-07-17T late (agent/01-architect @ 9c96d3a+)
 
 ## Open boxes (MUST close)
 
 1. **P4-WASM** — Engine compiles `wasm32-wasip1` AND loads in sandbox → **OPEN**
-2. **P4-MSG** — Mesh messaging: job distribute + result collect → **OPEN** (WIP seen, not landed)
+2. **P4-MSG** — Mesh messaging: job distribute + result collect → **OPEN** (strong WIP, not on origin)
 
 ## Poll snapshot
 
 | Box | Evidence | Status |
 |-----|----------|--------|
-| P4-WASM | engine wasip1 notes still rlib-oriented; sandbox WIP mentions `wasm_module` / magic validate in dirty trees but **not proven on origin/main**; host sim accepts `\0asm` stubs | **OPEN** — 05 + 14 + 16 |
-| P4-MSG | WIP `messaging.rs` / JobMeshBus seen in shared worktree at times; **not stable on origin/agent/02 or main** | **OPEN** — 02 commit+push; 03 route; 16 smoke |
+| P4-WASM | no `engine` cdylib/wasm_exports on origin; no `sandbox/wasm_module.rs` on origin; host sim only | **OPEN** — 05 + 14 + 16 |
+| P4-MSG | local WIP: `messaging.rs` + `lib.rs` re-exports + VDF gate on distribute; unit tests present; **origin/agent/02 still @ main tip** (no push) | **OPEN** — **02 PUSH NOW**; 03 route; 16 SMK-10 |
 
 **Do not check SLA boxes until:** code on branch/main, `cargo test` green, smoke plan SMK-09 / SMK-10 satisfied.
 
