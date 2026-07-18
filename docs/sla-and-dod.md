@@ -101,11 +101,11 @@ Crypto or memory allocation changes require written proof (doc or test) that SLA
 
 ### Deliverables
 
-- [ ] Engine compiles to wasm32-wasip1 and loads in sandbox.
+- [ ] Engine compiles to wasm32-wasip1 and loads in sandbox. <!-- SMK-09; 05+14+16; unchecked until proven -->
 - [x] Deterministic legal moves + evaluation.
 - [x] Mnps harness (~836 target on reference profile).
 - [x] HTLC + VDF-delayed cancellation.
-- [ ] Mesh messaging for job distribute / result collect.
+- [ ] Mesh messaging for job distribute / result collect. <!-- SMK-10; 02+03+16; unchecked until proven -->
 
 ### Acceptance
 
@@ -115,6 +115,8 @@ Crypto or memory allocation changes require written proof (doc or test) that SLA
 | P4-DoD-2 | Benchmark ~836 Mnps on agreed profile (or justified gap). |
 | P4-DoD-3 | Escrow open → work → claim/refund tested; VDF cancel enforced. |
 | P4-DoD-4 | Sampled re-exec mismatch < 1% on chess job corpus. |
+
+**Close criteria (architect):** check boxes only when SMK-09 / SMK-10 in [`integration-smoke-plan.md`](integration-smoke-plan.md) pass on landed code; update [`CHANGELOG.md`](../CHANGELOG.md) Still open. Contracts: [`interface-contracts.md`](interface-contracts.md) §2a–2b.
 
 ---
 

@@ -35,5 +35,5 @@ Notable mainline merges and features (newest first). Scope is high-level; see gi
 - Expanded **integration** smoke (MEM_LIMIT, MPT prove/merge, SNARK fold, HTLC types, job pipeline stub).
 
 ### Still open (SLA checkboxes left unchecked)
-- Real engine **wasm32-wasip1** binary loaded in sandbox (host sim stub only today).
-- Full mesh **messaging** path for job distribute / result collect (beyond identity announce + REST stub).
+- Real engine **wasm32-wasip1** binary loaded in sandbox (host sim stub only today). **SMK-09** in `docs/integration-smoke-plan.md`. Owners: 05 + 14 + 16.
+- Full mesh **messaging** path for job distribute / result collect (beyond identity announce + REST stub). **SMK-10**. Owners: 02 + 03 + 16. Architect checks `docs/sla-and-dod.md` Phase 4 boxes only when both proven.
