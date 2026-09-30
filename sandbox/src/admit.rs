@@ -259,11 +259,12 @@ pub struct MinRootVdfVerifier {
 
 impl Default for MinRootVdfVerifier {
     fn default() -> Self {
-        Self {
-            // Test-safe default: never gate unit tests on PRODUCTION_ITERATIONS.
-            min_steps: DEFAULT_TEST_ITERATIONS,
-            required_modulus: None,
-        }
+        // Secure default: production policy. The old test-grade default
+        // (16 steps, any modulus) silently admitted toy receipts whenever a
+        // daemon was built with `Default::default()`, downgrading the
+        // anti-Sybil gate to a suggestion. Tests must opt in explicitly
+        // via `for_tests`.
+        Self::production()
     }
 }
 
@@ -293,19 +294,14 @@ impl MinRootVdfVerifier {
     }
 
     /// Resolve receipt `modulus_id` to a concrete field modulus.
+    ///
+    /// Only the two registered moduli are accepted. There is no escape
+    /// hatch for embedding arbitrary small primes: an attacker-controlled
+    /// `modulus_id` must never select a weak field.
     pub fn resolve_modulus(modulus_id: u32) -> Option<u64> {
         match modulus_id {
             MODULUS_ID_TEST_MINROOT => Some(DEFAULT_TEST_MODULUS),
             MODULUS_ID_PRODUCTION_MINROOT => Some(PRODUCTION_MODULUS),
-            // Allow embedding small primes directly when id >= 5 and valid.
-            id if id >= 5 => {
-                let p = u64::from(id);
-                if validate_minroot_modulus(p) {
-                    Some(p)
-                } else {
-                    None
-                }
-            }
             _ => None,
         }
     }
@@ -671,6 +667,18 @@ mod tests {
         let prod_policy = MinRootVdfVerifier::production();
         assert_eq!(prod_policy.min_steps, PRODUCTION_ITERATIONS);
         assert_eq!(prod_policy.required_modulus, Some(PRODUCTION_MODULUS));
+    }
+
+    #[test]
+    fn default_is_production_grade() {
+        // Issue #68: Default must not admit test-grade receipts.
+        let v = MinRootVdfVerifier::default();
+        assert_eq!(v.min_steps, PRODUCTION_ITERATIONS);
+        assert_eq!(v.required_modulus, Some(PRODUCTION_MODULUS));
+        // Unregistered modulus ids are rejected, no small-prime escape hatch.
+        assert_eq!(MinRootVdfVerifier::resolve_modulus(23), None);
+        assert_eq!(MinRootVdfVerifier::resolve_modulus(5), None);
+        assert_eq!(MinRootVdfVerifier::resolve_modulus(u32::MAX), None);
     }
 
     #[test]
