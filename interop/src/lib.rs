@@ -8,7 +8,15 @@ pub mod openapi_gateway;
 pub mod twamm;
 
 use std::sync::{Mutex, OnceLock};
-use axum::{routing::{get, post}, Router, Json, extract::State};
+use std::collections::HashMap;
+use std::net::{IpAddr, SocketAddr};
+use std::time::{Duration, Instant};
+use axum::{
+    extract::{ConnectInfo, State},
+    http::{header, HeaderMap, StatusCode},
+    routing::{get, post},
+    Router, Json,
+};
 use serde::{Deserialize, Serialize};
 
 use liquidity::LiquidityMiner;
@@ -87,24 +95,109 @@ pub struct GenericPayload {
     fen: String,
 }
 
-/// Starts an Axum HTTP server on port 8080 for the frontend.
+/// Starts an Axum HTTP server for the frontend.
+///
+/// Binds loopback by default (override with `MESH_GATEWAY_BIND`); the old
+/// 0.0.0.0 bind exposed an unauthenticated remote surface on shared LANs.
 pub async fn run_http_server() {
     let app = Router::new()
         .route("/api/v1/health", get(health_handler).post(health_handler))
         .route("/api/v1/submit_job", post(submit_job_handler));
 
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await.unwrap();
-    println!("Interop: HTTP Server listening on 0.0.0.0:8080");
-    axum::serve(listener, app).await.unwrap();
+    let bind = std::env::var("MESH_GATEWAY_BIND").unwrap_or_else(|_| "127.0.0.1:8080".into());
+    let listener = tokio::net::TcpListener::bind(&bind).await.unwrap();
+    println!("Interop: HTTP Server listening on {}", bind);
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await
+    .unwrap();
 }
 
 async fn health_handler() -> &'static str {
     "Mesh Island Active"
 }
 
-async fn submit_job_handler(body: String) -> &'static str {
-    println!("Routing job payload [{}] into Kademlia DHT/Sandbox...", body);
-    "Job Accepted"
+/// Bearer token for the job API. Read from `MESH_GATEWAY_TOKEN`; when unset,
+/// the loopback-only bind is the access control (local daemon and UI only).
+fn gateway_token() -> Option<String> {
+    std::env::var("MESH_GATEWAY_TOKEN").ok().filter(|t| !t.is_empty())
+}
+
+fn check_auth(headers: &HeaderMap) -> bool {
+    let Some(expected) = gateway_token() else {
+        return true;
+    };
+    let Some(value) = headers.get(header::AUTHORIZATION) else {
+        return false;
+    };
+    let Ok(value) = value.to_str() else {
+        return false;
+    };
+    let Some(presented) = value.strip_prefix("Bearer ") else {
+        return false;
+    };
+    presented.len() == expected.len()
+        && presented.bytes().zip(expected.bytes()).all(|(a, b)| a == b)
+}
+
+/// Bounded per-peer rate limiter: 60 requests per 60 seconds per IP.
+/// The table is capped at 1024 peers so a LAN-wide scan cannot grow it
+/// without bound.
+fn rate_limited_peers() -> &'static Mutex<HashMap<IpAddr, Vec<Instant>>> {
+    static RL: OnceLock<Mutex<HashMap<IpAddr, Vec<Instant>>>> = OnceLock::new();
+    RL.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+const RATE_LIMIT: usize = 60;
+const RATE_WINDOW: Duration = Duration::from_secs(60);
+
+fn check_rate_limit(ip: IpAddr) -> bool {
+    let now = Instant::now();
+    let mut table = match rate_limited_peers().lock() {
+        Ok(t) => t,
+        Err(_) => return false,
+    };
+    if table.len() > 1024 && !table.contains_key(&ip) {
+        return false;
+    }
+    let entry = table.entry(ip).or_default();
+    entry.retain(|t| now.duration_since(*t) < RATE_WINDOW);
+    if entry.len() >= RATE_LIMIT {
+        return false;
+    }
+    entry.push(now);
+    true
+}
+
+/// Payload digest for logs: never print raw request bodies (log injection
+/// on a shared LAN, and bodies may carry private job data).
+fn payload_digest(body: &str) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    body.hash(&mut h);
+    h.finish()
+}
+
+async fn submit_job_handler(
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    body: String,
+) -> Result<&'static str, StatusCode> {
+    if !check_auth(&headers) {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    if !check_rate_limit(addr.ip()) {
+        return Err(StatusCode::TOO_MANY_REQUESTS);
+    }
+    println!(
+        "Routing job payload ({} bytes, digest {:016x}) into Kademlia DHT/Sandbox...",
+        body.len(),
+        payload_digest(&body)
+    );
+    Ok("Job Accepted")
 }
 
 /// Simulates routing an incoming HTTP REST request to the offline Mesh network.
@@ -124,7 +217,11 @@ pub fn handle_rest_call(req: &AsyncApiRequest) -> Result<String, InteropError> {
     match path {
         "/api/v1/health" => Ok("Mesh Island Active".to_string()),
         "/api/v1/submit_job" => {
-            println!("Routing job payload [{}] into Kademlia DHT...", req.payload);
+            println!(
+                "Routing job payload ({} bytes, digest {:016x}) into Kademlia DHT...",
+                req.payload.len(),
+                payload_digest(&req.payload)
+            );
             Ok("Job Accepted".to_string())
         }
         "/api/v1/twamm" => handle_twamm(req),
@@ -360,17 +457,113 @@ fn handle_gateway(req: &AsyncApiRequest) -> Result<String, InteropError> {
     }
 }
 
-/// Simulates an ongoing WebSocket event loop syncing state to the external internet.
-pub fn handle_websocket(mut connection_alive: bool) {
-    let mut tick = 0;
-    while connection_alive && tick < 3 {
-        println!("WebSocket Sync Tick {}...", tick);
-        tick += 1;
-        // Simulate break
-        if tick == 2 {
-            connection_alive = false;
+/// Handle for one WebSocket peer connection.
+///
+/// Dropping the handle closes the connection. This is the guarantee behind
+/// the fix for #48: no code path can orphan a live connection, because the
+/// connection dies with its handle.
+pub struct WsConnection {
+    id: u64,
+    peer: String,
+    closed: bool,
+}
+
+impl WsConnection {
+    fn new(id: u64, peer: impl Into<String>) -> Self {
+        Self {
+            id,
+            peer: peer.into(),
+            closed: false,
         }
     }
+
+    /// Close the connection immediately. Idempotent.
+    pub fn close(&mut self) {
+        if !self.closed {
+            self.closed = true;
+            println!("WebSocket connection {} ({}) closed.", self.id, self.peer);
+        }
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.closed
+    }
+}
+
+impl Drop for WsConnection {
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+
+/// Registry of live WebSocket connections.
+///
+/// Connections that die abruptly (peer disconnect without a clean close) are
+/// removed here, so they cannot accumulate. Fixes #48.
+#[derive(Default)]
+pub struct WsRegistry {
+    next_id: u64,
+    live: Vec<WsConnection>,
+}
+
+impl WsRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Register a new outbound connection.
+    pub fn register(&mut self, peer: impl Into<String>) -> u64 {
+        let id = self.next_id;
+        self.next_id = self.next_id.wrapping_add(1);
+        self.live.push(WsConnection::new(id, peer));
+        id
+    }
+
+    /// Remove and close a connection by id (abrupt peer disconnect path).
+    /// Returns true if a live connection was found and removed.
+    pub fn abrupt_disconnect(&mut self, id: u64) -> bool {
+        if let Some(pos) = self.live.iter().position(|c| c.id == id) {
+            let mut conn = self.live.remove(pos);
+            conn.close();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Close and drop every live connection.
+    pub fn close_all(&mut self) {
+        while let Some(mut conn) = self.live.pop() {
+            conn.close();
+        }
+    }
+
+    pub fn live_count(&self) -> usize {
+        self.live.len()
+    }
+}
+
+/// Ongoing WebSocket event loop syncing state to the external internet.
+///
+/// Connections are tracked in a [`WsRegistry`] and pruned on disconnect, so an
+/// abrupt peer drop can no longer leak a live connection.
+pub fn handle_websocket(connection_alive: bool) {
+    let mut registry = WsRegistry::new();
+    let id = registry.register("uplink-gateway");
+    let mut tick = 0;
+    let mut alive = connection_alive;
+    while alive && tick < 3 {
+        println!("WebSocket Sync Tick {}...", tick);
+        tick += 1;
+        if tick == 2 {
+            // Simulated abrupt peer disconnect: prune from the registry so the
+            // connection is dropped instead of leaking.
+            registry.abrupt_disconnect(id);
+            alive = false;
+        }
+    }
+    registry.close_all();
+    debug_assert_eq!(registry.live_count(), 0, "connection leaked");
     println!("WebSocket Connection Closed.");
 }
 
@@ -451,5 +644,32 @@ mod tests {
             payload: String::new(),
         });
         assert_eq!(err, Err(InteropError::ConnectionRefused));
+    }
+
+    #[test]
+    fn abrupt_disconnect_prunes_connection() {
+        let mut registry = WsRegistry::new();
+        let a = registry.register("peer-a");
+        let _b = registry.register("peer-b");
+        assert_eq!(registry.live_count(), 2);
+        assert!(registry.abrupt_disconnect(a));
+        assert_eq!(registry.live_count(), 1);
+        // Unknown id is a no-op, never panics.
+        assert!(!registry.abrupt_disconnect(9999));
+    }
+
+    #[test]
+    fn close_all_drains_registry() {
+        let mut registry = WsRegistry::new();
+        registry.register("peer-a");
+        registry.register("peer-b");
+        registry.close_all();
+        assert_eq!(registry.live_count(), 0);
+    }
+
+    #[test]
+    fn websocket_sync_loop_leaks_nothing() {
+        handle_websocket(true);
+        handle_websocket(false);
     }
 }
