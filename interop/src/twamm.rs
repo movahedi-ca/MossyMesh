@@ -57,6 +57,9 @@ pub enum TwammError {
     OrderNotFound,
     /// Zero-sized stream request.
     ZeroAmount,
+    /// Order amount is smaller than the slice count, so the per-slice amount
+    /// would truncate to zero and the order could never stream. Rejected up front.
+    AmountTooSmall,
 }
 
 impl std::fmt::Display for TwammError {
@@ -72,6 +75,9 @@ impl std::fmt::Display for TwammError {
             TwammError::InvalidPrice => write!(f, "invalid price"),
             TwammError::OrderNotFound => write!(f, "order not found"),
             TwammError::ZeroAmount => write!(f, "zero amount"),
+            TwammError::AmountTooSmall => {
+                write!(f, "order amount smaller than slice count")
+            }
         }
     }
 }
@@ -195,6 +201,12 @@ impl TwammEngine {
             return Err(TwammError::InvalidPrice);
         }
         let slices = slices.max(1);
+        if amount_in < slices as u64 {
+            // Per-slice streaming divides remaining_in by slices_remaining and
+            // truncates; with amount_in < slices the first slice is zero and the
+            // order can never progress. Reject up front instead of locking funds.
+            return Err(TwammError::AmountTooSmall);
+        }
         let id = format!("twamm-{}", self.next_id);
         self.next_id += 1;
         self.orders.push(TwammOrder {
@@ -429,6 +441,16 @@ mod tests {
     #[test]
     fn max_spread_constant_is_two_percent() {
         assert_eq!(MAX_SPREAD_BPS, 200);
+    }
+
+    #[test]
+    fn dust_order_rejected_up_front() {
+        let mut eng = TwammEngine::new();
+        // amount 2 over 5 slices: per-slice would truncate to 0 and stick forever.
+        let err = eng
+            .submit_order(OrderSide::Buy, 2, 5, 1_000_000)
+            .unwrap_err();
+        assert_eq!(err, TwammError::AmountTooSmall);
     }
 
     #[test]
