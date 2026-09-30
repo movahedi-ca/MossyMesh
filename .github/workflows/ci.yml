@@ -65,6 +65,80 @@ jobs:
       - name: cargo test --workspace --lib
         run: cargo test --workspace --lib
 
+  rust-fmt:
+    name: cargo fmt --check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: cargo fmt --all -- --check
+        run: cargo fmt --all -- --check
+
+  rust-clippy:
+    name: cargo clippy
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: '. -> target'
+          shared-key: workspace-clippy
+
+      - name: cargo clippy --workspace --all-targets
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+  # Guards against Windows MinGW/MSVC linker regressions (see issue #10):
+  # host build scripts must link with the MSVC toolchain, not a broken
+  # x86_64-w64-mingw32-gcc install.
+  rust-windows:
+    name: cargo check (windows-msvc)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: '. -> target'
+          shared-key: workspace-windows
+
+      # --all-targets so the mesh-daemon [[bin]] also compiles (see issue #85).
+      - name: cargo check --workspace --all-targets
+        run: cargo check --workspace --all-targets
+
+  # Engine is wasm32-wasip1-ready by design (see engine/Cargo.toml target
+  # notes). Keep the WASM compilation pipeline green.
+  rust-wasm:
+    name: cargo check engine (wasm32-wasip1)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: '. -> target'
+          shared-key: workspace-wasm
+
+      - name: cargo check -p engine --target wasm32-wasip1
+        run: cargo check -p engine --target wasm32-wasip1
+
   docker-portal:
     name: Docker portal image
     runs-on: ubuntu-latest
