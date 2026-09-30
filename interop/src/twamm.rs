@@ -271,6 +271,33 @@ impl TwammEngine {
         Ok(fill)
     }
 
+    /// Refresh the reference mid price on an open order (oracle update).
+    ///
+    /// The mid captured at submit goes stale on volatile pairs, so the 2%
+    /// cap would be measured against a dead baseline. Callers streaming
+    /// later slices should refresh the oracle input first; the cap is then
+    /// enforced at execution against the live mid. Rejects zero prices,
+    /// unknown orders, and exhausted orders.
+    pub fn refresh_reference_price(
+        &mut self,
+        order_id: &str,
+        new_reference_price: u64,
+    ) -> Result<(), TwammError> {
+        if new_reference_price == 0 {
+            return Err(TwammError::InvalidPrice);
+        }
+        let order = self
+            .orders
+            .iter_mut()
+            .find(|o| o.id == order_id)
+            .ok_or(TwammError::OrderNotFound)?;
+        if order.slices_remaining == 0 || order.remaining_in == 0 {
+            return Err(TwammError::OrderExhausted);
+        }
+        order.reference_price = new_reference_price;
+        Ok(())
+    }
+
     /// Peek at an order by id.
     pub fn get_order(&self, order_id: &str) -> Option<&TwammOrder> {
         self.orders.iter().find(|o| o.id == order_id)
@@ -391,6 +418,34 @@ mod tests {
         assert_eq!(
             enforce_max_spread(1_000_000, 0),
             Err(TwammError::InvalidPrice)
+        );
+    }
+
+    #[test]
+    fn refresh_reference_price_updates_oracle_input() {
+        // Issue #43: the mid captured at submit goes stale on volatile pairs.
+        let mut eng = TwammEngine::new();
+        let id = eng
+            .submit_order(OrderSide::Buy, 1_000_000, 4, 1_000_000)
+            .unwrap();
+        assert_eq!(eng.get_order(&id).unwrap().reference_price, 1_000_000);
+
+        // Oracle moved to 1_050_000; refresh before streaming later slices.
+        eng.refresh_reference_price(&id, 1_050_000).unwrap();
+        assert_eq!(eng.get_order(&id).unwrap().reference_price, 1_050_000);
+
+        // A fill 1% off the fresh mid now quotes fine against the live baseline.
+        let fill = eng.quote_slice(&id, 1_060_500).unwrap();
+        assert_eq!(fill.spread_bps, 100);
+
+        // Zero price, unknown order, and exhausted order are rejected.
+        assert_eq!(
+            eng.refresh_reference_price(&id, 0),
+            Err(TwammError::InvalidPrice)
+        );
+        assert_eq!(
+            eng.refresh_reference_price("twamm-nope", 1_000_000),
+            Err(TwammError::OrderNotFound)
         );
     }
 
