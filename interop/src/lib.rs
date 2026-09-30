@@ -3,6 +3,7 @@
 //! Phase 5: AsyncAPI / OpenAPI gateway, TWAMM orchestration (2% max-spread),
 //! and retroactive AMM liquidity mining for genesis offline nodes.
 
+pub mod api_docs;
 pub mod liquidity;
 pub mod openapi_gateway;
 pub mod twamm;
@@ -91,7 +92,9 @@ pub struct GenericPayload {
 pub async fn run_http_server() {
     let app = Router::new()
         .route("/api/v1/health", get(health_handler).post(health_handler))
-        .route("/api/v1/submit_job", post(submit_job_handler));
+        .route("/api/v1/submit_job", post(submit_job_handler))
+        .route("/api-docs/openapi.json", get(api_docs::serve_openapi_json))
+        .merge(api_docs::swagger_ui());
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await.unwrap();
     println!("Interop: HTTP Server listening on 0.0.0.0:8080");
