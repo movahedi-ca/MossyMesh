@@ -1,0 +1,9 @@
+# Windows hosts: link host build scripts (proc-macro2, serde, zerocopy, ...)
+# with the MSVC linker instead of MinGW's x86_64-w64-mingw32-gcc, which fails
+# with "unable to find library -lgcc_eh / -lgcc" when the MSYS2 install is
+# incomplete. Develop on Windows with the x86_64-pc-windows-msvc toolchain
+# (rustup default msvc); the CI windows-msvc job covers this path.
+# Scoped to the MSVC target triple only: the MinGW toolchain target and
+# wasm32-wasip1 builds are untouched.
+[target.x86_64-pc-windows-msvc]
+linker = "link.exe"
