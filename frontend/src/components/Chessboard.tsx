@@ -1,5 +1,6 @@
 import { useCallback, useMemo, useState } from "react";
 import { Chess, type Square, type Move } from "chess.js";
+import { formatEval, useEngineEval } from "../lib/engineEval";
 import "./Chessboard.css";
 
 const FILES = ["a", "b", "c", "d", "e", "f", "g", "h"] as const;
@@ -40,6 +41,7 @@ export const Chessboard = () => {
 
   const board = useMemo(() => game.board(), [game]);
   const fen = useMemo(() => game.fen(), [game]);
+  const engineEval = useEngineEval(fen);
 
   const clearSelection = useCallback(() => {
     setSelected(null);
@@ -159,6 +161,14 @@ export const Chessboard = () => {
       <div className="chess-meta">
         <div className={`game-status ${game.isCheck() ? "in-check" : ""} ${game.isGameOver() ? "game-over" : ""}`}>
           {status}
+          <span
+            className="engine-eval"
+            title={engineEval.source === "daemon" ? "Score from the mesh engine sandbox" : "Local on-device evaluation"}
+            aria-label={`Engine evaluation ${engineEval.score === null ? "loading" : formatEval(engineEval.score)} pawns`}
+            style={{ marginLeft: 8, opacity: 0.85, fontVariantNumeric: "tabular-nums" }}
+          >
+            {engineEval.score === null ? "…" : `Eval ${formatEval(engineEval.score)}`}
+          </span>
         </div>
         <div className="mesh-note">{meshNote}</div>
       </div>
