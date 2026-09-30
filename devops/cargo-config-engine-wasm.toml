@@ -15,3 +15,15 @@
 
 # Optional: prefer rust-lld if your host linker path is awkward (usually unnecessary).
 # linker = "rust-lld"
+
+# Optional: enable WebAssembly SIMD128 for the engine target only.
+#
+# OFF BY DEFAULT (issue #42). The engine bitboards are shakmaty's scalar u64
+# ops, so enabling SIMD128 only lets rustc/LLVM auto-vectorize what it can;
+# there is no hand-written SIMD kernel and nothing is promised. Enable only if:
+#   1. your WASM runtime was built with SIMD support (WAMR needs
+#      -DWAMR_BUILD_SIMD=1; stock wasmtime supports it), and
+#   2. you benchmark a real speedup on your workload.
+#
+# Uncomment to try it:
+# rustflags = ["-C", "target-feature=+simd128"]

@@ -184,6 +184,18 @@ cargo test -p engine --target wasm32-wasip1 -- --nocapture
 
 ---
 
+## 6b. Optional: SIMD128 (issue #42)
+
+The engine bitboards are shakmaty's scalar `u64` ops; there is no hand-written
+vector kernel, so this is an opt-in experiment, not a promised speedup. The
+default build stays scalar and runs everywhere.
+
+- Uncomment the `rustflags` line in [`cargo-config-engine-wasm.toml`](cargo-config-engine-wasm.toml) to pass `-C target-feature=+simd128`.
+- Your runtime must support SIMD: WAMR needs `-DWAMR_BUILD_SIMD=1` at its own build time; stock wasmtime is fine.
+- Measure with the section 5 bench before and after; keep the flag only on a real, measured gain.
+
+---
+
 ## 7. Checklist
 
 - [ ] `rustup target add wasm32-wasip1`
