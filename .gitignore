@@ -1,0 +1,4 @@
+# cargo-fuzz build and runtime artifacts (issue #36)
+consensus/fuzz/target/
+consensus/fuzz/corpus/
+consensus/fuzz/artifacts/

@@ -1,0 +1,19 @@
+[package]
+name = "consensus-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+
+[dependencies.consensus]
+path = ".."
+
+# Detach from the parent workspace (standard cargo-fuzz layout): the fuzz
+# crate is built with cargo-fuzz, not as a workspace member.
+[workspace]
