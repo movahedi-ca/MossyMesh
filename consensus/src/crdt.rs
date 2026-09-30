@@ -140,6 +140,11 @@ pub struct Doc {
     applied_inserts: HashSet<ItemId>,
     /// Applied delete op ids (idempotent).
     applied_deletes: HashSet<ItemId>,
+    /// Delete targets seen before their insert (issue #31). A `Delete`
+    /// integrated ahead of its target `Insert` is held here and applied
+    /// when the insert arrives, so replicas converge regardless of op
+    /// arrival order.
+    pending_deletes: HashSet<ItemId>,
     /// Full causal op log for delta export.
     op_log: Vec<CrdtOp>,
     /// Per-agent highest integrated sequence number.
@@ -328,11 +333,15 @@ impl Doc {
                 parent,
                 content,
             } => {
+                // A delete that arrived before its target insert is held in
+                // `pending_deletes`: the item is born deleted so arrival
+                // order cannot fork replicas (issue #31).
+                let deleted = self.pending_deletes.remove(&id);
                 let item = SeqItem {
                     id,
                     parent,
                     content,
-                    deleted: false,
+                    deleted,
                 };
                 self.items.insert(id, item);
                 self.children.entry(parent).or_default().push(id);
@@ -342,6 +351,10 @@ impl Doc {
             CrdtOp::Delete { target, op_id } => {
                 if let Some(item) = self.items.get_mut(&target) {
                     item.deleted = true;
+                } else {
+                    // Target not inserted yet: hold the delete so a
+                    // later-arriving insert is born deleted (issue #31).
+                    self.pending_deletes.insert(target);
                 }
                 self.applied_deletes.insert(op_id);
                 self.note_vector(op_id);
@@ -470,6 +483,33 @@ fn map_op_time(op: &CrdtOp) -> LogicalTime {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn delete_before_insert_converges() {
+        // Issue #31: a delete integrated before its target insert must
+        // still take effect. Replicas must agree no matter which op
+        // arrives first.
+        let mut a = Doc::new(1);
+        let ins = a.insert_char(0, 'x');
+        let del = a.delete_char(0).unwrap();
+        assert_eq!(a.text(), "");
+
+        // Causal order: insert then delete.
+        let mut causal = Doc::new(2);
+        causal.integrate(ins.clone());
+        causal.integrate(del.clone());
+
+        // Reversed arrival: delete lands before its target insert.
+        let mut reversed = Doc::new(3);
+        reversed.integrate(del.clone());
+        reversed.integrate(ins.clone());
+
+        assert_eq!(causal.text(), "");
+        assert_eq!(reversed.text(), "");
+        assert_eq!(causal.text(), reversed.text());
+        // The pending tombstone is consumed once the insert arrives.
+        assert!(reversed.pending_deletes.is_empty());
+    }
 
     #[test]
     fn concurrent_divergent_edits_converge() {
