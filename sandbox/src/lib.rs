@@ -27,6 +27,7 @@
 #![deny(unsafe_code)]
 
 pub mod admit;
+pub mod engine_bundle;
 pub mod host;
 pub mod job;
 pub mod pool;
@@ -45,6 +46,10 @@ pub use admit::{
     PRODUCTION_MODULUS,
 };
 pub use host::{HostError, HostRuntime, AUX_STACK_SIZE};
+/// Embedded engine.wasm loader (issue #38); `None` without `bundled-engine`.
+pub use engine_bundle::engine_wasm_bytes;
+#[cfg(feature = "bundled-engine")]
+pub use engine_bundle::ENGINE_WASM_BYTES;
 pub use job::{Job, JobError};
 pub use pool::{BlockHandle, FixedBlockPool, PoolError};
 pub use quant::{

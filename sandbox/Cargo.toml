@@ -12,6 +12,10 @@ default = []
 # Enabling `wamr` exposes integration hooks; it does not link native WAMR
 # unless a future `wamr-sys` dependency is added for your platform.
 wamr = []
+# Embed the #11 pipeline's sandbox/assets/engine.wasm via include_bytes! for
+# fast daemon cold starts (issue #38). Off by default; the loader falls back
+# to disk reads when unset.
+bundled-engine = []
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
