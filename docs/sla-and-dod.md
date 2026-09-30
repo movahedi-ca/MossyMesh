@@ -9,7 +9,7 @@
 
 | ID | SLA | Target | Measurement |
 | --- | --- | --- | --- |
-| SLA-RAM | Active ledger footprint | ≤ **10 MB** (10_000_000 bytes; sandbox `MEM_LIMIT` = 10 MiB) | Probes; reject unbounded active set |
+| SLA-RAM | Active ledger footprint | ≤ **10 MiB** (10_485_760 bytes; sandbox `MEM_LIMIT` = `10 * 1024 * 1024`) | Probes; reject unbounded active set |
 | SLA-DET | Verifiable compute | < **1%** unverifiable outputs | Trace hash + re-exec / proof sample |
 | SLA-TO | Job reliability | < **5%** timeout | Telemetry (sim OK early) |
 | SLA-CAP | Capacity | **100 RVCH/day** / 20-node island, zero upstream | Bench (Phase 4+) |
@@ -127,7 +127,7 @@ Crypto or memory allocation changes require written proof (doc or test) that SLA
 - [x] Stable AsyncAPI/OpenAPI submit/sync/health.
 - [x] Uplink gateway without abandoning island autonomy.
 - [x] TWAMM bridge with **≤ 2%** max-spread.
-- [x] Frontend wired to host API for chess + network status.
+- [ ] Frontend wired to host API for chess + network status (currently hardcoded seed nodes in `frontend/src/hooks/useMeshNetwork.ts`; live wiring pending).
 
 ### Acceptance
 
