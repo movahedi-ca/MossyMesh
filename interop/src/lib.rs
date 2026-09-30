@@ -8,6 +8,7 @@ pub mod openapi_gateway;
 pub mod twamm;
 
 use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
 use axum::{routing::{get, post}, Router, Json, extract::State};
 use serde::{Deserialize, Serialize};
 
@@ -360,18 +361,157 @@ fn handle_gateway(req: &AsyncApiRequest) -> Result<String, InteropError> {
     }
 }
 
-/// Simulates an ongoing WebSocket event loop syncing state to the external internet.
-pub fn handle_websocket(mut connection_alive: bool) {
-    let mut tick = 0;
-    while connection_alive && tick < 3 {
-        println!("WebSocket Sync Tick {}...", tick);
-        tick += 1;
-        // Simulate break
-        if tick == 2 {
-            connection_alive = false;
+/// Current upstream connectivity, from the gateway's `internet_reconnected` flag.
+pub fn internet_reconnected() -> bool {
+    gateway()
+        .lock()
+        .map(|gw| gw.internet_reconnected)
+        .unwrap_or(false)
+}
+
+/// Backoff policy for the WebSocket sync loop (issue #12).
+#[derive(Debug, Clone, Copy)]
+pub struct WsBackoff {
+    /// Delay before the first reconnect attempt.
+    pub base: Duration,
+    /// Cap for the exponential growth.
+    pub max: Duration,
+}
+
+impl WsBackoff {
+    /// Delay before attempt `n` (0-based): `base * 2^n`, saturated at `max`.
+    /// The shift is clamped so very large attempt counts cannot overflow.
+    pub fn delay_for(&self, attempt: u32) -> Duration {
+        let shift = attempt.min(20);
+        self.base.saturating_mul(1u32 << shift).min(self.max)
+    }
+}
+
+impl Default for WsBackoff {
+    fn default() -> Self {
+        Self {
+            base: Duration::from_secs(1),
+            max: Duration::from_secs(60),
+        }
+    }
+}
+
+/// One step of the persistent sync state machine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WsStep {
+    /// Link is up: emit a sync tick.
+    Tick,
+    /// Link is down: sleep, then retry.
+    Retry(Duration),
+}
+
+/// Persistent WebSocket sync state machine with exponential-backoff reconnects.
+#[derive(Debug)]
+pub struct WsSyncLoop {
+    backoff: WsBackoff,
+    /// Consecutive failed attempts since the last successful tick.
+    pub consecutive_failures: u32,
+    /// Successful sync ticks this session.
+    pub ticks: u64,
+}
+
+impl WsSyncLoop {
+    pub fn new(backoff: WsBackoff) -> Self {
+        Self {
+            backoff,
+            consecutive_failures: 0,
+            ticks: 0,
+        }
+    }
+
+    /// Advance the machine once against the current link state.
+    pub fn step(&mut self, internet_up: bool) -> WsStep {
+        if internet_up {
+            self.consecutive_failures = 0;
+            self.ticks += 1;
+            WsStep::Tick
+        } else {
+            let delay = self.backoff.delay_for(self.consecutive_failures);
+            self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+            WsStep::Retry(delay)
+        }
+    }
+}
+
+/// Consecutive failed reconnects before a sync session gives up.
+pub const WS_MAX_RECONNECT_ATTEMPTS: u32 = 4;
+
+/// Ticks per sync session; the daemon starts a new session afterwards.
+pub const WS_SESSION_TICKS: u64 = 64;
+
+/// Persistent WebSocket sync loop with exponential-backoff reconnects.
+///
+/// `connection_alive` seeds the first link probe. Every iteration re-probes
+/// the gateway's `internet_reconnected` flag, so a reconnect that happens
+/// mid-session resumes ticking instead of dropping the loop. When the link
+/// is down, the loop sleeps with exponential backoff (1s, 2s, 4s, ...) and
+/// retries; the session ends after `WS_MAX_RECONNECT_ATTEMPTS` consecutive
+/// failures or `WS_SESSION_TICKS` ticks. For a never-ending daemon loop,
+/// drive [`run_websocket_sync`] instead.
+pub fn handle_websocket(connection_alive: bool) {
+    let mut sm = WsSyncLoop::new(WsBackoff::default());
+    let mut up = connection_alive;
+    loop {
+        // Pick up a reconnect that happened since the last iteration.
+        if internet_reconnected() {
+            up = true;
+        }
+        match sm.step(up) {
+            WsStep::Tick => {
+                println!("WebSocket Sync Tick {}...", sm.ticks);
+                if sm.ticks >= WS_SESSION_TICKS {
+                    break;
+                }
+            }
+            WsStep::Retry(delay) => {
+                println!(
+                    "WebSocket link down; reconnect attempt {} in {}ms...",
+                    sm.consecutive_failures,
+                    delay.as_millis()
+                );
+                std::thread::sleep(delay);
+                // Stay down until the gateway flag flips.
+                up = false;
+            }
+        }
+        if sm.consecutive_failures >= WS_MAX_RECONNECT_ATTEMPTS {
+            break;
         }
     }
     println!("WebSocket Connection Closed.");
+}
+
+/// Never-ending async driver for the persistent sync loop.
+///
+/// Ticks once per second while the link is up; on a drop it backs off
+/// exponentially and keeps probing until the link returns. Returns only
+/// when `max_attempts` consecutive failures occur (`u32::MAX` retries forever).
+pub async fn run_websocket_sync(
+    mut internet_up: impl FnMut() -> bool,
+    mut on_tick: impl FnMut(u64),
+    max_attempts: u32,
+) {
+    let mut sm = WsSyncLoop::new(WsBackoff::default());
+    loop {
+        match sm.step(internet_up()) {
+            WsStep::Tick => {
+                let t = sm.ticks;
+                on_tick(t);
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+            WsStep::Retry(delay) => {
+                tokio::time::sleep(delay).await;
+            }
+        }
+        if sm.consecutive_failures >= max_attempts {
+            break;
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -451,5 +591,35 @@ mod tests {
             payload: String::new(),
         });
         assert_eq!(err, Err(InteropError::ConnectionRefused));
+    }
+
+    #[test]
+    fn ws_backoff_is_exponential_and_capped() {
+        let b = WsBackoff {
+            base: Duration::from_secs(1),
+            max: Duration::from_secs(60),
+        };
+        assert_eq!(b.delay_for(0), Duration::from_secs(1));
+        assert_eq!(b.delay_for(1), Duration::from_secs(2));
+        assert_eq!(b.delay_for(2), Duration::from_secs(4));
+        assert_eq!(b.delay_for(10), Duration::from_secs(60));
+        assert_eq!(b.delay_for(u32::MAX), Duration::from_secs(60));
+    }
+
+    #[test]
+    fn ws_sync_loop_reconnects_with_backoff_then_resumes() {
+        let mut sm = WsSyncLoop::new(WsBackoff::default());
+        // Link up: ticks, failures reset.
+        assert_eq!(sm.step(true), WsStep::Tick);
+        assert_eq!(sm.step(true), WsStep::Tick);
+        assert_eq!(sm.ticks, 2);
+        // Link drops: exponential backoff, failures accumulate.
+        assert_eq!(sm.step(false), WsStep::Retry(Duration::from_secs(1)));
+        assert_eq!(sm.step(false), WsStep::Retry(Duration::from_secs(2)));
+        assert_eq!(sm.consecutive_failures, 2);
+        // Reconnect: backoff resets, ticking resumes.
+        assert_eq!(sm.step(true), WsStep::Tick);
+        assert_eq!(sm.consecutive_failures, 0);
+        assert_eq!(sm.step(false), WsStep::Retry(Duration::from_secs(1)));
     }
 }
