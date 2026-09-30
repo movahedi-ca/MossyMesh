@@ -5,21 +5,22 @@
 //! multi-sig proposals no longer pass regardless of signatures — control
 //! belongs to ZK-blinded edge voting.
 //!
-//! # Cryptography status (honest stub)
+//! # Cryptography
 //!
-//! Signature verification is **deterministic domain-separated hashing**, not
-//! production public-key crypto. [`Signature::forge`] builds
-//! `SHA-256("mm-multisig-sig-v1" || signer || proposal_id || description_hash)`
-//! and [`Signature::verify_against`] checks that digest plus admin membership.
+//! Signatures are real ed25519 detached signatures over a domain-separated
+//! message digest (`SHA-256("mm-multisig-sig-v1" || signer || proposal_id ||
+//! description_hash)`). Each admin registers a verifying key at construction;
+//! `sign` verifies the detached signature against the claimed signer's
+//! registered key, so signatures cannot be forged by non-key-holders (#62).
+//! [`Signature::forge`] remains as a test-only helper that builds the old
+//! deterministic digest, and is not callable in production builds.
 //!
-//! This is intentional for offline unit tests (no network, no key material).
-//! Production must replace `forge` / `verify_against` with real ed25519 (or
-//! similar) detached signatures over the same domain-separated message.
 //! Threshold counting, proposal validation, and the decay schedule are fully
-//! enforced and covered by tests independent of the crypto backend.
+//! enforced and covered by tests independent of the signature backend.
 
 use std::collections::{HashMap, HashSet};
 
+use ed25519_dalek::{Signature as DalekSignature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -47,12 +48,15 @@ pub enum MultisigError {
     InvalidSignature,
 }
 
-/// Opaque admin signature over a proposal (stub crypto — see module docs).
+/// Opaque admin signature over a proposal.
+///
+/// `bytes` holds a 64-byte ed25519 detached signature over the
+/// domain-separated message digest (see [`Signature::message_digest`]).
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Signature {
     pub signer: NodeId,
     pub proposal_id: u64,
-    /// Detached signature bytes. Stub scheme: 32-byte SHA-256 digest.
+    /// Detached ed25519 signature bytes (64 bytes).
     pub bytes: Vec<u8>,
 }
 
@@ -87,7 +91,29 @@ impl Signature {
         digest
     }
 
-    /// Build a **stub** signature (deterministic hash, not real PK crypto).
+    /// Sign a proposal with an admin's ed25519 signing key (production path).
+    ///
+    /// Signs the domain-separated message digest; anyone holding only public
+    /// inputs cannot produce valid bytes (fixes #62).
+    pub fn sign_proposal(
+        key: &SigningKey,
+        signer: NodeId,
+        proposal_id: u64,
+        description: &str,
+    ) -> Self {
+        let dh = Self::description_hash(description);
+        let digest = Self::message_digest(&signer, proposal_id, &dh);
+        let sig: DalekSignature = key.sign(&digest);
+        Self {
+            signer,
+            proposal_id,
+            bytes: sig.to_bytes().to_vec(),
+        }
+    }
+
+    /// Build the legacy stub "signature" (deterministic digest, not real PK
+    /// crypto). Test-only: simulates what an attacker could previously forge.
+    #[cfg(test)]
     pub fn forge(signer: NodeId, proposal_id: u64, description: &str) -> Self {
         let dh = Self::description_hash(description);
         let digest = Self::message_digest(&signer, proposal_id, &dh);
@@ -98,14 +124,19 @@ impl Signature {
         }
     }
 
-    /// Verify stub signature bytes against proposal description.
-    pub fn verify_against(&self, description: &str) -> bool {
-        if self.bytes.len() != 32 {
+    /// Verify ed25519 signature bytes against the proposal description and the
+    /// signer's registered verifying key.
+    pub fn verify_against(&self, description: &str, key: &VerifyingKey) -> bool {
+        if self.bytes.len() != 64 {
             return false;
         }
+        let sig = match DalekSignature::try_from(self.bytes.as_slice()) {
+            Ok(sig) => sig,
+            Err(_) => return false,
+        };
         let dh = Self::description_hash(description);
-        let expected = Self::message_digest(&self.signer, self.proposal_id, &dh);
-        self.bytes.as_slice() == expected.as_slice()
+        let digest = Self::message_digest(&self.signer, self.proposal_id, &dh);
+        key.verify(&digest, &sig).is_ok()
     }
 }
 
@@ -120,6 +151,9 @@ pub struct MultisigProposal {
 #[derive(Clone, Debug)]
 pub struct AdminMultisig {
     admins: Vec<NodeId>,
+    /// Registered ed25519 verifying key per admin; signatures are checked
+    /// against the claimed signer's key.
+    admin_keys: HashMap<NodeId, VerifyingKey>,
     threshold: usize,
     /// Network day when the multi-sig was activated (genesis day).
     genesis_day: u64,
@@ -131,16 +165,19 @@ pub struct AdminMultisig {
 
 impl AdminMultisig {
     /// Create a multi-sig with exactly [`MULTISIG_SIGNERS`] distinct admin keys.
-    pub fn new(admins: Vec<NodeId>, genesis_day: u64) -> Result<Self, MultisigError> {
+    pub fn new(admins: Vec<(NodeId, VerifyingKey)>, genesis_day: u64) -> Result<Self, MultisigError> {
         if admins.len() != MULTISIG_SIGNERS {
             return Err(MultisigError::WrongSignerCount);
         }
-        let unique: HashSet<_> = admins.iter().copied().collect();
+        let unique: HashSet<_> = admins.iter().map(|(n, _)| *n).collect();
         if unique.len() != MULTISIG_SIGNERS {
             return Err(MultisigError::DuplicateSigner);
         }
+        let admin_keys: HashMap<NodeId, VerifyingKey> = admins.iter().cloned().collect();
+        let admin_ids: Vec<NodeId> = admins.into_iter().map(|(n, _)| n).collect();
         Ok(Self {
-            admins,
+            admins: admin_ids,
+            admin_keys,
             threshold: MULTISIG_THRESHOLD,
             genesis_day,
             proposals: HashMap::new(),
@@ -210,13 +247,19 @@ impl AdminMultisig {
 
     /// Record an admin signature on a proposal.
     ///
-    /// Verifies stub signature bytes against the stored proposal description,
-    /// enforces admin membership, and counts each admin at most once
-    /// (threshold counting uses distinct signers).
+    /// Verifies the ed25519 signature bytes against the stored proposal
+    /// description and the signer's registered verifying key, enforces admin
+    /// membership, and counts each admin at most once (threshold counting
+    /// uses distinct signers).
     pub fn sign(&mut self, sig: Signature) -> Result<(), MultisigError> {
         if !self.is_admin(&sig.signer) {
             return Err(MultisigError::NotAnAdmin);
         }
+        let key: VerifyingKey = self
+            .admin_keys
+            .get(&sig.signer)
+            .cloned()
+            .ok_or(MultisigError::NotAnAdmin)?;
         let proposal = self
             .proposals
             .get(&sig.proposal_id)
@@ -224,7 +267,7 @@ impl AdminMultisig {
         if proposal.executed {
             return Err(MultisigError::AlreadyExecuted);
         }
-        if !sig.verify_against(&proposal.description) {
+        if !sig.verify_against(&proposal.description, &key) {
             return Err(MultisigError::InvalidSignature);
         }
         let set = self
@@ -304,17 +347,28 @@ pub fn authority_bps(days_elapsed: u64) -> u64 {
 mod tests {
     use super::*;
 
-    fn five_admins() -> Vec<NodeId> {
+    /// Five admins with real ed25519 keys: (node id, signing key).
+    fn five_admin_keys() -> Vec<(NodeId, SigningKey)> {
         (0..5)
-            .map(|i| NodeId::from_label(&format!("admin{i}")))
+            .map(|i| {
+                let node = NodeId::from_label(&format!("admin{i}"));
+                let sk = SigningKey::from_bytes(&[(i as u8) + 1; 32]);
+                (node, sk)
+            })
             .collect()
     }
 
-    fn sign_n(ms: &mut AdminMultisig, id: u64, n: usize) {
+    fn five_admins() -> Vec<(NodeId, VerifyingKey)> {
+        five_admin_keys()
+            .into_iter()
+            .map(|(n, sk)| (n, sk.verifying_key()))
+            .collect()
+    }
+
+    fn sign_n(ms: &mut AdminMultisig, keys: &[(NodeId, SigningKey)], id: u64, n: usize) {
         let desc = ms.proposal(id).unwrap().description.clone();
-        for i in 0..n {
-            let signer = NodeId::from_label(&format!("admin{i}"));
-            ms.sign(Signature::forge(signer, id, &desc)).unwrap();
+        for (node, sk) in keys.iter().take(n) {
+            ms.sign(Signature::sign_proposal(sk, *node, id, &desc)).unwrap();
         }
     }
 
@@ -389,9 +443,10 @@ mod tests {
 
     #[test]
     fn three_of_five_executes_while_authority_remains() {
+        let keys = five_admin_keys();
         let mut ms = AdminMultisig::new(five_admins(), 0).unwrap();
         let id = ms.propose("bootstrap params").unwrap();
-        sign_n(&mut ms, id, 3);
+        sign_n(&mut ms, &keys, id, 3);
         assert!(ms.threshold_met(id));
         assert_eq!(ms.signature_count(id), 3);
         // Day 10 still has authority
@@ -401,19 +456,21 @@ mod tests {
 
     #[test]
     fn threshold_counting_exact_boundary() {
+        let keys = five_admin_keys();
         let mut ms = AdminMultisig::new(five_admins(), 0).unwrap();
         let id = ms.propose("boundary").unwrap();
         assert_eq!(ms.signature_count(id), 0);
         assert!(!ms.threshold_met(id));
 
-        sign_n(&mut ms, id, 2);
+        sign_n(&mut ms, &keys, id, 2);
         assert_eq!(ms.signature_count(id), 2);
         assert!(!ms.threshold_met(id));
         assert_eq!(ms.execute(id, 0), Err(MultisigError::ThresholdNotMet));
 
         // Third distinct signer crosses threshold
         let desc = ms.proposal(id).unwrap().description.clone();
-        ms.sign(Signature::forge(NodeId::from_label("admin2"), id, &desc))
+        let (node2, sk2) = &keys[2];
+        ms.sign(Signature::sign_proposal(sk2, *node2, id, &desc))
             .unwrap();
         assert_eq!(ms.signature_count(id), 3);
         assert!(ms.threshold_met(id));
@@ -422,10 +479,12 @@ mod tests {
 
     #[test]
     fn threshold_counts_distinct_signers_only() {
+        let keys = five_admin_keys();
         let mut ms = AdminMultisig::new(five_admins(), 0).unwrap();
         let id = ms.propose("no double count").unwrap();
         let desc = ms.proposal(id).unwrap().description.clone();
-        let s0 = Signature::forge(NodeId::from_label("admin0"), id, &desc);
+        let (node0, sk0) = &keys[0];
+        let s0 = Signature::sign_proposal(sk0, *node0, id, &desc);
         ms.sign(s0.clone()).unwrap();
         assert_eq!(
             ms.sign(s0),
@@ -437,9 +496,10 @@ mod tests {
 
     #[test]
     fn five_of_five_still_executes_once() {
+        let keys = five_admin_keys();
         let mut ms = AdminMultisig::new(five_admins(), 0).unwrap();
         let id = ms.propose("full quorum").unwrap();
-        sign_n(&mut ms, id, 5);
+        sign_n(&mut ms, &keys, id, 5);
         assert_eq!(ms.signature_count(id), 5);
         assert!(ms.threshold_met(id));
         ms.execute(id, 0).unwrap();
@@ -448,9 +508,10 @@ mod tests {
 
     #[test]
     fn execution_fails_after_full_decay() {
+        let keys = five_admin_keys();
         let mut ms = AdminMultisig::new(five_admins(), 0).unwrap();
         let id = ms.propose("too late").unwrap();
-        sign_n(&mut ms, id, 5);
+        sign_n(&mut ms, &keys, id, 5);
         assert_eq!(
             ms.execute(id, 90),
             Err(MultisigError::InsufficientAuthority)
@@ -465,9 +526,10 @@ mod tests {
 
     #[test]
     fn execution_ok_on_last_day_with_authority() {
+        let keys = five_admin_keys();
         let mut ms = AdminMultisig::new(five_admins(), 0).unwrap();
         let id = ms.propose("day 89 ok").unwrap();
-        sign_n(&mut ms, id, 3);
+        sign_n(&mut ms, &keys, id, 3);
         assert!(ms.has_authority(89));
         ms.execute(id, 89).unwrap();
         assert!(ms.proposal(id).unwrap().executed);
@@ -475,25 +537,30 @@ mod tests {
 
     #[test]
     fn threshold_not_met() {
+        let keys = five_admin_keys();
         let mut ms = AdminMultisig::new(five_admins(), 0).unwrap();
         let id = ms.propose("needs more sigs").unwrap();
-        sign_n(&mut ms, id, 2);
+        sign_n(&mut ms, &keys, id, 2);
         assert_eq!(ms.execute(id, 0), Err(MultisigError::ThresholdNotMet));
     }
 
     #[test]
     fn non_admin_cannot_sign() {
+        let keys = five_admin_keys();
         let mut ms = AdminMultisig::new(five_admins(), 0).unwrap();
         let id = ms.propose("x").unwrap();
         let desc = ms.proposal(id).unwrap().description.clone();
+        let intruder_sk = SigningKey::from_bytes(&[0xAA; 32]);
+        let intruder = NodeId::from_label("intruder");
         assert_eq!(
-            ms.sign(Signature::forge(NodeId::from_label("intruder"), id, &desc)),
+            ms.sign(Signature::sign_proposal(&intruder_sk, intruder, id, &desc)),
             Err(MultisigError::NotAnAdmin)
         );
     }
 
     #[test]
     fn reject_invalid_signature_bytes() {
+        let keys = five_admin_keys();
         let mut ms = AdminMultisig::new(five_admins(), 0).unwrap();
         let id = ms.propose("signed body").unwrap();
         // Empty / wrong length
@@ -505,21 +572,14 @@ mod tests {
             }),
             Err(MultisigError::InvalidSignature)
         );
-        // Wrong description binding
+        // Signed over a different body
+        let (node0, sk0) = &keys[0];
         assert_eq!(
-            ms.sign(Signature::forge(
-                NodeId::from_label("admin0"),
-                id,
-                "different body"
-            )),
+            ms.sign(Signature::sign_proposal(sk0, *node0, id, "different body")),
             Err(MultisigError::InvalidSignature)
         );
-        // Tampered digest
-        let mut bad = Signature::forge(
-            NodeId::from_label("admin0"),
-            id,
-            "signed body",
-        );
+        // Tampered signature bytes
+        let mut bad = Signature::sign_proposal(sk0, *node0, id, "signed body");
         bad.bytes[0] ^= 0xff;
         assert_eq!(ms.sign(bad), Err(MultisigError::InvalidSignature));
     }
@@ -541,20 +601,23 @@ mod tests {
 
     #[test]
     fn reject_unknown_proposal_and_sign_after_execute() {
+        let keys = five_admin_keys();
         let mut ms = AdminMultisig::new(five_admins(), 0).unwrap();
-        let forged = Signature::forge(NodeId::from_label("admin0"), 99, "ghost");
-        assert_eq!(ms.sign(forged), Err(MultisigError::UnknownProposal));
+        let (node0, sk0) = &keys[0];
+        let sig = Signature::sign_proposal(sk0, *node0, 99, "ghost");
+        assert_eq!(ms.sign(sig), Err(MultisigError::UnknownProposal));
         assert_eq!(
             ms.execute(99, 0),
             Err(MultisigError::UnknownProposal)
         );
 
         let id = ms.propose("live").unwrap();
-        sign_n(&mut ms, id, 3);
+        sign_n(&mut ms, &keys, id, 3);
         ms.execute(id, 0).unwrap();
         let desc = ms.proposal(id).unwrap().description.clone();
+        let (node3, sk3) = &keys[3];
         assert_eq!(
-            ms.sign(Signature::forge(NodeId::from_label("admin3"), id, &desc)),
+            ms.sign(Signature::sign_proposal(sk3, *node3, id, &desc)),
             Err(MultisigError::AlreadyExecuted)
         );
     }
@@ -562,14 +625,18 @@ mod tests {
     #[test]
     fn wrong_signer_count_and_duplicates_rejected_at_construction() {
         let four: Vec<_> = (0..4)
-            .map(|i| NodeId::from_label(&format!("a{i}")))
+            .map(|i| {
+                let node = NodeId::from_label(&format!("a{i}"));
+                let sk = SigningKey::from_bytes(&[(i as u8) + 1; 32]);
+                (node, sk.verifying_key())
+            })
             .collect();
         assert_eq!(
             AdminMultisig::new(four, 0).err(),
             Some(MultisigError::WrongSignerCount)
         );
         let mut dup = five_admins();
-        dup[4] = dup[0];
+        dup[4] = dup[0].clone();
         assert_eq!(
             AdminMultisig::new(dup, 0).err(),
             Some(MultisigError::DuplicateSigner)
@@ -577,15 +644,60 @@ mod tests {
     }
 
     #[test]
-    fn stub_signature_is_deterministic() {
-        let a = NodeId::from_label("admin0");
-        let s1 = Signature::forge(a, 7, "params");
-        let s2 = Signature::forge(a, 7, "params");
+    fn ed25519_signatures_are_deterministic_and_bound() {
+        let keys = five_admin_keys();
+        let (node0, sk0) = &keys[0];
+        let s1 = Signature::sign_proposal(sk0, *node0, 7, "params");
+        let s2 = Signature::sign_proposal(sk0, *node0, 7, "params");
         assert_eq!(s1, s2);
-        assert!(s1.verify_against("params"));
-        assert!(!s1.verify_against("params!"));
-        // Different proposal id → different digest
-        let s3 = Signature::forge(a, 8, "params");
+        assert_eq!(s1.bytes.len(), 64);
+        let vk = sk0.verifying_key();
+        assert!(s1.verify_against("params", &vk));
+        assert!(!s1.verify_against("params!", &vk));
+        // Different proposal id signs a different message
+        let s3 = Signature::sign_proposal(sk0, *node0, 8, "params");
         assert_ne!(s1.bytes, s3.bytes);
+        // A different admin's key does not verify admin0's signature
+        let other_vk = keys[1].1.verifying_key();
+        assert!(!s1.verify_against("params", &other_vk));
+    }
+
+    #[test]
+    fn forged_stub_digest_no_longer_verifies() {
+        // The old attack: anyone could build the deterministic digest for any
+        // admin (Signature::forge, now test-only) and pass verification.
+        let keys = five_admin_keys();
+        let mut ms = AdminMultisig::new(five_admins(), 0).unwrap();
+        let id = ms.propose("takeover").unwrap();
+        let desc = ms.proposal(id).unwrap().description.clone();
+        let admin0 = NodeId::from_label("admin0");
+        let forged = Signature::forge(admin0, id, &desc);
+        assert_eq!(ms.sign(forged.clone()), Err(MultisigError::InvalidSignature));
+        // Three forged "signatures" cannot reach threshold either.
+        for i in 0..3 {
+            let f = Signature::forge(NodeId::from_label(&format!("admin{i}")), id, &desc);
+            assert_eq!(ms.sign(f), Err(MultisigError::InvalidSignature));
+        }
+        assert!(!ms.threshold_met(id));
+        assert_eq!(ms.execute(id, 0), Err(MultisigError::ThresholdNotMet));
+        // Real signatures still work after the attack attempt.
+        sign_n(&mut ms, &keys, id, 3);
+        ms.execute(id, 0).unwrap();
+    }
+
+    #[test]
+    fn signature_from_wrong_key_claiming_admin_rejected() {
+        let keys = five_admin_keys();
+        let mut ms = AdminMultisig::new(five_admins(), 0).unwrap();
+        let id = ms.propose("impersonate").unwrap();
+        let desc = ms.proposal(id).unwrap().description.clone();
+        // Attacker signs with their own key but claims to be admin0.
+        let attacker_sk = SigningKey::from_bytes(&[0xBB; 32]);
+        let admin0 = NodeId::from_label("admin0");
+        let impersonated = Signature::sign_proposal(&attacker_sk, admin0, id, &desc);
+        assert_eq!(
+            ms.sign(impersonated),
+            Err(MultisigError::InvalidSignature)
+        );
     }
 }
