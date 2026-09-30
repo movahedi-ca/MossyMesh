@@ -65,6 +65,40 @@ jobs:
       - name: cargo test --workspace --lib
         run: cargo test --workspace --lib
 
+  # Produces the engine.wasm artifact the sandbox loads at runtime (issue #11).
+  # The devops script builds engine for wasm32-wasip1 as a cdylib and stages
+  # the artifact into sandbox/assets/, so the daemon never starts against a
+  # missing file. The wasm magic bytes are checked to catch empty/corrupt output.
+  engine-wasm-artifact:
+    name: Build engine.wasm artifact
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: '. -> target'
+          shared-key: workspace-engine-wasm
+
+      - name: Build and stage engine.wasm
+        run: ./devops/build-engine-wasm.sh
+
+      - name: Verify artifact
+        run: |
+          test -f sandbox/assets/engine.wasm
+          head -c 4 sandbox/assets/engine.wasm | od -An -tx1 | grep -q "00 61 73 6d"
+
+      - name: Upload engine.wasm
+        uses: actions/upload-artifact@v4
+        with:
+          name: engine-wasm
+          path: sandbox/assets/engine.wasm
+
   docker-portal:
     name: Docker portal image
     runs-on: ubuntu-latest
