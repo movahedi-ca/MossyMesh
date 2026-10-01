@@ -950,6 +950,19 @@ mod tests {
     use crate::proof::verify_proof;
 
     #[test]
+    fn insert_extension_rejects_out_of_range_nibble() {
+        // Direct internal call with a raw nibble of 16 must fail with
+        // InvalidInput, like split_leaf and insert_branch, not panic.
+        let child = MptNode::Leaf {
+            path: vec![],
+            value: b"v".to_vec(),
+            cached: OnceLock::new(),
+        };
+        let err = insert_extension(vec![16], child, &[1], b"w".to_vec()).unwrap_err();
+        assert!(matches!(err, ConsensusError::InvalidInput(_)));
+    }
+
+    #[test]
     fn insert_get_roundtrip() {
         let mut t = MerklePatriciaTrie::new();
         t.insert(b"foo", b"bar".to_vec()).unwrap();
