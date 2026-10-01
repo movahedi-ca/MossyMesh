@@ -736,6 +736,9 @@ mod tests {
             payload: "not json".into(),
         });
         assert_eq!(err, Err(InteropError::BadRequest));
+    }
+
+    #[test]
     fn abrupt_disconnect_prunes_connection() {
         let mut registry = WsRegistry::new();
         let a = registry.register("peer-a");
