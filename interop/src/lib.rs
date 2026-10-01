@@ -208,7 +208,11 @@ async fn submit_job_handler(
         }
         Err(e) => {
             println!("Job rejected: {e:?}");
-            Err(StatusCode::BAD_REQUEST)
+            Err(match e {
+                // Issue #162: backpressure surfaces as HTTP 429.
+                JobDispatchError::OutboxFull => StatusCode::TOO_MANY_REQUESTS,
+                _ => StatusCode::BAD_REQUEST,
+            })
         }
     }
 }
@@ -235,6 +239,8 @@ pub enum JobDispatchError {
     MissingAction,
     /// `move` jobs require a `fen` position.
     MissingFen,
+    /// The outbox is full: the job was NOT accepted; back off and retry.
+    OutboxFull,
 }
 
 /// Bounded outbox between the HTTP gateway and the mesh-transport DHT
@@ -249,6 +255,22 @@ fn job_outbox() -> &'static Mutex<std::collections::VecDeque<MeshJob>> {
 /// Maximum jobs buffered for the DHT publisher.
 pub const JOB_OUTBOX_CAP: usize = 1024;
 
+/// Push a validated job into the outbox.
+///
+/// Issue #162: when the outbox is full this returns
+/// [`JobDispatchError::OutboxFull`] (HTTP 429 upstream) instead of silently
+/// evicting the oldest pending job. The caller was never told a job vanished;
+/// now the rejection is explicit and the queued jobs are untouched.
+fn enqueue_job(
+    outbox: &mut std::collections::VecDeque<MeshJob>,
+    job: MeshJob,
+) -> Result<(), JobDispatchError> {
+    if outbox.len() >= JOB_OUTBOX_CAP {
+        return Err(JobDispatchError::OutboxFull);
+    }
+    outbox.push_back(job);
+    Ok(())
+}
 /// Parse, validate, and route a `/api/v1/submit_job` body (issue #14).
 ///
 /// The payload is decoded into the [`GenericPayload`] job struct, validated,
@@ -280,10 +302,7 @@ pub fn dispatch_job(body: &str) -> Result<MeshJob, JobDispatchError> {
     };
 
     if let Ok(mut outbox) = job_outbox().lock() {
-        if outbox.len() >= JOB_OUTBOX_CAP {
-            outbox.pop_front();
-        }
-        outbox.push_back(job.clone());
+        enqueue_job(&mut outbox, job.clone())?;
     }
     Ok(job)
 }
@@ -314,6 +333,8 @@ pub fn handle_rest_call(req: &AsyncApiRequest) -> Result<String, InteropError> {
         "/api/v1/health" => Ok("Mesh Island Active".to_string()),
         "/api/v1/submit_job" => match dispatch_job(&req.payload) {
             Ok(_) => Ok("Job Accepted".to_string()),
+            // Issue #162: backpressure is explicit, not a silent drop.
+            Err(JobDispatchError::OutboxFull) => Err(InteropError::TooManyRequests),
             Err(_) => Err(InteropError::BadRequest),
         },
         "/api/v1/twamm" => handle_twamm(req),
@@ -813,6 +834,8 @@ pub enum InteropError {
     SpreadCapExceeded,
     /// OpenAPI gateway is offline / internet not reconnected.
     GatewayDormant,
+    /// Job outbox is full: backpressure, the client should retry later.
+    TooManyRequests,
 }
 
 #[cfg(test)]
@@ -1025,5 +1048,74 @@ mod tests {
         assert_eq!(sm.step(true), WsStep::Tick);
         assert_eq!(sm.consecutive_failures, 0);
         assert_eq!(sm.step(false), WsStep::Retry(Duration::from_secs(1)));
+    }
+
+    fn dummy_job(i: u8) -> MeshJob {
+        MeshJob {
+            action: "fill".into(),
+            from: "t".into(),
+            to: "t".into(),
+            fen: String::new(),
+            route_key: [i; 32],
+        }
+    }
+
+    /// Issue #162: the local enqueue rejects at the cap and never evicts the
+    /// oldest job.
+    #[test]
+    fn enqueue_job_rejects_at_cap_without_eviction() {
+        let mut outbox = std::collections::VecDeque::new();
+        for i in 0..JOB_OUTBOX_CAP {
+            enqueue_job(&mut outbox, dummy_job(i as u8)).unwrap();
+        }
+        assert_eq!(outbox.len(), JOB_OUTBOX_CAP);
+
+        let before: Vec<[u8; 32]> = outbox.iter().map(|j| j.route_key).collect();
+        assert_eq!(
+            enqueue_job(&mut outbox, dummy_job(255)),
+            Err(JobDispatchError::OutboxFull)
+        );
+        // Queue untouched: no silent drop of the oldest job.
+        let after: Vec<[u8; 32]> = outbox.iter().map(|j| j.route_key).collect();
+        assert_eq!(before, after);
+        assert_eq!(outbox.len(), JOB_OUTBOX_CAP);
+    }
+
+    /// Issue #162: end to end, a full outbox surfaces backpressure through
+    /// dispatch_job, the REST shim, and the HTTP handler (429).
+    #[tokio::test]
+    async fn outbox_full_surfaces_backpressure_everywhere() {
+        {
+            let mut outbox = job_outbox().lock().unwrap();
+            outbox.clear();
+            for i in 0..JOB_OUTBOX_CAP {
+                outbox.push_back(dummy_job(i as u8));
+            }
+        }
+
+        // dispatch_job rejects loudly; nothing evicted.
+        assert_eq!(
+            dispatch_job(r#"{"action":"ping"}"#).unwrap_err(),
+            JobDispatchError::OutboxFull
+        );
+        assert_eq!(job_outbox().lock().unwrap().len(), JOB_OUTBOX_CAP);
+
+        // REST shim maps it to backpressure.
+        let rest = handle_rest_call(&AsyncApiRequest {
+            endpoint: "/api/v1/submit_job".into(),
+            payload: r#"{"action":"ping"}"#.into(),
+        });
+        assert_eq!(rest, Err(InteropError::TooManyRequests));
+
+        // HTTP handler maps it to 429.
+        let addr: SocketAddr = "127.0.0.1:55994".parse().unwrap();
+        let err = submit_job_handler(ConnectInfo(addr), HeaderMap::new(), r#"{"action":"ping"}"#.into())
+            .await
+            .unwrap_err();
+        assert_eq!(err, StatusCode::TOO_MANY_REQUESTS);
+
+        // Cleanup so other tests sharing the global outbox are unaffected.
+        let _ = drain_job_outbox();
+        assert_eq!(job_outbox().lock().unwrap().len(), 0);
     }
 }
