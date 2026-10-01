@@ -405,7 +405,7 @@ mod tests {
         let h0 = pool.allocate(32).unwrap(); // block 0
         let h1 = pool.allocate(64).unwrap(); // blocks 1-2
         pool.free(h1).unwrap(); // blocks 1-2 free again
-        // Overlapping handle: allocated block 0 plus free blocks 1-2.
+                                // Overlapping handle: allocated block 0 plus free blocks 1-2.
         let bad = BlockHandle { start: 0, count: 3 };
         assert_eq!(pool.free(bad).unwrap_err(), PoolError::InvalidHandle);
         // Nothing mutated: accounting intact, original handle still frees cleanly.
