@@ -86,7 +86,9 @@ jobs:
           shared-key: workspace-engine-wasm
 
       - name: Build and stage engine.wasm
-        run: ./devops/build-engine-wasm.sh
+        # Invoke via bash explicitly: the script is committed without the
+        # executable bit, so ./devops/... fails with "Permission denied" (126).
+        run: bash devops/build-engine-wasm.sh
 
       - name: Verify artifact
         run: |
