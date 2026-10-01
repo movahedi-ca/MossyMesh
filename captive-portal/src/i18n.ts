@@ -24,6 +24,10 @@ export interface PortalStrings {
   features: { title: string; body: string }[];
   footerNote: string;
   languageLabel: string;
+  themeToLightAria: string;
+  themeToDarkAria: string;
+  themeLightTitle: string;
+  themeDarkTitle: string;
 }
 
 const en: PortalStrings = {
@@ -39,6 +43,10 @@ const en: PortalStrings = {
   ],
   footerNote: "150M asset transfers enabled",
   languageLabel: "Language",
+  themeToLightAria: "Switch to light theme",
+  themeToDarkAria: "Switch to dark theme",
+  themeLightTitle: "Light theme",
+  themeDarkTitle: "Dark theme",
 };
 
 const es: PortalStrings = {
@@ -54,6 +62,10 @@ const es: PortalStrings = {
   ],
   footerNote: "150M de transferencias de activos habilitadas",
   languageLabel: "Idioma",
+  themeToLightAria: "Cambiar al tema claro",
+  themeToDarkAria: "Cambiar al tema oscuro",
+  themeLightTitle: "Tema claro",
+  themeDarkTitle: "Tema oscuro",
 };
 
 const fr: PortalStrings = {
@@ -69,6 +81,10 @@ const fr: PortalStrings = {
   ],
   footerNote: "150M de transferts d'actifs activés",
   languageLabel: "Langue",
+  themeToLightAria: "Passer au thème clair",
+  themeToDarkAria: "Passer au thème sombre",
+  themeLightTitle: "Thème clair",
+  themeDarkTitle: "Thème sombre",
 };
 
 const de: PortalStrings = {
@@ -84,6 +100,10 @@ const de: PortalStrings = {
   ],
   footerNote: "150M Asset-Transfers aktiviert",
   languageLabel: "Sprache",
+  themeToLightAria: "Zum hellen Design wechseln",
+  themeToDarkAria: "Zum dunklen Design wechseln",
+  themeLightTitle: "Helles Design",
+  themeDarkTitle: "Dunkles Design",
 };
 
 const STRINGS: Record<PortalLang, PortalStrings> = { en, es, fr, de };
