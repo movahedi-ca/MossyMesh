@@ -1078,7 +1078,10 @@ mod tests {
         for _ in 0..RATE_LIMIT {
             assert!(limiter.check(ip, t0));
         }
-        assert!(!limiter.check(ip, t0), "61st request in the window is rejected");
+        assert!(
+            !limiter.check(ip, t0),
+            "61st request in the window is rejected"
+        );
         // After the window passes, the IP is allowed again.
         let later = t0 + RATE_WINDOW + Duration::from_secs(1);
         assert!(limiter.check(ip, later));
