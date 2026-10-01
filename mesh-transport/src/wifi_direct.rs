@@ -376,8 +376,7 @@ mod tests {
         let mut m = WifiDirectManager::with_id("zzz-local", 1000);
         m.add_peer("aaa-attacker", u32::MAX);
         assert_eq!(
-            m.peers_in_range[0].battery_weight,
-            MAX_BATTERY_WEIGHT,
+            m.peers_in_range[0].battery_weight, MAX_BATTERY_WEIGHT,
             "stored weight must be clamped"
         );
         m.negotiate_group_owner();
