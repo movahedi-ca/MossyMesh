@@ -26,7 +26,7 @@ Build a self-healing mesh that turns phones, Raspberry Pis, PCs, and LoRa radios
 
 | Constraint | Value |
 | --- | --- |
-| Active ledger RAM (edge) | ≤ **10 MB** |
+| Active ledger RAM (edge) | ≤ **10 MiB** |
 | Unverifiable outputs | < **1%** |
 | Job timeout rate | < **5%** |
 | Capacity target | 100 RVCH/day / 20-node island, zero upstream Internet |
@@ -113,7 +113,7 @@ Frontend (PWA)
 | Island reconvergence | `TrieNode::merge_state(&remote)` |
 | Verify | `verify_proof` / `verify_snark` |
 | Compress | `fold_snarks` |
-| Bound | `MAX_LEDGER_SIZE = 10_000_000` |
+| Bound | `MAX_LEDGER_SIZE = 10_485_760` |
 
 Transport gossips **roots + proofs + results**, not unbounded history, on edge devices.
 
@@ -155,7 +155,7 @@ UI reads peer/link/battery/quarantine **JSON DTOs** from the local host API.
 | Phase | One-line DoD |
 | --- | --- |
 | 1 Transport | Phone test packet → LoRa → offline node via Kademlia |
-| 2 Sandbox | WAMR 10 MB cap + 10 min VDF for Job DID |
+| 2 Sandbox | WAMR 10 MiB cap + 10 min VDF for Job DID |
 | 3 Consensus | Sub-MB edge proof + deterministic island merge |
 | 4 Logic | WASM chess ~836 Mnps + HTLC VDF-cancel |
 | 5 Interop | Uplink OpenAPI + TWAMM ≤2% spread |

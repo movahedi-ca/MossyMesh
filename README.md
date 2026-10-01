@@ -8,8 +8,8 @@
  * **Target Capacity:** 100 Resilient Verifiable Compute-Hours (RVCH) per day per 20-node island, with zero upstream internet.
  * **Determinism Guarantee:** Less than 1% unverifiable AI/Compute outputs (Perfect Cross-Device Determinism).
  * **Reliability:** Less than 5% job timeout rate in highly unstable physical environments.
- * **Edge Footprint:** Strict maximum of 10 MB RAM overhead for the active ledger on edge devices.
-**Integrated Change Control:** Any architectural changes to the cryptographic stack or memory allocations must be mathematically proven not to violate the 10 MB RAM edge constraint or the cross-device determinism SLA before merging.
+ * **Edge Footprint:** Strict maximum of 10 MiB RAM overhead for the active ledger on edge devices.
+**Integrated Change Control:** Any architectural changes to the cryptographic stack or memory allocations must be mathematically proven not to violate the 10 MiB RAM edge constraint or the cross-device determinism SLA before merging.
 ## 2. Project Scope Management (Architecture & Baselines)
 ### In-Scope Technical Stack
 

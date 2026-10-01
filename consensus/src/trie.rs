@@ -25,7 +25,7 @@ use crate::{Hash32, MAX_LEDGER_SIZE};
 /// one node: enum discriminant, the branch child-pointer array (16 pointers),
 /// `Vec` headers, the heap `Box` allocation, and allocator metadata plus
 /// size-class rounding. Undercounting here is what let the ledger spill to
-/// ~11 MB past the 10 MB cap before pruning.
+/// ~11 MB past the 10 MiB cap before pruning.
 const NODE_OVERHEAD: usize = 256;
 
 /// Convert key bytes to a nibble path (two nibbles per byte, high nibble first).
@@ -216,7 +216,7 @@ impl MerklePatriciaTrie {
     }
 
     /// Insert or update `key` → `value`. Updates root hash.
-    /// Returns [`ConsensusError::OutOfMemory`] if the 10 MB cap would be exceeded.
+    /// Returns [`ConsensusError::OutOfMemory`] if the 10 MiB cap would be exceeded.
     pub fn insert(&mut self, key: &[u8], value: Vec<u8>) -> Result<(), ConsensusError> {
         if key.len() > MAX_KEY_BYTES {
             return Err(ConsensusError::InvalidInput("key exceeds MAX_KEY_BYTES"));

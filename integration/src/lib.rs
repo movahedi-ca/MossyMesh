@@ -399,10 +399,10 @@ mod tests {
     }
 
     // --- SMK-07 ---
-    /// SMK-07: `smoke_ledger_bound_constant` — `MAX_LEDGER_SIZE == 10_000_000`.
+    /// SMK-07: `smoke_ledger_bound_constant` — `MAX_LEDGER_SIZE == 10_485_760` (10 MiB, issue #174).
     #[test]
     fn smoke_ledger_bound_constant() {
-        assert_eq!(consensus::MAX_LEDGER_SIZE, 10_000_000);
+        assert_eq!(consensus::MAX_LEDGER_SIZE, 10_485_760);
         // Constant-size SNARK folding is wired (mock prover; real nova-snark optional).
         use consensus::SnarkFolder;
         let genesis = [0u8; 32];
