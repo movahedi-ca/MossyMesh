@@ -269,7 +269,7 @@ impl CentralPeer {
     fn new(air: Rc<RefCell<Airwaves>>, name: &str, battery: u8, secret: [u8; 32]) -> Self {
         Self {
             central: SimCentral::new(air),
-            node: BleMeshNode::new(name, battery),
+            node: BleMeshNode::from_seed(name.as_bytes(), battery),
             secret,
             ch_b: [0xBBu8; 32],
             ch_a: None,
@@ -384,7 +384,7 @@ fn setup_pair() -> (BlePeripheral<SimBleHal>, CentralPeer, Rc<RefCell<Airwaves>>
         ..Default::default()
     }));
     let hal = SimBleHal::new(Rc::clone(&air));
-    let control = BleMeshNode::new("periph-1", 88);
+    let control = BleMeshNode::from_seed(b"periph-1", 88);
     let p = BlePeripheral::new(hal, control, BlePeripheralConfig::new(SECRET)).unwrap();
     let c = CentralPeer::new(Rc::clone(&air), "central-1", 61, SECRET);
     (p, c, air)
@@ -440,10 +440,13 @@ fn full_protocol_two_endpoints_exchange_lsas() {
 
     let pn = p
         .control()
-        .get_neighbor("central-1")
+        .get_neighbor(&c.node.node_id)
         .expect("peripheral neighbor");
     assert!(pn.last_seq >= 2, "peripheral must receive central LSAs");
-    let cn = c.node.get_neighbor("periph-1").expect("central neighbor");
+    let cn = c
+        .node
+        .get_neighbor(&p.control().node_id)
+        .expect("central neighbor");
     assert!(cn.last_seq >= 2, "central must receive peripheral LSAs");
 
     let max = air.borrow().max_on_air;
@@ -490,7 +493,7 @@ fn large_lsa_fragments_across_legacy_mtu() {
     run_until(&mut p, &mut c, t + 6_000, |_, _| false);
 
     assert!(
-        p.control().get_neighbor("central-1").is_some(),
+        p.control().get_neighbor(&c.node.node_id).is_some(),
         "fragmented LSA must reassemble and apply"
     );
     assert!(air.borrow().max_on_air <= ATT_MTU_LEGACY);
@@ -530,7 +533,7 @@ fn link_loss_recovers_via_backoff_and_readvertise() {
         "second central must complete the handshake"
     );
     assert_eq!(p.stats().auth_success, 2);
-    assert!(p.control().get_neighbor("central-2").is_some());
+    assert!(p.control().get_neighbor(&c2.node.node_id).is_some());
 }
 
 #[test]
@@ -572,11 +575,13 @@ fn second_central_while_active_is_refused() {
     p.pump();
     assert_eq!(p.stats().refused_connections, 1);
     assert_eq!(p.state(), PeripheralState::Active);
-    assert_eq!(p.peer_name(), Some("central-1"));
+    // Post-#205 the peer name is the central's self-certifying node id.
+    assert_eq!(p.peer_name(), Some(c.node.node_id.as_str()));
     // The first session is undisturbed: its LSAs still flow.
+    let central_id = c.node.node_id.clone();
     let t2 = run_until(&mut p, &mut c, t + 8_000, |p, _| {
         p.control()
-            .get_neighbor("central-1")
+            .get_neighbor(&central_id)
             .map(|n| n.last_seq)
             .unwrap_or(0)
             >= 3

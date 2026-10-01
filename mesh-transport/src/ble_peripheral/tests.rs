@@ -157,7 +157,7 @@ impl CentralTx {
 }
 
 fn setup() -> (BlePeripheral<ScriptedHal>, CentralTx) {
-    let control = BleMeshNode::new("periph-1", 88);
+    let control = BleMeshNode::from_seed(b"periph-1", 88);
     let config = BlePeripheralConfig::new(SECRET);
     let p = BlePeripheral::new(ScriptedHal::new(), control, config).unwrap();
     (p, CentralTx::new())
@@ -223,7 +223,8 @@ fn central_handshake(
 ) -> ([u8; CHALLENGE_LEN], [u8; CHALLENGE_LEN]) {
     let frames = drain_frames(p, conn);
     let (node_name, ch_a) = find_hello(&frames);
-    assert_eq!(node_name, "periph-1");
+    // Post-#205 the peripheral's node id is its self-certifying key hex.
+    assert_eq!(node_name, p.control().node_id);
 
     let ch_b = [0xBBu8; 32];
     tx.send(
@@ -257,8 +258,18 @@ fn central_handshake(
     (ch_a, ch_b)
 }
 
-fn lsa_from(name: &str, seq: u32) -> LinkStateAdvertisement {
-    LinkStateAdvertisement::new(name, seq, 61, vec![("leaf".into(), 2)], 0)
+/// Build a signed LSA from a test central node, advancing its sequence to
+/// `seq` through the real `create_lsa` signing path. Post-#205 the
+/// peripheral's ingest verifies LSA signatures, so unsigned fixtures would
+/// be rejected.
+fn lsa_from(central: &mut BleMeshNode, seq: u32) -> LinkStateAdvertisement {
+    assert!(seq >= 1, "sequence numbers start at 1");
+    let mut lsa = central.create_lsa();
+    while lsa.sequence < seq {
+        lsa = central.create_lsa();
+    }
+    assert_eq!(lsa.sequence, seq);
+    lsa
 }
 
 // ---------------------------------------------------------------------------
@@ -267,7 +278,7 @@ fn lsa_from(name: &str, seq: u32) -> LinkStateAdvertisement {
 
 #[test]
 fn rejects_unprovisioned_secret() {
-    let control = BleMeshNode::new("periph-1", 88);
+    let control = BleMeshNode::from_seed(b"periph-1", 88);
     let err = BlePeripheral::new(
         ScriptedHal::new(),
         control,
@@ -289,7 +300,7 @@ fn tick_starts_advertising_with_mesh_prefix_and_service_uuid() {
         params.device_name.starts_with(DEVICE_NAME_PREFIX),
         "device name must carry the frontend's namePrefix filter"
     );
-    assert!(params.device_name.contains("periph-1"));
+    assert!(params.device_name.contains(&p.control().node_id));
     assert_eq!(params.service_uuid, MESH_RELAY_SERVICE_UUID);
 }
 
@@ -457,29 +468,37 @@ fn notify_failure_on_hello_drops_link() {
 #[test]
 fn lsa_exchange_updates_neighbor_table() {
     let (mut p, mut tx) = setup();
+    // The central is a real keyed node now (post-#205): its LSAs must be
+    // signed for the peripheral's verifying ingest to accept them, and the
+    // AuthInit name must match the LSA origin so the same neighbor entry
+    // is updated.
+    let mut central = BleMeshNode::from_seed(b"central-1", 61);
+    let central_id = central.node_id.clone();
     start(&mut p);
     connect(&mut p, CONN);
-    central_handshake(&mut p, &mut tx, CONN, &SECRET, "central-1");
+    central_handshake(&mut p, &mut tx, CONN, &SECRET, &central_id);
     let _ = drain_frames(&mut p, CONN); // AuthOk + first LSA
     assert_eq!(p.stats().lsas_tx, 1);
 
-    tx.send(&mut p, CONN, &MeshFrame::Lsa(lsa_from("central-1", 9)));
+    tx.send(&mut p, CONN, &MeshFrame::Lsa(lsa_from(&mut central, 9)));
     p.pump();
     assert_eq!(p.stats().lsas_rx, 1);
-    let n = p.control().get_neighbor("central-1").expect("neighbor");
+    let n = p.control().get_neighbor(&central_id).expect("neighbor");
     assert_eq!(n.last_seq, 9, "LSA seq must advance the neighbor entry");
 }
 
 #[test]
 fn lsa_before_auth_is_ignored() {
     let (mut p, mut tx) = setup();
+    let mut central = BleMeshNode::from_seed(b"central-1", 61);
     start(&mut p);
     connect(&mut p, CONN);
     let _ = drain_frames(&mut p, CONN);
-    tx.send(&mut p, CONN, &MeshFrame::Lsa(lsa_from("central-1", 1)));
+    // Even a correctly signed LSA must be ignored before authentication.
+    tx.send(&mut p, CONN, &MeshFrame::Lsa(lsa_from(&mut central, 1)));
     p.pump();
     assert_eq!(p.stats().lsas_rx, 0);
-    assert!(p.control().get_neighbor("central-1").is_none());
+    assert!(p.control().get_neighbor(&central.node_id).is_none());
     assert_eq!(p.stats().frame_rejects, 1);
 }
 
@@ -604,7 +623,9 @@ fn lsa_rebroadcast_cadence() {
     assert_eq!(p.stats().lsas_tx, 1);
 
     // Keep the peer alive with an inbound LSA, then advance past the cadence.
-    tx.send(&mut p, CONN, &MeshFrame::Lsa(lsa_from("central-1", 1)));
+    // Post-#205 the LSA must be signed for the ingest to accept it.
+    let mut keepalive = BleMeshNode::from_seed(b"central-1", 61);
+    tx.send(&mut p, CONN, &MeshFrame::Lsa(lsa_from(&mut keepalive, 1)));
     p.pump();
     p.tick(1_999);
     assert_eq!(p.stats().lsas_tx, 1);
