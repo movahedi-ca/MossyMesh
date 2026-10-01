@@ -197,6 +197,31 @@ jobs:
       - name: Boot daemon and assert /api/v1/health
         run: ./devops/smoke-boot.sh
 
+  # Regression guard for the Oct 2026 operational review finding that mesh
+  # networking was theater (listen/dial/bootstrap helpers had zero callers,
+  # boot invented fake peers, no node ever sent a packet). Boots two real
+  # mesh-daemon processes in REAL p2p mode and asserts they connect and
+  # exchange real ping packets over real sockets.
+  p2p-smoke:
+    name: Real p2p two-node smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: '. -> target'
+          shared-key: workspace-smoke
+
+      - name: Build mesh-daemon
+        run: cargo build --bin mesh-daemon
+
+      - name: Two real daemons connect and ping over real sockets
+        run: ./devops/smoke-p2p.sh
+
   docker-portal:
     name: Docker portal image
     runs-on: ubuntu-latest
