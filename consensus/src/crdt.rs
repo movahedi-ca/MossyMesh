@@ -230,13 +230,31 @@ impl Doc {
     /// Depth-first RGA walk: children of each parent sorted by ItemId **descending**.
     /// Higher (agent, seq) appears closer to the parent (classic RGA: newer concurrent
     /// inserts sit immediately after the left neighbor). Deterministic → converges.
+    ///
+    /// Iterative with an explicit stack (issue #193): the recursive version
+    /// recursed once per item along the child chain, and `insert_str` parents
+    /// each char to the previous one, so a long document (pasted text, or an
+    /// adversarial op log synced from a hostile island) overflowed the stack.
+    /// Traversal order is identical to the old recursion: pre-order, children
+    /// visited in descending ItemId.
     fn walk(&self, parent: Option<ItemId>, f: &mut dyn FnMut(&SeqItem)) {
-        let mut kids = self.children.get(&parent).cloned().unwrap_or_default();
-        kids.sort_by(|a, b| b.cmp(a)); // descending ItemId
-        for id in kids {
-            if let Some(item) = self.items.get(&id) {
-                f(item);
-                self.walk(Some(id), f);
+        fn sorted_children(doc: &Doc, parent: Option<ItemId>) -> std::vec::IntoIter<ItemId> {
+            let mut kids = doc.children.get(&parent).cloned().unwrap_or_default();
+            kids.sort_by(|a, b| b.cmp(a)); // descending ItemId
+            kids.into_iter()
+        }
+        let mut stack: Vec<std::vec::IntoIter<ItemId>> = vec![sorted_children(self, parent)];
+        while let Some(frame) = stack.last_mut() {
+            match frame.next() {
+                Some(id) => {
+                    if let Some(item) = self.items.get(&id) {
+                        f(item);
+                        stack.push(sorted_children(self, Some(id)));
+                    }
+                }
+                None => {
+                    stack.pop();
+                }
             }
         }
     }
@@ -504,6 +522,29 @@ mod tests {
     use super::*;
 
     #[test]
+    #[test]
+    fn deep_chain_does_not_overflow_stack() {
+        // Issue #193: insert_str parents each char to the previous one, so a
+        // long document is a single chain N deep. The old recursive walk
+        // overflowed the stack on such documents. Build the chain directly
+        // via integrate (O(1) per op) rather than insert_char (O(n) per op).
+        let mut d = Doc::new(1);
+        let n = 100_000u64;
+        let mut parent = None;
+        for i in 0..n {
+            let id = ItemId::new(1, i + 1);
+            d.integrate(CrdtOp::Insert {
+                id,
+                parent,
+                content: 'x',
+            });
+            parent = Some(id);
+        }
+        assert_eq!(d.text().chars().count(), n as usize);
+        assert_eq!(d.text_len(), n as usize);
+        assert_eq!(d.visible_ids().len(), n as usize);
+        assert!(d.text().chars().all(|c| c == 'x'));
+    }
     fn delete_before_insert_converges() {
         // Issue #31: a delete integrated before its target insert must
         // still take effect. Replicas must agree no matter which op
