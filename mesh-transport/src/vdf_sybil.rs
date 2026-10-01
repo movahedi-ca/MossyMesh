@@ -23,12 +23,27 @@
 //! consensus parameters. Tests must never invoke [`PRODUCTION_ITERATIONS`] for wall-clock
 //! delay (use [`VdfParams::for_tests`] / [`DEFAULT_TEST_ITERATIONS`]).
 //!
+//! # Verification cost (issue #199)
+//!
+//! Verifying a proof costs as much as evaluating it: a bogus proof is only
+//! rejected after the full sequential loop. Adopting a fast-verification VDF
+//! (Wesolowski/Pietrzak, millisecond proofs) is out of scope here; the
+//! mitigations are intake-side instead:
+//! - [`verify_vdf_proof_detailed`] runs every cheap check first (params, claim,
+//!   modulus, field range) before the sequential loop;
+//! - [`intake_vdf_proof`] is the canonical intake entry point: it checks the
+//!   [`ProofIntakeLimiter`] quota *before* any verification work starts, so a
+//!   flooding peer is rejected without burning verifier CPU;
+//! - [`prioritize_proofs`] verifies proofs from vouched identities first
+//!   ([`intake_queued_proofs`] drains a queue through both).
+//!
 //! # Ephemeral Job DID
 //! ```text
 //! JobDID = SHA-256( VDF_output_bytes || job_meta )
 //! ```
 
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 
 /// Documented production iteration count targeting ≈10 minutes of sequential delay
 /// on constrained edge hardware.
@@ -73,6 +88,8 @@ pub enum VdfVerifyError {
     OutputMismatch,
     /// Fifth-root exponent is undefined for the modulus.
     UndefinedExponent,
+    /// Claimed input or output is not a valid field element (>= modulus).
+    InvalidOutput,
 }
 
 impl VdfVerifyError {
@@ -84,6 +101,7 @@ impl VdfVerifyError {
             VdfVerifyError::ZeroIterations => "ZERO_ITERATIONS",
             VdfVerifyError::OutputMismatch => "OUTPUT_MISMATCH",
             VdfVerifyError::UndefinedExponent => "UNDEFINED_EXPONENT",
+            VdfVerifyError::InvalidOutput => "INVALID_OUTPUT",
         }
     }
 
@@ -96,6 +114,7 @@ impl VdfVerifyError {
             VdfVerifyError::UndefinedExponent => {
                 "VDF verify failed: fifth-root exponent undefined."
             }
+            VdfVerifyError::InvalidOutput => "VDF verify failed: input/output out of field range.",
         }
     }
 }
@@ -371,6 +390,11 @@ pub fn evaluate_vdf_checked(
 }
 
 /// Verify a VDF proof by re-running the sequential steps (detailed errors).
+///
+/// Cheap checks run first: zero iterations, iteration claim, modulus
+/// validity, exponent definedness, and input/output field range. Only proofs
+/// surviving all of these pay for the sequential loop (fixes #199: bogus
+/// proofs are rejected before burning CPU).
 pub fn verify_vdf_proof_detailed(proof: &VdfProof) -> Result<(), VdfVerifyError> {
     if proof.params.iterations == 0 || proof.claimed_iterations == 0 {
         return Err(VdfVerifyError::ZeroIterations);
@@ -383,6 +407,9 @@ pub fn verify_vdf_proof_detailed(proof: &VdfProof) -> Result<(), VdfVerifyError>
     }
     if fifth_root_exponent_for(proof.params.modulus).is_none() {
         return Err(VdfVerifyError::UndefinedExponent);
+    }
+    if proof.input >= proof.params.modulus || proof.output >= proof.params.modulus {
+        return Err(VdfVerifyError::InvalidOutput);
     }
     let mut current = proof.input;
     for i in 1..=proof.params.iterations {
@@ -420,6 +447,174 @@ pub fn verify_vdf(start_x: u64, steps: u64, final_x: u64, p: u64) -> bool {
 /// Encode VDF output as fixed 8-byte big-endian for hashing.
 pub fn vdf_output_bytes(output: VdfState) -> [u8; 8] {
     output.to_be_bytes()
+}
+
+/// Per-peer token bucket limiting VDF proof intake (fixes #199).
+///
+/// Each verification of a production proof costs ~10 sequential CPU-minutes,
+/// while minting a bogus proof costs the attacker nothing. Rate-limiting
+/// intake bounds how much verifier CPU one peer can burn: proofs beyond the
+/// per-peer quota are dropped before any verification work starts.
+///
+/// This is deliberately wall-clock driven via an explicit `now_ms`
+/// parameter so edge nodes without a trusted clock can pass their mesh
+/// tick and behavior stays deterministic in tests.
+#[derive(Debug, Clone)]
+pub struct ProofIntakeLimiter {
+    /// Max proofs accepted per peer per window.
+    max_per_window: u32,
+    /// Window length in milliseconds.
+    window_ms: u64,
+    /// peer_id → (window_start_ms, accepted_in_window).
+    state: HashMap<String, (u64, u32)>,
+}
+
+impl ProofIntakeLimiter {
+    /// Conservative default: 4 proofs per peer per minute. Production proofs
+    /// take ~10 minutes each to verify, so a peer can never keep a verifier
+    /// busier than its honest share.
+    pub fn conservative() -> Self {
+        Self::new(4, 60_000)
+    }
+
+    pub fn new(max_per_window: u32, window_ms: u64) -> Self {
+        Self {
+            max_per_window: max_per_window.max(1),
+            window_ms: window_ms.max(1),
+            state: HashMap::new(),
+        }
+    }
+
+    /// Returns true if this proof may enter the verification queue.
+    pub fn allow(&mut self, peer_id: &str, now_ms: u64) -> bool {
+        let entry = self.state.entry(peer_id.to_string()).or_insert((now_ms, 0));
+        if now_ms.wrapping_sub(entry.0) >= self.window_ms {
+            *entry = (now_ms, 0);
+        }
+        if entry.1 >= self.max_per_window {
+            return false;
+        }
+        entry.1 += 1;
+        true
+    }
+
+    /// Number of peers currently tracked (bounded in practice by mesh size).
+    pub fn tracked_peers(&self) -> usize {
+        self.state.len()
+    }
+}
+
+/// A proof queued for verification, with optional web-of-trust vouching.
+#[derive(Debug, Clone)]
+pub struct QueuedProof {
+    pub peer_id: String,
+    pub proof: VdfProof,
+    pub vouched: bool,
+}
+
+impl QueuedProof {
+    pub fn new(peer_id: impl Into<String>, proof: VdfProof, vouched: bool) -> Self {
+        Self {
+            peer_id: peer_id.into(),
+            proof,
+            vouched,
+        }
+    }
+}
+
+/// Order queued proofs so vouched identities verify first (fixes #199).
+///
+/// An attacker flooding bogus proofs from unvouched identities cannot starve
+/// legitimate vouched provers: vouched proofs always sort ahead. Unvouched
+/// proofs are still verified, just later. Tie-break by peer id keeps the
+/// order deterministic across nodes.
+pub fn prioritize_proofs(queue: &mut [QueuedProof]) {
+    queue.sort_by(|a, b| {
+        b.vouched
+            .cmp(&a.vouched)
+            .then_with(|| a.peer_id.cmp(&b.peer_id))
+    });
+}
+
+/// Intake-side rejection for a presented VDF proof (issue #199).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum VdfIntakeError {
+    /// The peer exhausted its [`ProofIntakeLimiter`] quota: the proof is
+    /// dropped *before* any verification work starts.
+    RateLimited,
+    /// The proof passed intake but failed verification.
+    Invalid(VdfVerifyError),
+}
+
+impl VdfIntakeError {
+    /// Stable machine-readable error code.
+    pub fn code(self) -> &'static str {
+        match self {
+            VdfIntakeError::RateLimited => "RATE_LIMITED",
+            VdfIntakeError::Invalid(e) => e.code(),
+        }
+    }
+
+    pub fn as_str(&self) -> String {
+        match self {
+            VdfIntakeError::RateLimited => {
+                "VDF intake denied: peer exceeded proof intake quota.".to_string()
+            }
+            VdfIntakeError::Invalid(e) => e.as_str().to_string(),
+        }
+    }
+}
+
+impl core::fmt::Display for VdfIntakeError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(&self.as_str())
+    }
+}
+
+impl std::error::Error for VdfIntakeError {}
+
+/// Canonical VDF proof intake path (issue #199 rework).
+///
+/// This is the function every network handler must call when a peer
+/// presents a VDF proof. The [`ProofIntakeLimiter`] check runs **first**:
+/// a peer that exhausted its quota is rejected with
+/// [`VdfIntakeError::RateLimited`] before the expensive sequential
+/// verification loop burns any CPU. Only proofs within quota reach
+/// [`verify_vdf_proof_detailed`].
+///
+/// `now_ms` is an explicit wall-clock (mesh tick) so edge nodes without a
+/// trusted clock stay deterministic in tests; see [`ProofIntakeLimiter`].
+pub fn intake_vdf_proof(
+    limiter: &mut ProofIntakeLimiter,
+    peer_id: &str,
+    proof: &VdfProof,
+    now_ms: u64,
+) -> Result<(), VdfIntakeError> {
+    if !limiter.allow(peer_id, now_ms) {
+        return Err(VdfIntakeError::RateLimited);
+    }
+    verify_vdf_proof_detailed(proof).map_err(VdfIntakeError::Invalid)
+}
+
+/// Drain a queue of presented proofs through the intake path (issue #199).
+///
+/// Vouched proofs verify first ([`prioritize_proofs`]); every proof is then
+/// intaken via [`intake_vdf_proof`], so per-peer quotas bound total verifier
+/// CPU even under flood. Returns per-proof outcomes in verify order.
+/// Proofs rejected as [`VdfIntakeError::RateLimited`] never ran verification.
+pub fn intake_queued_proofs(
+    limiter: &mut ProofIntakeLimiter,
+    queue: &mut [QueuedProof],
+    now_ms: u64,
+) -> Vec<(String, Result<(), VdfIntakeError>)> {
+    prioritize_proofs(queue);
+    queue
+        .iter()
+        .map(|qp| {
+            let outcome = intake_vdf_proof(limiter, &qp.peer_id, &qp.proof, now_ms);
+            (qp.peer_id.clone(), outcome)
+        })
+        .collect()
 }
 
 /// Mint an Ephemeral Job DID:
@@ -547,13 +742,67 @@ mod tests {
     fn test_vdf_verify_rejects_tampered_output() {
         let params = VdfParams::for_tests(12);
         let mut proof = evaluate_vdf(99, &params);
-        proof.output = proof.output.wrapping_add(1);
+        // Tamper but stay inside the field so the OutputMismatch (not
+        // InvalidOutput) path is exercised.
+        proof.output = (proof.output + 1) % proof.params.modulus;
         assert!(!verify_vdf_proof(&proof));
         assert_eq!(
             verify_vdf_proof_detailed(&proof).unwrap_err(),
             VdfVerifyError::OutputMismatch
         );
         assert_eq!(VdfVerifyError::OutputMismatch.code(), "OUTPUT_MISMATCH");
+    }
+
+    #[test]
+    fn test_vdf_verify_rejects_out_of_range_output() {
+        // Cheap field-range check fires before the sequential loop.
+        let params = VdfParams::for_tests(12);
+        let mut proof = evaluate_vdf(99, &params);
+        proof.output = proof.params.modulus; // >= modulus is not a field element
+        assert_eq!(
+            verify_vdf_proof_detailed(&proof).unwrap_err(),
+            VdfVerifyError::InvalidOutput
+        );
+        assert_eq!(VdfVerifyError::InvalidOutput.code(), "INVALID_OUTPUT");
+
+        let mut proof2 = evaluate_vdf(99, &params);
+        proof2.input = proof2.params.modulus;
+        assert_eq!(
+            verify_vdf_proof_detailed(&proof2).unwrap_err(),
+            VdfVerifyError::InvalidOutput
+        );
+    }
+
+    #[test]
+    fn test_intake_limiter_throttles_peer() {
+        let mut limiter = ProofIntakeLimiter::new(2, 1_000);
+        assert!(limiter.allow("peer-a", 0));
+        assert!(limiter.allow("peer-a", 500));
+        assert!(
+            !limiter.allow("peer-a", 999),
+            "third proof inside the window must be dropped before verification"
+        );
+        // Another peer is unaffected.
+        assert!(limiter.allow("peer-b", 999));
+        // After the window elapses the quota resets.
+        assert!(limiter.allow("peer-a", 1_000));
+        assert_eq!(limiter.tracked_peers(), 2);
+    }
+
+    #[test]
+    fn test_prioritize_proofs_vouched_first() {
+        let params = VdfParams::for_tests(2);
+        let mk =
+            |peer: &str, vouched: bool| QueuedProof::new(peer, evaluate_vdf(1, &params), vouched);
+        let mut queue = vec![
+            mk("zebra", false),
+            mk("mallory", false),
+            mk("alice", true),
+            mk("bob", true),
+        ];
+        prioritize_proofs(&mut queue);
+        let order: Vec<&str> = queue.iter().map(|q| q.peer_id.as_str()).collect();
+        assert_eq!(order, vec!["alice", "bob", "mallory", "zebra"]);
     }
 
     #[test]
@@ -672,5 +921,66 @@ mod tests {
         let good = VdfParams::for_tests(4);
         let proof = evaluate_vdf_checked(3, &good).unwrap();
         assert!(verify_vdf_proof(&proof));
+    }
+
+    #[test]
+    fn test_intake_rejects_burst_before_verification() {
+        // Issue #199 rework: the token bucket must sit *in front of* the
+        // expensive sequential verification. A burst of bogus proofs from
+        // one peer is dropped with RateLimited without running verify:
+        // even a genuinely valid proof is rejected once the quota is
+        // exhausted (had the limiter run after verification, it would be Ok).
+        let params = VdfParams::for_tests(8);
+        let valid = evaluate_vdf(7, &params);
+        assert!(verify_vdf_proof(&valid), "test proof must be valid");
+
+        let bogus = VdfProof {
+            params: params.clone(),
+            input: 1,
+            output: 2,
+            claimed_iterations: 0, // rejected by the cheap zero-iteration check
+        };
+
+        let mut limiter = ProofIntakeLimiter::new(2, 60_000);
+        // Two bogus proofs consume the peer's quota (cheap rejection, no loop).
+        assert_eq!(
+            intake_vdf_proof(&mut limiter, "attacker", &bogus, 0),
+            Err(VdfIntakeError::Invalid(VdfVerifyError::ZeroIterations))
+        );
+        assert_eq!(
+            intake_vdf_proof(&mut limiter, "attacker", &bogus, 1),
+            Err(VdfIntakeError::Invalid(VdfVerifyError::ZeroIterations))
+        );
+        // Quota exhausted: the VALID proof is dropped before verification.
+        assert_eq!(
+            intake_vdf_proof(&mut limiter, "attacker", &valid, 2),
+            Err(VdfIntakeError::RateLimited)
+        );
+        // Other peers are unaffected; window rollover refreshes the quota.
+        assert!(intake_vdf_proof(&mut limiter, "honest", &valid, 3).is_ok());
+        assert!(intake_vdf_proof(&mut limiter, "attacker", &valid, 60_001).is_ok());
+    }
+
+    #[test]
+    fn test_intake_queued_proofs_prioritizes_and_rate_limits() {
+        // QueuedProof + prioritize_proofs are wired through the same intake
+        // path: vouched proofs verify first, and the per-peer quota bounds
+        // verifier CPU even when one peer floods the queue.
+        let params = VdfParams::for_tests(4);
+        let valid = evaluate_vdf(3, &params);
+        let mut queue = vec![
+            QueuedProof::new("mallory", valid.clone(), false),
+            QueuedProof::new("mallory", valid.clone(), true),
+        ];
+        let mut limiter = ProofIntakeLimiter::new(1, 60_000);
+        let outcomes = intake_queued_proofs(&mut limiter, &mut queue, 0);
+        let order: Vec<&str> = outcomes.iter().map(|(p, _)| p.as_str()).collect();
+        assert_eq!(order, vec!["mallory", "mallory"]);
+        assert!(outcomes[0].1.is_ok(), "vouched proof verifies first");
+        assert_eq!(
+            outcomes[1].1,
+            Err(VdfIntakeError::RateLimited),
+            "second proof from the same peer is dropped before verification"
+        );
     }
 }
