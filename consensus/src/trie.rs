@@ -1160,17 +1160,11 @@ mod tests {
         // Lexically larger local value must survive in both merge directions.
         let mut ab = a.clone();
         ab.merge_with(&b).unwrap();
-        assert_eq!(
-            ab.get(b"conflict").as_deref(),
-            Some(b"local-wins".as_ref())
-        );
+        assert_eq!(ab.get(b"conflict").as_deref(), Some(b"local-wins".as_ref()));
 
         let mut ba = b.clone();
         ba.merge_with(&a).unwrap();
-        assert_eq!(
-            ba.get(b"conflict").as_deref(),
-            Some(b"local-wins".as_ref())
-        );
+        assert_eq!(ba.get(b"conflict").as_deref(), Some(b"local-wins".as_ref()));
         assert_eq!(ab.root_hash(), ba.root_hash());
     }
 
