@@ -36,9 +36,24 @@ export default defineConfig({
       },
       workbox: {
         globPatterns: ["**/*.{js,css,html,ico,png,svg,webp,woff2,wasm}"],
+        // Workbox skips precaching files over 2 MiB by default; the WASM
+        // chess engine is larger than that and was silently dropped from the
+        // offline manifest. Raise the cap so engine.wasm is cached on install.
+        maximumFileSizeToCacheInBytes: 16 * 1024 * 1024,
         navigateFallback: "/index.html",
         navigateFallbackDenylist: [/^\/api\//],
         runtimeCaching: [
+          {
+            // Safety net: any WASM module fetched at runtime is cached too,
+            // so a lazily-loaded engine build still works offline afterwards.
+            urlPattern: /\.wasm$/i,
+            handler: "CacheFirst",
+            options: {
+              cacheName: "mesh-wasm",
+              expiration: { maxEntries: 8, maxAgeSeconds: 60 * 60 * 24 * 30 },
+              cacheableResponse: { statuses: [0, 200] },
+            },
+          },
           {
             urlPattern: /^https:\/\/fonts\.googleapis\.com\/.*/i,
             handler: "CacheFirst",

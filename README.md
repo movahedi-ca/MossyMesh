@@ -17,10 +17,10 @@
 | :--- | :--- | :--- |
 | **Frontend Layer** | React, TypeScript, Vite, vite-plugin-pwa | Serves an offline-first PWA via a Captive Portal. nginx configured with client_max_body_size 150M for asset transfers. |
 | **Application Logic** | Rust, shakmaty, shakmaty-syzygy, yrs | Core chess bitboard evaluation paired with memory-mapped endgame tablebases and YATA conflict-free replication. |
-| **Execution Sandbox** | WAMR (wasm32-wasip1), WASI | Enforces **Symmetric Static INT8 Quantization** and **Fixed-Block Memory Pools** via wasm_runtime_full_init. Bounded aux stack (-z stack-size=N). |
+| **Execution Sandbox** | WAMR (wasm32-wasip1), WASI | Enforces **Symmetric Static INT8 Quantization** and **Fixed-Block Memory Pools**. Host-side simulation by default; native WAMR via wasm_runtime_full_init only when the `wamr` feature links it. Bounded aux stack (-z stack-size=N). |
 | **Transport Layer** | reticulum-rs, lxmf-rs, Kademlia DHT | Replaces IP with identity-based routing. Heavy lines use STUN-less hole punching; lightweight uses LoRa (CSMA/CA) & BLE. |
 | **Ledger Consensus** | trie-db, ipld-core, serde_ipld_dagcbor | Incremental Merkle-Patricia Trie datastore utilizing serialized compact DAG-CBOR formats and cryptographic pointers. |
-| **State Compression** | nova-snark | Recursive ZK-SNARK folding scheme over Pallas/Vesta curves. Keeps proofs constant-sized to drop old ledger histories. |
+| **State Compression** | Nova-style folding (mock commitments) | Nova-style recursive folding over Pallas/Vesta curves is the design target. The code currently uses deterministic mock commitments; real nova-snark stays feature-gated and optional. Keeps proofs constant-sized to drop old ledger histories. |
 | **AI Processing** | SITF, Edge PagedAttention, Vulkan Compute | Standardized tensor formats, disk-mapped context windows, and deterministic GPU computing for high-compute tiers. | <br> ### Out-of-Scope (Exclusions) <br> * Any reliance on centralized IP addresses, Web2 Oracles, or standard DNS routing. <br> * Centralized cloud databases (e.g., AWS, Firebase). Data availability must rely on RAM-Disk Ring Buffers (Ephemeral DA with LRU eviction) and 7-Day Regional SSD Hubs utilizing Append-Only Logs secured by Reed-Solomon Erasure Coding. <br> ## 3. Project Schedule Management (WBS & Roadmap) <br> Execution is sequenced over an iterative, critical path timeline based on a 10-hour/week commitment.
 
 
@@ -29,7 +29,7 @@
 | Project Phase | Focus & Deliverables | Definition of Done (DoD) & Acceptance Criteria |
 | :--- | :--- | :--- |
 | **Phase 1: Transport** | Offline Wi-Fi domains, Captive Portal redirection, and reticulum-rs daemon builds. | A smartphone test packet successfully translates to a LoRa transmission and routes to an offline node using Kademlia DHT pathfinding. |
-| **Phase 2: Sandbox** | Integration of minroot-vdf-rs and WAMR environment deployment. | WAMR strictly enforces the 10 MB RAM cap via wasm_runtime_full_init and creating an Ephemeral Job DID requires burning a 10-minute sequential VDF. |
+| **Phase 2: Sandbox** | Integration of minroot-vdf-rs and WAMR environment deployment. | The sandbox enforces the 10 MiB RAM cap (host simulation by default; native WAMR via wasm_runtime_full_init when linked) and creating an Ephemeral Job DID requires burning a 10-minute sequential VDF. |
 | **Phase 3: Consensus** | Deployment of trie-db, nova-snark, and yrs CRDT-based merging architectures. | Edge nodes successfully verify the ledger via a sub-megabyte constant proof and disconnected islands merge data deterministically via binary deltas. |
 | **Phase 4: Logic** | Compile shakmaty loop to wasm32-wasip1 and bring lxmf-rs messaging online. | The WASM chess engine benchmarks at ~836 Mnps. Escrowed credits use Hashed Timelock Contracts (HTLCs) protected by VDF-Delayed Cancellation. |
 | **Phase 5: Interop** | UI layout serving, Reticulum_AsyncAPI_rs endpoints, and TWAMM orchestration. | Reconnecting to the internet spins up an OpenAPI gateway, bridging local liquidity to a global AMM using a TWAMM with a strict 2% max-spread cap. | <br> ## 4. Project Cost & Resource Management <br> ### Initial Hardware Baseline

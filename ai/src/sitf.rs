@@ -82,7 +82,10 @@ pub enum SitfError {
     /// Rank exceeds [`MAX_RANK`].
     RankTooLarge(usize),
     /// Payload length does not match `∏shape × element_size`.
-    ShapeMismatch { expected_elems: usize, data_len: usize },
+    ShapeMismatch {
+        expected_elems: usize,
+        data_len: usize,
+    },
     /// Buffer shorter than header + claimed payload.
     Truncated { needed: usize, got: usize },
     /// Shape product or length arithmetic overflowed.
@@ -237,9 +240,7 @@ impl SitfTensor {
             ]));
         }
         let nbytes = u64::from_le_bytes(buf[shape_end..nbytes_end].try_into().unwrap()) as usize;
-        let total = nbytes_end
-            .checked_add(nbytes)
-            .ok_or(SitfError::Overflow)?;
+        let total = nbytes_end.checked_add(nbytes).ok_or(SitfError::Overflow)?;
         if buf.len() < total {
             return Err(SitfError::Truncated {
                 needed: total,
@@ -264,13 +265,15 @@ impl SitfTensor {
         if self.dtype != DType::Fp32 {
             return None;
         }
-        if self.data.len() % 4 != 0 {
+        if !self.data.len().is_multiple_of(4) {
             return None;
         }
         Some(
             self.data
-                .chunks_exact(4)
-                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|c| f32::from_le_bytes(*c))
                 .collect(),
         )
     }
@@ -312,9 +315,7 @@ pub fn element_count(shape: &[u32]) -> Result<usize, SitfError> {
     }
     let mut n: usize = 1;
     for &d in shape {
-        n = n
-            .checked_mul(d as usize)
-            .ok_or(SitfError::Overflow)?;
+        n = n.checked_mul(d as usize).ok_or(SitfError::Overflow)?;
     }
     Ok(n)
 }

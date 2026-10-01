@@ -88,7 +88,7 @@ pub fn hash_branch(
     value: Option<&[u8]>,
 ) -> Result<Hash32, ConsensusError> {
     let payload = BranchCodec {
-        children: children.iter().copied().collect(),
+        children: children.to_vec(),
         value: value.map(|v| v.to_vec()),
     };
     let cbor = encode_cbor(&payload)?;

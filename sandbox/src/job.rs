@@ -115,7 +115,13 @@ impl Job {
         verifier: &impl VdfVerifier,
         module_bytes: impl Into<Vec<u8>>,
     ) -> Result<Self, JobError> {
-        Self::admit_and_load_with_config(receipt, verifier, module_bytes, DEFAULT_BLOCK_SIZE, MEM_LIMIT)
+        Self::admit_and_load_with_config(
+            receipt,
+            verifier,
+            module_bytes,
+            DEFAULT_BLOCK_SIZE,
+            MEM_LIMIT,
+        )
     }
 
     /// Admit when a receipt may be absent: `None` → [`AdmitError::MissingVdf`].
@@ -178,6 +184,13 @@ impl Job {
     /// Allocate from the job's fixed-block pool (guest-linear offset).
     pub fn allocate(&mut self, size: usize) -> Result<usize, JobError> {
         self.runtime.allocate(size).map_err(JobError::from)
+    }
+
+    /// Release all guest allocations so the job's runtime can serve the next
+    /// unit of work without leaking the fixed pool (issue #37). Call between
+    /// sequential jobs on a reused [`Job`].
+    pub fn reset(&mut self) {
+        self.runtime.reset();
     }
 
     pub fn used_memory(&self) -> usize {
@@ -261,5 +274,17 @@ mod tests {
         assert_eq!(job.job_did(), Some(receipt.job_did));
         let out = job.invoke_admitted("get_best_move", &[]).unwrap();
         assert_eq!(out, vec![0xE2, 0xE4]);
+    }
+
+    #[test]
+    fn job_reset_reclaims_pool_for_next_job() {
+        // Issue #37: a reused Job must not OOM after many sequential jobs
+        // when reset is called between them.
+        let mut job = Job::load_with_config(b"\0asm".to_vec(), 64, 256).unwrap();
+        for _ in 0..100 {
+            job.allocate(128).unwrap();
+            job.reset();
+            assert_eq!(job.used_memory(), 0);
+        }
     }
 }

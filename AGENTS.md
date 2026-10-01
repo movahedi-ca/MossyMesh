@@ -34,7 +34,7 @@ Change control: any crypto-stack or memory-layout change must be proven not to v
 | 11 | `agent/11-defi` | TWAMM Liquidity Architect | `interop/` (OpenAPI gateway, TWAMM, 2% max-spread) | F Interop |
 | 12 | `agent/12-governance` | Web-of-Trust / DAO Governance | `interop/` + consensus hooks (vouching, multi-sig decay, ZK vote) | F / C |
 | 13 | `agent/13-security` | Hardware Anomaly Detector | `mesh-transport/` (quarantine, honeypot, hash-chain, VRF weights) | B Transport |
-| 14 | `agent/14-ai` | Edge AI Quantization Specialist | `sandbox/` + interop AI paths (INT8, SITF, PagedAttention) | E / F |
+| 14 | `agent/14-ai` | Edge AI Quantization Specialist | `ai/`, `sandbox/` + interop AI paths (INT8, SITF, PagedAttention) | E / F |
 | 15 | `agent/15-frontend` | Frontend Chess UX / PWA | `frontend/` (chessboard, offline PWA, network UI) | A Frontend |
 | 16 | `agent/16-devops` | Determinism Auditor & CI/Release | `integration/` smoke, CI gates, SLA regression harness | Cross-cutting QA |
 
@@ -92,6 +92,7 @@ sandbox                    →  08, 14
 engine                     →  05
 consensus                  →  06, 07, 09
 interop                    →  10, 11, 12, 14
+ai                         →  14
 docs / u / AGENTS / workstream / integration → 01, 16
 ```
 

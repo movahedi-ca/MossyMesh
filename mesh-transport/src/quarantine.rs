@@ -32,7 +32,9 @@ pub enum FaultType {
 pub enum NodeHealth {
     Healthy,
     /// Accumulating strikes; still eligible for work.
-    Warned { strikes: u32 },
+    Warned {
+        strikes: u32,
+    },
     /// Forced offline for the diagnostic benchmark window.
     Quarantined,
     /// Diagnostic failed — node is banned from compute jobs.
@@ -155,8 +157,7 @@ impl QuarantineManager {
         }
 
         if record.diagnostic_ticks_remaining > 0 {
-            record.diagnostic_ticks_remaining =
-                record.diagnostic_ticks_remaining.saturating_sub(1);
+            record.diagnostic_ticks_remaining = record.diagnostic_ticks_remaining.saturating_sub(1);
             if record.diagnostic_ticks_remaining > 0 {
                 return false;
             }

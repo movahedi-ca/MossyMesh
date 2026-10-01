@@ -57,12 +57,18 @@ pub enum TwammError {
     OrderNotFound,
     /// Zero-sized stream request.
     ZeroAmount,
+    /// Order amount is smaller than the slice count, so the per-slice amount
+    /// would truncate to zero and the order could never stream. Rejected up front.
+    AmountTooSmall,
 }
 
 impl std::fmt::Display for TwammError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            TwammError::SpreadExceeded { spread_bps, max_bps } => {
+            TwammError::SpreadExceeded {
+                spread_bps,
+                max_bps,
+            } => {
                 write!(
                     f,
                     "spread {spread_bps} bps exceeds max cap of {max_bps} bps"
@@ -72,6 +78,9 @@ impl std::fmt::Display for TwammError {
             TwammError::InvalidPrice => write!(f, "invalid price"),
             TwammError::OrderNotFound => write!(f, "order not found"),
             TwammError::ZeroAmount => write!(f, "zero amount"),
+            TwammError::AmountTooSmall => {
+                write!(f, "order amount smaller than slice count")
+            }
         }
     }
 }
@@ -85,11 +94,7 @@ pub fn spread_bps(execution_price: u64, reference_price: u64) -> Result<u32, Twa
     if reference_price == 0 || execution_price == 0 {
         return Err(TwammError::InvalidPrice);
     }
-    let diff = if execution_price >= reference_price {
-        execution_price - reference_price
-    } else {
-        reference_price - execution_price
-    };
+    let diff = execution_price.abs_diff(reference_price);
     let bps = diff
         .saturating_mul(BPS_DENOM)
         .checked_div(reference_price)
@@ -143,7 +148,11 @@ pub fn spread_within_cap(execution_price: u64, reference_price: u64) -> bool {
 }
 
 /// Apply a buy or sell against a quoted execution price and return `(amount_out, execution_price)`.
-fn quote_fill(side: OrderSide, amount_in: u64, execution_price: u64) -> Result<(u64, u64), TwammError> {
+fn quote_fill(
+    side: OrderSide,
+    amount_in: u64,
+    execution_price: u64,
+) -> Result<(u64, u64), TwammError> {
     if amount_in == 0 {
         return Err(TwammError::ZeroAmount);
     }
@@ -195,6 +204,12 @@ impl TwammEngine {
             return Err(TwammError::InvalidPrice);
         }
         let slices = slices.max(1);
+        if amount_in < slices as u64 {
+            // Per-slice streaming divides remaining_in by slices_remaining and
+            // truncates; with amount_in < slices the first slice is zero and the
+            // order can never progress. Reject up front instead of locking funds.
+            return Err(TwammError::AmountTooSmall);
+        }
         let id = format!("twamm-{}", self.next_id);
         self.next_id += 1;
         self.orders.push(TwammOrder {
@@ -234,8 +249,12 @@ impl TwammEngine {
             return Err(TwammError::ZeroAmount);
         }
 
-        let (amount_out, bps) =
-            quote_with_spread_cap(order.side, amount_in, execution_price, order.reference_price)?;
+        let (amount_out, bps) = quote_with_spread_cap(
+            order.side,
+            amount_in,
+            execution_price,
+            order.reference_price,
+        )?;
 
         Ok(StreamFill {
             order_id: order_id.to_string(),
@@ -263,12 +282,38 @@ impl TwammEngine {
             .position(|o| o.id == order_id)
             .ok_or(TwammError::OrderNotFound)?;
 
-        self.orders[idx].remaining_in = self.orders[idx]
-            .remaining_in
-            .saturating_sub(fill.amount_in);
+        self.orders[idx].remaining_in =
+            self.orders[idx].remaining_in.saturating_sub(fill.amount_in);
         self.orders[idx].slices_remaining -= 1;
 
         Ok(fill)
+    }
+
+    /// Refresh the reference mid price on an open order (oracle update).
+    ///
+    /// The mid captured at submit goes stale on volatile pairs, so the 2%
+    /// cap would be measured against a dead baseline. Callers streaming
+    /// later slices should refresh the oracle input first; the cap is then
+    /// enforced at execution against the live mid. Rejects zero prices,
+    /// unknown orders, and exhausted orders.
+    pub fn refresh_reference_price(
+        &mut self,
+        order_id: &str,
+        new_reference_price: u64,
+    ) -> Result<(), TwammError> {
+        if new_reference_price == 0 {
+            return Err(TwammError::InvalidPrice);
+        }
+        let order = self
+            .orders
+            .iter_mut()
+            .find(|o| o.id == order_id)
+            .ok_or(TwammError::OrderNotFound)?;
+        if order.slices_remaining == 0 || order.remaining_in == 0 {
+            return Err(TwammError::OrderExhausted);
+        }
+        order.reference_price = new_reference_price;
+        Ok(())
     }
 
     /// Peek at an order by id.
@@ -328,12 +373,14 @@ pub fn parse_order_payload(payload: &str) -> Option<(OrderSide, u64, u32, u64, O
     let mut ref_price = None;
     let mut exec_price = None;
 
-    for part in payload.split(|c| c == ',' || c == '&' || c == ';') {
-        let part = part.trim().trim_matches(|c| c == '{' || c == '}' || c == '"');
+    for part in payload.split([',', '&', ';']) {
+        let part = part
+            .trim()
+            .trim_matches(|c| c == '{' || c == '}' || c == '"');
         if part.is_empty() {
             continue;
         }
-        let mut kv = part.splitn(2, |c| c == '=' || c == ':');
+        let mut kv = part.splitn(2, ['=', ':']);
         let key = kv.next()?.trim().trim_matches('"').to_ascii_lowercase();
         let val = kv.next()?.trim().trim_matches('"');
         match key.as_str() {
@@ -371,7 +418,10 @@ mod tests {
         // 201 bps
         let err = enforce_max_spread(1_020_100, 1_000_000).unwrap_err();
         match err {
-            TwammError::SpreadExceeded { spread_bps, max_bps } => {
+            TwammError::SpreadExceeded {
+                spread_bps,
+                max_bps,
+            } => {
                 assert!(spread_bps > MAX_SPREAD_BPS);
                 assert_eq!(max_bps, MAX_SPREAD_BPS);
             }
@@ -391,6 +441,34 @@ mod tests {
         assert_eq!(
             enforce_max_spread(1_000_000, 0),
             Err(TwammError::InvalidPrice)
+        );
+    }
+
+    #[test]
+    fn refresh_reference_price_updates_oracle_input() {
+        // Issue #43: the mid captured at submit goes stale on volatile pairs.
+        let mut eng = TwammEngine::new();
+        let id = eng
+            .submit_order(OrderSide::Buy, 1_000_000, 4, 1_000_000)
+            .unwrap();
+        assert_eq!(eng.get_order(&id).unwrap().reference_price, 1_000_000);
+
+        // Oracle moved to 1_050_000; refresh before streaming later slices.
+        eng.refresh_reference_price(&id, 1_050_000).unwrap();
+        assert_eq!(eng.get_order(&id).unwrap().reference_price, 1_050_000);
+
+        // A fill 1% off the fresh mid now quotes fine against the live baseline.
+        let fill = eng.quote_slice(&id, 1_060_500).unwrap();
+        assert_eq!(fill.spread_bps, 100);
+
+        // Zero price, unknown order, and exhausted order are rejected.
+        assert_eq!(
+            eng.refresh_reference_price(&id, 0),
+            Err(TwammError::InvalidPrice)
+        );
+        assert_eq!(
+            eng.refresh_reference_price("twamm-nope", 1_000_000),
+            Err(TwammError::OrderNotFound)
         );
     }
 
@@ -419,16 +497,27 @@ mod tests {
     #[test]
     fn stream_rejects_when_exhausted() {
         let mut eng = TwammEngine::new();
-        let id = eng
-            .submit_order(OrderSide::Buy, 100, 1, 1_000_000)
-            .unwrap();
+        let id = eng.submit_order(OrderSide::Buy, 100, 1, 1_000_000).unwrap();
         eng.stream_slice(&id, 1_000_000).unwrap();
-        assert_eq!(eng.stream_slice(&id, 1_000_000), Err(TwammError::OrderExhausted));
+        assert_eq!(
+            eng.stream_slice(&id, 1_000_000),
+            Err(TwammError::OrderExhausted)
+        );
     }
 
     #[test]
     fn max_spread_constant_is_two_percent() {
         assert_eq!(MAX_SPREAD_BPS, 200);
+    }
+
+    #[test]
+    fn dust_order_rejected_up_front() {
+        let mut eng = TwammEngine::new();
+        // amount 2 over 5 slices: per-slice would truncate to 0 and stick forever.
+        let err = eng
+            .submit_order(OrderSide::Buy, 2, 5, 1_000_000)
+            .unwrap_err();
+        assert_eq!(err, TwammError::AmountTooSmall);
     }
 
     #[test]
@@ -481,7 +570,10 @@ mod tests {
     fn quote_with_spread_cap_rejects_standalone() {
         let err = quote_with_spread_cap(OrderSide::Sell, 1_000, 1_050_000, 1_000_000).unwrap_err();
         match err {
-            TwammError::SpreadExceeded { spread_bps, max_bps } => {
+            TwammError::SpreadExceeded {
+                spread_bps,
+                max_bps,
+            } => {
                 assert_eq!(spread_bps, 500);
                 assert_eq!(max_bps, MAX_SPREAD_BPS);
             }
@@ -577,14 +669,9 @@ mod tests {
     /// T3 + T4: invalid price and exhaustion.
     #[test]
     fn invariant_t3_t4_invalid_and_exhausted() {
-        assert_eq!(
-            enforce_max_spread(0, 1),
-            Err(TwammError::InvalidPrice)
-        );
+        assert_eq!(enforce_max_spread(0, 1), Err(TwammError::InvalidPrice));
         let mut eng = TwammEngine::new();
-        let id = eng
-            .submit_order(OrderSide::Sell, 50, 1, 1_000_000)
-            .unwrap();
+        let id = eng.submit_order(OrderSide::Sell, 50, 1, 1_000_000).unwrap();
         eng.stream_slice(&id, 1_000_000).unwrap();
         assert_eq!(
             eng.stream_slice(&id, 1_000_000),

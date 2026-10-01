@@ -210,6 +210,8 @@ impl Htlc {
     }
 
     /// Convenience: fund from a known preimage (computes the payment hash).
+    /// Takes the full parameter set by design (mirrors `HtlcParams` fields).
+    #[allow(clippy::too_many_arguments)]
     pub fn fund_with_preimage(
         id: [u8; 32],
         sender: impl Into<String>,
@@ -519,7 +521,8 @@ mod tests {
         }
         htlc.advance_vdf(1).unwrap();
         assert_eq!(htlc.vdf.steps_completed, 8);
-        htlc.vdf_cancel().expect("cancel after step counter complete");
+        htlc.vdf_cancel()
+            .expect("cancel after step counter complete");
         assert_eq!(htlc.state, HtlcState::VdfCancelled);
     }
 

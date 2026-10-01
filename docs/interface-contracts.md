@@ -116,7 +116,7 @@ TraceHash     = 32-byte hash-chain link of WASM execution trace
 
 | Op | Signature (logical) | Producer | Consumer |
 | --- | --- | --- | --- |
-| Gate job | `verify_vdf(proof) -> bool` | transport (`vdf_sybil`) | sandbox / transport admit |
+| Gate job | `verify_vdf_proof(proof) -> bool` | transport (`vdf_sybil`) | sandbox / transport admit |
 | Assign | `assign_workers(job, topology) -> VrfAssignment` | transport (`vrf_assigner`) | transport + interop |
 | Execute | `WamrInstance::invoke_wasm_function(fn, args) -> Result<bytes>` | sandbox | transport worker loop |
 | Cap RAM | `allocate(size) -> Result<ptr>` enforces `MEM_LIMIT = 10 MiB` | sandbox | all guests |
