@@ -1,5 +1,6 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { useMeshNetwork, rssiBars, type MeshNode } from "../hooks/useMeshNetwork";
+import { getStrings, initialLang, type AppLang } from "../i18n";
 
 const getIcon = (type: MeshNode["type"]) => {
   switch (type) {
@@ -22,6 +23,8 @@ const getStatusColor = (status: MeshNode["status"]) => {
 };
 
 export const NetworkVisualizer = () => {
+  const [lang] = useState<AppLang>(initialLang);
+  const t = getStrings(lang);
   const mesh = useMeshNetwork();
   const islands = useMemo(() => {
     const map = new Map<string, MeshNode[]>();
@@ -36,17 +39,17 @@ export const NetworkVisualizer = () => {
   return (
     <div className="visualizer-wrap">
       <div className="visualizer-header">
-        <h2 className="visualizer-title">Mesh islands</h2>
+        <h2 className="visualizer-title">{t.visualizer.title}</h2>
         <p className="subtitle visualizer-sub">
           {mesh.nodes.length === 0
-            ? "Scanning local mesh environment…"
-            : `${islands.length} island${islands.length === 1 ? "" : "s"} · ${mesh.peerCount} live nodes · ${mesh.islandName}`}
+            ? t.visualizer.scanning
+            : t.visualizer.summary(islands.length, mesh.peerCount, mesh.islandName)}
         </p>
       </div>
       {mesh.nodes.length === 0 ? (
         <div className="visualizer-scanning">
           <span className="status-dot" />
-          Probing Kademlia + LoRa beacons
+          {t.visualizer.probing}
         </div>
       ) : (
         <div className="island-list">
@@ -54,7 +57,7 @@ export const NetworkVisualizer = () => {
             <section key={islandId} className="island-group">
               <div className="island-label">
                 <span className="island-chip">{islandId}</span>
-                <span className="island-count">{members.length} nodes</span>
+                <span className="island-count">{t.visualizer.nodes(members.length)}</span>
               </div>
               <div className="visualizer-container">
                 {members.map((node) => (
@@ -69,11 +72,11 @@ export const NetworkVisualizer = () => {
                       }} />
                       {node.status.toUpperCase()}
                     </p>
-                    <p>Ping: {node.latency}ms · {node.hops} hop{node.hops === 1 ? "" : "s"}</p>
+                    <p>{t.visualizer.ping(node.latency, node.hops)}</p>
                     <p
                       className="node-rssi"
-                      title={`Signal strength ${node.rssi} dBm`}
-                      aria-label={`Signal strength ${node.rssi} dBm, ${rssiBars(node.rssi)} of 4 bars`}
+                      title={t.visualizer.signal(node.rssi)}
+                      aria-label={t.visualizer.signalAria(node.rssi, rssiBars(node.rssi))}
                     >
                       <span aria-hidden="true" style={{ display: "inline-flex", gap: 2, marginRight: 6, alignItems: "flex-end" }}>
                         {[0, 1, 2, 3].map((i) => (
@@ -99,8 +102,7 @@ export const NetworkVisualizer = () => {
         </div>
       )}
       <div className="mesh-topology-hint">
-        Isolated islands exchange games via store-and-forward when a bridge peer appears.
-        No WAN required for local play.
+        {t.visualizer.hint}
       </div>
     </div>
   );

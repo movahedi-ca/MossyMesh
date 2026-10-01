@@ -88,6 +88,9 @@ pub enum SitfError {
     },
     /// Buffer shorter than header + claimed payload.
     Truncated { needed: usize, got: usize },
+    /// Buffer contains bytes past the declared payload: non-canonical
+    /// encoding (issue #183).
+    TrailingBytes { expected: usize, got: usize },
     /// Shape product or length arithmetic overflowed.
     Overflow,
 }
@@ -108,6 +111,12 @@ impl fmt::Display for SitfError {
             ),
             SitfError::Truncated { needed, got } => {
                 write!(f, "truncated buffer: need {needed} bytes, got {got}")
+            }
+            SitfError::TrailingBytes { expected, got } => {
+                write!(
+                    f,
+                    "trailing bytes: payload ends at {expected} bytes, buffer has {got}"
+                )
             }
             SitfError::Overflow => write!(f, "shape product overflowed"),
         }
@@ -244,6 +253,15 @@ impl SitfTensor {
         if buf.len() < total {
             return Err(SitfError::Truncated {
                 needed: total,
+                got: buf.len(),
+            });
+        }
+        // Canonical encoding: the buffer must end exactly where the declared
+        // payload ends. Trailing bytes are a different encoding, not this
+        // tensor (issue #183).
+        if buf.len() != total {
+            return Err(SitfError::TrailingBytes {
+                expected: total,
                 got: buf.len(),
             });
         }
@@ -422,5 +440,29 @@ mod tests {
     fn fp32_le_payload_bits() {
         let t = SitfTensor::from_f32(vec![1], &[1.0f32]).unwrap();
         assert_eq!(t.data, 1.0f32.to_le_bytes().to_vec());
+    }
+
+    #[test]
+    fn trailing_bytes_rejected() {
+        // Issue #183: canonical encoding requires the buffer to end exactly
+        // where the declared payload ends.
+        let mut bytes = SitfTensor::from_f32(vec![2], &[1.5, -2.5])
+            .unwrap()
+            .to_bytes()
+            .unwrap();
+        let total = bytes.len();
+        // Clean roundtrip still parses.
+        assert_eq!(
+            SitfTensor::from_bytes(&bytes).unwrap(),
+            SitfTensor::from_f32(vec![2], &[1.5, -2.5]).unwrap()
+        );
+        bytes.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
+        match SitfTensor::from_bytes(&bytes) {
+            Err(SitfError::TrailingBytes { expected, got }) => {
+                assert_eq!(expected, total);
+                assert_eq!(got, total + 4);
+            }
+            other => panic!("expected TrailingBytes, got {other:?}"),
+        }
     }
 }

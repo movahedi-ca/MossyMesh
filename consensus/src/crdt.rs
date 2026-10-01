@@ -133,6 +133,13 @@ struct LwwValue {
     value: Option<Vec<u8>>,
     time: LogicalTime,
 }
+/// Max wall-clock advance adopted from a single remote map op (issue #191).
+/// Remote walls arrive over the mesh from untrusted islands; adopting an
+/// unbounded wall lets one crafted op panic (`u64::MAX + 1` in debug builds)
+/// or brick the replica clock (wrap to 0 in release, so every later local
+/// op loses all LWW conflicts). Adoption is capped per op; the local clock
+/// stays monotone and keeps advancing, so a crafted op can never freeze it.
+pub const MAX_REMOTE_WALL_SKEW: u64 = 1_000_000;
 
 /// Document CRDT: RGA sequence + LWW map, with full op log for deltas.
 #[derive(Clone, Debug, Default)]
@@ -240,13 +247,31 @@ impl Doc {
     /// Depth-first RGA walk: children of each parent sorted by ItemId **descending**.
     /// Higher (agent, seq) appears closer to the parent (classic RGA: newer concurrent
     /// inserts sit immediately after the left neighbor). Deterministic → converges.
+    ///
+    /// Iterative with an explicit stack (issue #193): the recursive version
+    /// recursed once per item along the child chain, and `insert_str` parents
+    /// each char to the previous one, so a long document (pasted text, or an
+    /// adversarial op log synced from a hostile island) overflowed the stack.
+    /// Traversal order is identical to the old recursion: pre-order, children
+    /// visited in descending ItemId.
     fn walk(&self, parent: Option<ItemId>, f: &mut dyn FnMut(&SeqItem)) {
-        let mut kids = self.children.get(&parent).cloned().unwrap_or_default();
-        kids.sort_by(|a, b| b.cmp(a)); // descending ItemId
-        for id in kids {
-            if let Some(item) = self.items.get(&id) {
-                f(item);
-                self.walk(Some(id), f);
+        fn sorted_children(doc: &Doc, parent: Option<ItemId>) -> std::vec::IntoIter<ItemId> {
+            let mut kids = doc.children.get(&parent).cloned().unwrap_or_default();
+            kids.sort_by(|a, b| b.cmp(a)); // descending ItemId
+            kids.into_iter()
+        }
+        let mut stack: Vec<std::vec::IntoIter<ItemId>> = vec![sorted_children(self, parent)];
+        while let Some(frame) = stack.last_mut() {
+            match frame.next() {
+                Some(id) => {
+                    if let Some(item) = self.items.get(&id) {
+                        f(item);
+                        stack.push(sorted_children(self, Some(id)));
+                    }
+                }
+                None => {
+                    stack.pop();
+                }
             }
         }
     }
@@ -432,23 +457,30 @@ impl Doc {
                         time,
                     },
                 );
-                if time.wall >= self.next_wall {
-                    self.next_wall = time.wall + 1;
-                }
+                self.adopt_remote_wall(time.wall);
                 self.note_map_time(time);
                 self.maybe_gc_tombstones();
             }
             CrdtOp::MapDelete { key, time } => {
                 self.map.insert(key, LwwValue { value: None, time });
-                if time.wall >= self.next_wall {
-                    self.next_wall = time.wall + 1;
-                }
+                self.adopt_remote_wall(time.wall);
                 self.note_map_time(time);
                 self.maybe_gc_tombstones();
             }
         }
 
         self.op_log.push(op);
+    }
+
+    /// Adopt a remote wall time into the local clock, bounded (issue #191).
+    /// Monotonicity is preserved (`next_wall` never decreases), but a single
+    /// remote op can advance it by at most `MAX_REMOTE_WALL_SKEW`. Saturating
+    /// arithmetic means `u64::MAX` can neither panic nor wrap the clock.
+    fn adopt_remote_wall(&mut self, wall: u64) {
+        if wall >= self.next_wall {
+            let adopted = wall.min(self.next_wall.saturating_add(MAX_REMOTE_WALL_SKEW));
+            self.next_wall = adopted.saturating_add(1);
+        }
     }
 
     /// Record a map op's wall time in the map version vector.
@@ -565,6 +597,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn deep_chain_does_not_overflow_stack() {
+        // Issue #193: insert_str parents each char to the previous one, so a
+        // long document is a single chain N deep. The old recursive walk
+        // overflowed the stack on such documents. Build the chain directly
+        // via integrate (O(1) per op) rather than insert_char (O(n) per op).
+        let mut d = Doc::new(1);
+        let n = 100_000u64;
+        let mut parent = None;
+        for i in 0..n {
+            let id = ItemId::new(1, i + 1);
+            d.integrate(CrdtOp::Insert {
+                id,
+                parent,
+                content: 'x',
+            });
+            parent = Some(id);
+        }
+        assert_eq!(d.text().chars().count(), n as usize);
+        assert_eq!(d.text_len(), n as usize);
+        assert_eq!(d.visible_ids().len(), n as usize);
+        assert!(d.text().chars().all(|c| c == 'x'));
+    }
+
+    #[test]
     fn tombstone_gc_removes_dominated_tombstones() {
         // Issue #194: a tombstone dominated by every replica's map version
         // vector can never change an LWW outcome, so gc_tombstones frees it.
@@ -655,6 +711,7 @@ mod tests {
         // Op log is untouched: cold-syncing replicas still learn the deletes.
         assert_eq!(doc.op_log_len(), 200);
     }
+
 
     #[test]
     fn delete_before_insert_converges() {
@@ -761,6 +818,35 @@ mod tests {
         assert_eq!(a.text(), "bc");
     }
 
+    #[test]
+    fn remote_wall_clock_adoption_is_bounded() {
+        // Issue #191: a crafted remote op with wall = u64::MAX must not panic
+        // (debug) or brick the replica clock (wrap to 0 in release).
+        let mut d = Doc::new(1);
+        d.map_set("k", b"v".to_vec()); // next_wall is now 2
+        assert_eq!(d.next_wall, 2);
+
+        d.integrate(CrdtOp::MapSet {
+            key: "evil".into(),
+            value: b"x".to_vec(),
+            time: LogicalTime::new(u64::MAX, 99),
+        });
+        // The op itself still applies (LWW by its own time)...
+        assert_eq!(d.map_get("evil"), Some(b"x".as_ref()));
+        // ...but the local clock only advanced by at most MAX_REMOTE_WALL_SKEW.
+        assert!(d.next_wall <= 2 + MAX_REMOTE_WALL_SKEW + 1);
+        assert!(d.next_wall >= 2);
+
+        // Local ops keep ticking normally, so the replica can still win
+        // future LWW conflicts.
+        let op = d.map_set("local", b"y".to_vec());
+        match op {
+            CrdtOp::MapSet { time, .. } => {
+                assert!(time.wall <= 2 + MAX_REMOTE_WALL_SKEW + 1);
+            }
+            _ => panic!("expected MapSet"),
+        }
+    }
     #[test]
     fn map_lww_deterministic() {
         let mut a = Doc::new(1);

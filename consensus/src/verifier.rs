@@ -1,9 +1,10 @@
 //! Swappable folding-verifier interface for Nova-style recursive proofs.
 //!
-//! The only working backend today is [`MockFoldingVerifier`]: a deterministic
-//! hash-based mock that preserves the constant-size public layout so wiring,
-//! radio anchoring, and edge tests can be built against a stable API. It is
-//! NOT a zero-knowledge proof and MUST NOT be presented as one.
+//! The mock backend ([`MockFoldingVerifier`]) is test-only (`cfg(test)`): it is
+//! a deterministic hash-based mock, NOT a zero-knowledge proof, and production
+//! builds must never accept it as one (issue #188). [`default_verifier`] in
+//! production returns the inert [`NovaSnarkVerifier`] placeholder, which
+//! rejects every proof until the real nova-snark backend is wired.
 //!
 //! [`NovaSnarkVerifier`] is the structural placeholder for the real backend
 //! (nova-snark over the Pallas/Vesta cycle, with the
@@ -11,6 +12,7 @@
 //! circuit description). It is deliberately inert: every method returns
 //! [`ConsensusError::SnarkError`] until the `nova-snark` dependency is wired.
 
+#[cfg(test)]
 use crate::folding::{fold_proofs, verify_folded_proof};
 use crate::snark::{MicroSpartanPreprocessing, PublicInput, SnarkProof, StepInstance};
 use crate::ConsensusError;
@@ -37,9 +39,15 @@ pub trait FoldingVerifier {
 /// Delegates to the domain-separated SHA-256 mock in [`crate::folding`].
 /// Safe for layout, serialization, radio-anchor, and determinism tests.
 /// Anything that needs actual soundness must use a real backend.
+///
+/// Test-only (issue #188): production builds cannot construct or verify with
+/// this backend, so a forged mock proof can never pass as consensus evidence
+/// outside tests.
+#[cfg(test)]
 #[derive(Debug, Default, Clone, Copy)]
 pub struct MockFoldingVerifier;
 
+#[cfg(test)]
 impl FoldingVerifier for MockFoldingVerifier {
     fn backend_name(&self) -> &'static str {
         "mock-sha256"
@@ -115,10 +123,21 @@ impl FoldingVerifier for NovaSnarkVerifier {
     }
 }
 
-/// The backend the node uses today. Swap this constructor when the Nova
-/// backend lands; all call sites go through [`FoldingVerifier`] and keep working.
+/// The backend the node uses. In production this is the inert Nova placeholder
+/// (rejects every proof until the real backend lands); tests get the mock
+/// backend. Swap this constructor when the Nova backend is wired; all call
+/// sites go through [`FoldingVerifier`] and keep working.
+#[cfg(test)]
 pub fn default_verifier() -> MockFoldingVerifier {
     MockFoldingVerifier
+}
+
+/// Production default: the unwired Nova placeholder. Returns
+/// [`ConsensusError::SnarkError`] on every proof — honest rejection, never a
+/// fake accept (issue #188).
+#[cfg(not(test))]
+pub fn default_verifier() -> NovaSnarkVerifier {
+    NovaSnarkVerifier::new(MicroSpartanPreprocessing::preprocess(b"default-verifier"))
 }
 
 #[cfg(test)]
