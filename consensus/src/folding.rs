@@ -15,7 +15,10 @@ use crate::ConsensusError;
 /// Interface mirrors Nova IVC: the recursive verifier circuit is represented only by
 /// [`MicroSpartanPreprocessing`] metadata (~10k gates); the mock prover hashes
 /// commitments deterministically so all nodes derive the same folded public bytes.
-pub fn fold_proofs(old: &SnarkProof, new_step: &StepInstance) -> Result<SnarkProof, ConsensusError> {
+pub fn fold_proofs(
+    old: &SnarkProof,
+    new_step: &StepInstance,
+) -> Result<SnarkProof, ConsensusError> {
     if !old.is_well_formed() {
         return Err(ConsensusError::InvalidProof);
     }
@@ -116,7 +119,10 @@ pub fn fold_sequence(
 
 /// DOC 34 compatibility: fold two proofs when the second encodes a single step.
 /// Prefer [`fold_proofs`] with an explicit [`StepInstance`].
-pub fn fold_snarks(old: &SnarkProof, step_proof: &SnarkProof) -> Result<SnarkProof, ConsensusError> {
+pub fn fold_snarks(
+    old: &SnarkProof,
+    step_proof: &SnarkProof,
+) -> Result<SnarkProof, ConsensusError> {
     if step_proof.fold_count != 1 {
         return Err(ConsensusError::InvalidProof);
     }

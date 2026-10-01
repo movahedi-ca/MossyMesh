@@ -104,7 +104,11 @@ pub fn bind_seed_to_job(seed: &[u8], job_id: &[u8]) -> [u8; 32] {
 ///
 /// Sortition: `Hash_Value < (Max_Hash * weight) / total_network_weight`
 /// Uses the top 64 bits of the hash; `u128` intermediates avoid overflow.
-pub fn is_selected_for_task(vrf_hash_top_64: u64, node_weight: u64, total_network_weight: u64) -> bool {
+pub fn is_selected_for_task(
+    vrf_hash_top_64: u64,
+    node_weight: u64,
+    total_network_weight: u64,
+) -> bool {
     if total_network_weight == 0 {
         return false;
     }
@@ -137,12 +141,7 @@ pub fn battery_capacity_score(battery_percent: u8) -> u32 {
     }
     let numerator = diff * 1000;
     let denominator = 2 * (1 + diff.abs());
-    let mut weight = 500 + (numerator / denominator);
-    if weight < 0 {
-        weight = 0;
-    } else if weight > 1000 {
-        weight = 1000;
-    }
+    let weight = (500 + (numerator / denominator)).clamp(0, 1000);
     weight as u32
 }
 

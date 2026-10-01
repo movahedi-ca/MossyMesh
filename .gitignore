@@ -1,3 +1,22 @@
+# Rust build output
+/target/
+
+# Node
+node_modules/
+dist/
+
+# Env and secrets
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
 # cargo-fuzz build and runtime artifacts (issue #36)
 consensus/fuzz/target/
 consensus/fuzz/corpus/

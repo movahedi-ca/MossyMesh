@@ -187,7 +187,7 @@ pub fn predict_nat_port(internal_port: u16, attempt: u16) -> u16 {
     let spread: i32 = if attempt == 0 {
         0
     } else if attempt % 2 == 1 {
-        ((attempt + 1) / 2) as i32
+        attempt.div_ceil(2) as i32
     } else {
         -((attempt / 2) as i32)
     };
@@ -327,9 +327,7 @@ impl HolePunchSession {
 
     fn build_candidates(&self) -> Vec<SocketAddrLite> {
         let ip = self.remote_base.ip.clone();
-        if self.local_nat.requires_port_prediction()
-            || self.remote_nat.requires_port_prediction()
-        {
+        if self.local_nat.requires_port_prediction() || self.remote_nat.requires_port_prediction() {
             predicted_ports(self.remote_base.port, self.config.prediction_spread)
                 .into_iter()
                 .map(|p| SocketAddrLite::new(ip.clone(), p))
@@ -451,8 +449,7 @@ mod tests {
             probes: Vec::new(),
         };
 
-        let state =
-            session.run_until_done(&mut clock, &DefaultNatHeuristic, &mut transport, 64);
+        let state = session.run_until_done(&mut clock, &DefaultNatHeuristic, &mut transport, 64);
         assert_eq!(state, PunchState::Connected);
         assert_eq!(session.connected_remote.unwrap().port, winner);
         assert!(!transport.probes.is_empty());
@@ -477,8 +474,12 @@ mod tests {
             allow_ports: vec![], // never succeeds
             probes: Vec::new(),
         };
-        let state =
-            session.run_until_done(&mut clock, &FixedNatHeuristic(NatType::FullCone), &mut transport, 32);
+        let state = session.run_until_done(
+            &mut clock,
+            &FixedNatHeuristic(NatType::FullCone),
+            &mut transport,
+            32,
+        );
         assert_eq!(state, PunchState::Failed);
     }
 

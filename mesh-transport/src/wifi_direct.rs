@@ -180,7 +180,10 @@ impl WifiDirectManager {
                 };
                 let (inc_id, inc_w) = if current_go == &self.local_id {
                     (self.local_id.as_str(), self.battery_weight)
-                } else if let Some(p) = self.peers_in_range.iter().find(|p| &p.peer_id == current_go)
+                } else if let Some(p) = self
+                    .peers_in_range
+                    .iter()
+                    .find(|p| &p.peer_id == current_go)
                 {
                     (p.peer_id.as_str(), p.battery_weight)
                 } else {

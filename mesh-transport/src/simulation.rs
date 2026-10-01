@@ -123,8 +123,7 @@ impl IslandSim {
         let name = name.into();
         let id = node_id_from_u64(id_num);
         self.topology.add_node(name.clone());
-        self.nodes
-            .insert(name.clone(), SimNode::new(name, id));
+        self.nodes.insert(name.clone(), SimNode::new(name, id));
         id
     }
 
@@ -141,13 +140,7 @@ impl IslandSim {
     }
 
     /// Bidirectional RF/logical link on the island topology graph.
-    pub fn link(
-        &mut self,
-        a: &str,
-        b: &str,
-        link: LinkType,
-        quality: u8,
-    ) -> Result<(), SimError> {
+    pub fn link(&mut self, a: &str, b: &str, link: LinkType, quality: u8) -> Result<(), SimError> {
         if !self.nodes.contains_key(a) {
             return Err(SimError::UnknownNode(a.to_string()));
         }
@@ -183,10 +176,8 @@ impl IslandSim {
             // Fresh table so re-seed is idempotent.
             node.routing = RoutingTable::new(node.id);
             for (nname, nid) in neighbor_map.get(name).into_iter().flatten() {
-                node.routing.insert(NodeContact::new(
-                    *nid,
-                    format!("mesh://island/{nname}"),
-                ));
+                node.routing
+                    .insert(NodeContact::new(*nid, format!("mesh://island/{nname}")));
             }
         }
     }
@@ -266,11 +257,7 @@ impl IslandSim {
             topology_path,
             kad_found_exact: kad.found_exact,
             kad_rounds: kad.rounds,
-            kad_closest_endpoints: kad
-                .closest
-                .iter()
-                .map(|c| c.endpoint.clone())
-                .collect(),
+            kad_closest_endpoints: kad.closest.iter().map(|c| c.endpoint.clone()).collect(),
             hops,
             delivered,
             frame_count: frames.len(),

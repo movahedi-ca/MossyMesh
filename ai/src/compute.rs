@@ -158,7 +158,7 @@ impl ComputeBackend for CpuBackend {
             for j in 0..n {
                 let mut acc = 0f32;
                 for p in 0..k {
-                    acc = acc + av[i * k + p] * bv[p * n + j];
+                    acc += av[i * k + p] * bv[p * n + j];
                 }
                 out[i * n + j] = acc;
             }
@@ -195,7 +195,7 @@ impl ComputeBackend for CpuBackend {
             for j in 0..seq {
                 let mut dot = 0f32;
                 for t in 0..d {
-                    dot = dot + qv[i * d + t] * kv[j * d + t];
+                    dot += qv[i * d + t] * kv[j * d + t];
                 }
                 scores[i * seq + j] = dot * scale;
             }
@@ -215,11 +215,11 @@ impl ComputeBackend for CpuBackend {
                 // Same-process determinism: fixed reduction order + IEEE f32.
                 let e = (row[j] - max_v).exp();
                 weights[i * seq + j] = e;
-                sum = sum + e;
+                sum += e;
             }
             let inv = if sum == 0.0 { 0.0 } else { 1.0 / sum };
             for j in 0..seq {
-                weights[i * seq + j] = weights[i * seq + j] * inv;
+                weights[i * seq + j] *= inv;
             }
         }
         // out = weights × V
@@ -228,7 +228,7 @@ impl ComputeBackend for CpuBackend {
             for t in 0..d {
                 let mut acc = 0f32;
                 for j in 0..seq {
-                    acc = acc + weights[i * seq + j] * vv[j * d + t];
+                    acc += weights[i * seq + j] * vv[j * d + t];
                 }
                 out[i * d + t] = acc;
             }
@@ -365,12 +365,7 @@ impl PreferredBackend {
     }
 }
 
-fn validate_matrix(
-    t: &SitfTensor,
-    rows: u32,
-    cols: u32,
-    name: &str,
-) -> Result<(), ComputeError> {
+fn validate_matrix(t: &SitfTensor, rows: u32, cols: u32, name: &str) -> Result<(), ComputeError> {
     if t.dtype != DType::Fp32 {
         return Err(ComputeError::Shape(format!("{name} must be FP32")));
     }
@@ -421,11 +416,8 @@ mod tests {
     #[test]
     fn matmul_deterministic_across_runs() {
         let cpu = CpuBackend::new();
-        let a = SitfTensor::from_f32(
-            vec![3, 3],
-            &[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
-        )
-        .unwrap();
+        let a = SitfTensor::from_f32(vec![3, 3], &[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9])
+            .unwrap();
         let b = SitfTensor::from_f32(vec![3, 2], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).unwrap();
         let op = MatMulOp { m: 3, k: 3, n: 2 };
         let r1 = cpu.matmul_f32(op, &a, &b).unwrap();
@@ -480,17 +472,9 @@ mod tests {
     fn attention_bit_stable_fresh_backends() {
         let seq = 3u32;
         let d = 2u32;
-        let q = SitfTensor::from_f32(
-            vec![seq, d],
-            &[0.5, 0.0, 0.0, 0.5, 0.25, 0.25],
-        )
-        .unwrap();
+        let q = SitfTensor::from_f32(vec![seq, d], &[0.5, 0.0, 0.0, 0.5, 0.25, 0.25]).unwrap();
         let k = q.clone();
-        let v = SitfTensor::from_f32(
-            vec![seq, d],
-            &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
-        )
-        .unwrap();
+        let v = SitfTensor::from_f32(vec![seq, d], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).unwrap();
         let op = AttentionOp { seq, d };
         let o1 = CpuBackend::new().attention_f32(op, &q, &k, &v).unwrap();
         let o2 = CpuBackend::new().attention_f32(op, &q, &k, &v).unwrap();
