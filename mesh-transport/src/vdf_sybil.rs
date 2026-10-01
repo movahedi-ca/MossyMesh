@@ -111,9 +111,7 @@ impl VdfVerifyError {
             VdfVerifyError::UndefinedExponent => {
                 "VDF verify failed: fifth-root exponent undefined."
             }
-            VdfVerifyError::InvalidOutput => {
-                "VDF verify failed: input/output out of field range."
-            }
+            VdfVerifyError::InvalidOutput => "VDF verify failed: input/output out of field range.",
         }
     }
 }
@@ -710,9 +708,8 @@ mod tests {
     #[test]
     fn test_prioritize_proofs_vouched_first() {
         let params = VdfParams::for_tests(2);
-        let mk = |peer: &str, vouched: bool| {
-            QueuedProof::new(peer, evaluate_vdf(1, &params), vouched)
-        };
+        let mk =
+            |peer: &str, vouched: bool| QueuedProof::new(peer, evaluate_vdf(1, &params), vouched);
         let mut queue = vec![
             mk("zebra", false),
             mk("mallory", false),
