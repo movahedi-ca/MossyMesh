@@ -105,7 +105,14 @@
 .mesh-metrics-sep { opacity: 0.5; }
 .dht-ready { color: var(--primary-color); }
 .dht-boot { color: #c72dfb; }
-.visualizer-wrap { width: 100%; }
+.visualizer-wrap {
+  width: 100%;
+  /* #22: reserve layout space so the node cards mounting after the
+     scanning placeholder does not push content below the fold. */
+  min-height: 22rem;
+  display: flex;
+  flex-direction: column;
+}
 .visualizer-header { margin-bottom: 0.5rem; }
 .visualizer-title {
   font-size: 1.35rem;
@@ -117,8 +124,10 @@
 }
 .visualizer-sub { margin-bottom: 1rem !important; font-size: 0.95rem !important; }
 .visualizer-scanning {
-  display: inline-flex;
+  display: flex;
   align-items: center;
+  justify-content: center;
+  flex: 1;
   gap: 0.6rem;
   color: var(--text-muted);
   font-size: 0.9rem;
