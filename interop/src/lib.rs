@@ -106,7 +106,9 @@ pub async fn run_http_server() {
     let app = Router::new()
         .route("/api/v1/health", get(health_handler).post(health_handler))
         .route("/api/v1/submit_job", post(submit_job_handler))
-        .route("/api-docs/openapi.json", get(api_docs::serve_openapi_json))
+        // NOTE: /api-docs/openapi.json is served by api_docs::swagger_ui() below
+        // (utoipa SwaggerUi::url). Registering it here as well panics Axum with
+        // an overlapping-route error and kills the daemon on every boot.
         .merge(api_docs::swagger_ui());
 
     let bind = std::env::var("MESH_GATEWAY_BIND").unwrap_or_else(|_| "127.0.0.1:8080".into());

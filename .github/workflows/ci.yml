@@ -172,6 +172,31 @@ jobs:
       - name: cargo check -p engine --target wasm32-wasip1
         run: cargo check -p engine --target wasm32-wasip1
 
+  # Regression guard for the boot panic found by the Oct 2026 operational
+  # review: run_http_server registered /api-docs/openapi.json twice and Axum
+  # panicked, killing the daemon on every boot. 520 unit tests were green
+  # because none ever executed main(), so this boots the real binary and
+  # asserts the gateway answers /api/v1/health with HTTP 200.
+  daemon-smoke:
+    name: Daemon boot smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: '. -> target'
+          shared-key: workspace-smoke
+
+      - name: Build mesh-daemon
+        run: cargo build --bin mesh-daemon
+
+      - name: Boot daemon and assert /api/v1/health
+        run: ./devops/smoke-boot.sh
+
   docker-portal:
     name: Docker portal image
     runs-on: ubuntu-latest
