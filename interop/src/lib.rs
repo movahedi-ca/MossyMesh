@@ -171,6 +171,7 @@ fn map_interop_error(e: InteropError) -> StatusCode {
         InteropError::Timeout => StatusCode::GATEWAY_TIMEOUT,
         InteropError::SpreadCapExceeded => StatusCode::UNPROCESSABLE_ENTITY,
         InteropError::GatewayDormant => StatusCode::SERVICE_UNAVAILABLE,
+        InteropError::TooManyRequests => StatusCode::TOO_MANY_REQUESTS,
     }
 }
 
@@ -1383,4 +1384,80 @@ mod tests {
         });
         assert_eq!(err, Err(InteropError::SpreadCapExceeded));
     }
+
+    fn dummy_job(i: u8) -> MeshJob {
+        MeshJob {
+            action: "fill".into(),
+            from: "t".into(),
+            to: "t".into(),
+            fen: String::new(),
+            route_key: [i; 32],
+        }
+    }
+
+    /// Issue #162: the local enqueue rejects at the cap and never evicts the
+    /// oldest job.
+    #[test]
+    #[allow(clippy::cast_possible_truncation)]
+    fn enqueue_job_rejects_at_cap_without_eviction() {
+        let mut outbox = std::collections::VecDeque::new();
+        for i in 0..JOB_OUTBOX_CAP {
+            enqueue_job(&mut outbox, dummy_job(i as u8)).unwrap();
+        }
+        assert_eq!(outbox.len(), JOB_OUTBOX_CAP);
+
+        let before: Vec<[u8; 32]> = outbox.iter().map(|j| j.route_key).collect();
+        assert_eq!(
+            enqueue_job(&mut outbox, dummy_job(255)),
+            Err(JobDispatchError::OutboxFull)
+        );
+        // Queue untouched: no silent drop of the oldest job.
+        let after: Vec<[u8; 32]> = outbox.iter().map(|j| j.route_key).collect();
+        assert_eq!(before, after);
+        assert_eq!(outbox.len(), JOB_OUTBOX_CAP);
+    }
+
+    /// Issue #162: end to end, a full outbox surfaces backpressure through
+    /// dispatch_job, the REST shim, and the HTTP handler (429).
+    #[tokio::test]
+    #[allow(clippy::cast_possible_truncation)]
+    async fn outbox_full_surfaces_backpressure_everywhere() {
+        {
+            let mut outbox = job_outbox().lock().unwrap();
+            outbox.clear();
+            for i in 0..JOB_OUTBOX_CAP {
+                outbox.push_back(dummy_job(i as u8));
+            }
+        }
+
+        // dispatch_job rejects loudly; nothing evicted.
+        assert_eq!(
+            dispatch_job(r#"{"action":"ping"}"#).unwrap_err(),
+            JobDispatchError::OutboxFull
+        );
+        assert_eq!(job_outbox().lock().unwrap().len(), JOB_OUTBOX_CAP);
+
+        // REST shim maps it to backpressure.
+        let rest = handle_rest_call(&AsyncApiRequest {
+            endpoint: "/api/v1/submit_job".into(),
+            payload: r#"{"action":"ping"}"#.into(),
+        });
+        assert_eq!(rest, Err(InteropError::TooManyRequests));
+
+        // HTTP handler maps it to 429.
+        let addr: SocketAddr = "127.0.0.1:55994".parse().unwrap();
+        let err = submit_job_handler(
+            ConnectInfo(addr),
+            HeaderMap::new(),
+            r#"{"action":"ping"}"#.into(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err, StatusCode::TOO_MANY_REQUESTS);
+
+        // Cleanup so other tests sharing the global outbox are unaffected.
+        let _ = drain_job_outbox();
+        assert_eq!(job_outbox().lock().unwrap().len(), 0);
+    }
+
 }
