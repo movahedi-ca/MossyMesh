@@ -112,19 +112,49 @@ fn build_router() -> Router {
 ///
 /// Binds loopback by default (override with `MESH_GATEWAY_BIND`); the old
 /// 0.0.0.0 bind exposed an unauthenticated remote surface on shared LANs.
-pub async fn run_http_server() {
+///
+/// Returns an error instead of panicking so the daemon can log the failure
+/// and exit non-zero (issue #150): an unwrap() here would take down the whole
+/// process with an unlogged panic on something as mundane as a port clash.
+pub async fn run_http_server() -> Result<(), HttpServerError> {
+    // Note: the OpenAPI JSON is served by swagger_ui() via
+    // `.url("/api-docs/openapi.json", ...)`; registering an extra explicit
+    // route for the same path panics in axum ("Overlapping method route").
     let app = build_router();
 
     let bind = std::env::var("MESH_GATEWAY_BIND").unwrap_or_else(|_| "127.0.0.1:8080".into());
-    let listener = tokio::net::TcpListener::bind(&bind).await.unwrap();
+    let listener = tokio::net::TcpListener::bind(&bind)
+        .await
+        .map_err(|e| HttpServerError::Bind(format!("cannot bind gateway to {bind}: {e}")))?;
     println!("Interop: HTTP Server listening on {}", bind);
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
     )
     .await
-    .unwrap();
+    .map_err(HttpServerError::Serve)?;
+    Ok(())
 }
+
+/// Errors starting or serving the interop HTTP gateway.
+#[derive(Debug)]
+pub enum HttpServerError {
+    /// The bind address could not be parsed, bound, or was refused by policy.
+    Bind(String),
+    /// Serving failed after a successful bind.
+    Serve(std::io::Error),
+}
+
+impl std::fmt::Display for HttpServerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            HttpServerError::Bind(msg) => write!(f, "gateway bind failed: {msg}"),
+            HttpServerError::Serve(e) => write!(f, "gateway serve failed: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for HttpServerError {}
 
 async fn health_handler() -> &'static str {
     "Mesh Island Active"
@@ -1034,6 +1064,27 @@ mod tests {
         assert_eq!(sm.step(true), WsStep::Tick);
         assert_eq!(sm.consecutive_failures, 0);
         assert_eq!(sm.step(false), WsStep::Retry(Duration::from_secs(1)));
+    }
+
+    /// Issue #150: a bind failure returns Err instead of panicking, so the
+    /// daemon can log it and exit non-zero.
+    #[tokio::test]
+    async fn http_server_bind_conflict_returns_error_not_panic() {
+        // Occupy a port, then point the gateway at it: the bind must fail
+        // with HttpServerError::Bind rather than unwrap-panicking.
+        let squatter = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = squatter.local_addr().unwrap().port();
+        std::env::set_var("MESH_GATEWAY_BIND", format!("127.0.0.1:{port}"));
+
+        let err = run_http_server().await.unwrap_err();
+        assert!(
+            matches!(err, HttpServerError::Bind(_)),
+            "expected Bind error, got {err:?}"
+        );
+        assert!(err.to_string().contains(&port.to_string()));
+
+        std::env::remove_var("MESH_GATEWAY_BIND");
+        drop(squatter);
     }
 
     /// Issue #234: building the router must not panic on overlapping routes.
