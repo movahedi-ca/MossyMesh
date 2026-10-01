@@ -1,64 +1,126 @@
-# MessyMash Master Blueprint (Version 8.0)
-### *Asynchronous, Censorship-Resistant, Serverless Supercomputer & Open-Source Chess PoC*
-### Official Website: MessyMash.com
-## 1. Project Integration Management (The Charter)
-**Mission Statement:** To build a self-healing mesh that turns any collection of phones, Raspberry Pis, PCs, and LoRa radios into a unified, decentralized compute grid operating completely independently of traditional ISPs, DNS servers, and fiat currencies.
-**Proof of Concept (PoC):** The MessyMash offline-capable Chess application utilizing the shakmaty engine (capable of ~836 Mnps bitboard evaluation) to stress-test perfect state-transition determinism across highly heterogeneous hardware.
-### Strict System SLAs & Constraints
- * **Target Capacity:** 100 Resilient Verifiable Compute-Hours (RVCH) per day per 20-node island, with zero upstream internet.
- * **Determinism Guarantee:** Less than 1% unverifiable AI/Compute outputs (Perfect Cross-Device Determinism).
- * **Reliability:** Less than 5% job timeout rate in highly unstable physical environments.
- * **Edge Footprint:** Strict maximum of 10 MiB RAM overhead for the active ledger on edge devices.
-**Integrated Change Control:** Any architectural changes to the cryptographic stack or memory allocations must be mathematically proven not to violate the 10 MiB RAM edge constraint or the cross-device determinism SLA before merging.
-## 2. Project Scope Management (Architecture & Baselines)
-### In-Scope Technical Stack
+# MossyMesh
 
-| Architectural Layer | Core Technologies | Mesh Implementation & Guardrails |
-| :--- | :--- | :--- |
-| **Frontend Layer** | React, TypeScript, Vite, vite-plugin-pwa | Serves an offline-first PWA via a Captive Portal. nginx configured with client_max_body_size 150M for asset transfers. |
-| **Application Logic** | Rust, shakmaty, shakmaty-syzygy, yrs | Core chess bitboard evaluation paired with memory-mapped endgame tablebases and YATA conflict-free replication. |
-| **Execution Sandbox** | WAMR (wasm32-wasip1), WASI | Enforces **Symmetric Static INT8 Quantization** and **Fixed-Block Memory Pools**. Host-side simulation by default; native WAMR via wasm_runtime_full_init only when the `wamr` feature links it. Bounded aux stack (-z stack-size=N). |
-| **Transport Layer** | reticulum-rs, lxmf-rs, Kademlia DHT | Replaces IP with identity-based routing. Heavy lines use STUN-less hole punching; lightweight uses LoRa (CSMA/CA) & BLE. |
-| **Ledger Consensus** | trie-db, ipld-core, serde_ipld_dagcbor | Incremental Merkle-Patricia Trie datastore utilizing serialized compact DAG-CBOR formats and cryptographic pointers. |
-| **State Compression** | Nova-style folding (mock commitments) | Nova-style recursive folding over Pallas/Vesta curves is the design target. The code currently uses deterministic mock commitments; real nova-snark stays feature-gated and optional. Keeps proofs constant-sized to drop old ledger histories. |
-| **AI Processing** | SITF, Edge PagedAttention, Vulkan Compute | Standardized tensor formats, disk-mapped context windows, and deterministic GPU computing for high-compute tiers. | <br> ### Out-of-Scope (Exclusions) <br> * Any reliance on centralized IP addresses, Web2 Oracles, or standard DNS routing. <br> * Centralized cloud databases (e.g., AWS, Firebase). Data availability must rely on RAM-Disk Ring Buffers (Ephemeral DA with LRU eviction) and 7-Day Regional SSD Hubs utilizing Append-Only Logs secured by Reed-Solomon Erasure Coding. <br> ## 3. Project Schedule Management (WBS & Roadmap) <br> Execution is sequenced over an iterative, critical path timeline based on a 10-hour/week commitment.
+MossyMesh is a Rust workspace of mesh-networking and compute libraries, plus one
+daemon that wires them together and one HTTP gateway on top. It is not a mesh
+network you can join today. This README describes what the code actually does,
+checked against the tree at HEAD.
 
+The old README (the "MessyMash Master Blueprint") described a long-term vision:
+LoRa relays, ham-radio ZK bursts, 100 RVCH/day SLAs. None of that runs. It is
+kept for reference in [docs/vision-blueprint.md](docs/vision-blueprint.md),
+marked as future vision, not current capability.
 
+## What works
 
+**mesh-daemon binary.** Boots and serves. A CI smoke test boots the real binary
+and asserts `GET /api/v1/health` returns 200 (`devops/smoke-boot.sh`).
 
-| Project Phase | Focus & Deliverables | Definition of Done (DoD) & Acceptance Criteria |
-| :--- | :--- | :--- |
-| **Phase 1: Transport** | Offline Wi-Fi domains, Captive Portal redirection, and reticulum-rs daemon builds. | A smartphone test packet successfully translates to a LoRa transmission and routes to an offline node using Kademlia DHT pathfinding. |
-| **Phase 2: Sandbox** | Integration of the Wesolowski VDF (fast verification) and WAMR environment deployment. | The sandbox enforces the 10 MiB RAM cap (host simulation by default; native WAMR via wasm_runtime_full_init when linked) and creating an Ephemeral Job DID requires burning a 10-minute sequential VDF. |
-| **Phase 3: Consensus** | Deployment of trie-db, nova-snark, and yrs CRDT-based merging architectures. | Edge nodes successfully verify the ledger via a sub-megabyte constant proof and disconnected islands merge data deterministically via binary deltas. |
-| **Phase 4: Logic** | Compile shakmaty loop to wasm32-wasip1 and bring lxmf-rs messaging online. | The WASM chess engine benchmarks at ~836 Mnps. Escrowed credits use Hashed Timelock Contracts (HTLCs) protected by VDF-Delayed Cancellation. |
-| **Phase 5: Interop** | UI layout serving, Reticulum_AsyncAPI_rs endpoints, and TWAMM orchestration. | Reconnecting to the internet spins up an OpenAPI gateway, bridging local liquidity to a global AMM using a TWAMM with a strict 2% max-spread cap. | <br> ## 4. Project Cost & Resource Management <br> ### Initial Hardware Baseline
+**Real node-to-node p2p path.** Set `MESH_LISTEN_ADDR` (for example
+`127.0.0.1:19091`) and the daemon runs a live libp2p swarm: TCP transport,
+Noise encryption, Yamux multiplexing, active ping. A second daemon dials it
+with `MESH_PEER_ADDR` set to the first node's full multiaddr ending in
+`/p2p/<peer-id>`. A CI smoke test boots two daemons, dials one to the other,
+and requires real ping packets over real sockets in both directions
+(`devops/smoke-p2p.sh`). Supporting env vars: `MESH_NODE_SEED` (64 hex chars,
+pins the peer identity), `MESH_STATUS_FILE` (JSONL status output),
+`MESH_GATEWAY_BIND` (HTTP bind address).
 
+**HTTP gateway.** Axum server serving `GET /api/v1/health`,
+`POST /api/v1/submit_job`, and `/api-docs/openapi.json` with Swagger UI. Auth
+and rate limiting exist on the job endpoint. It binds loopback and fails closed
+otherwise.
 
-| Quantity | Device Tier | Core Hardware Target | Estimated Cost (USD) |
-| :--- | :--- | :--- | :--- |
-| 2 Units | **Pi-Tier (Genesis Nodes)** | Raspberry Pi Zero 2 W, Raspberry Pi 4, or 5 | ~$150.00 |
-| 3 Units | **Edge / IoT Tier** | ESP32 Microcontrollers with SX1262 LoRa transceivers | ~$60.00 |
-| 1 Unit | **Regional Hub** | NVMe-equipped High-Capacity Mini PC | ~$250.00 |
-| – | **Physical Layer Gear** | Power banks, HF Ham Radio links, high-gain antennas | ~$150.00 |
-| 12 Mos | **SaaS & Tooling** | Pro-tier AI assistants and developer workspace subscriptions | ~$360.00 / yr |
-| **Total** |  | **Initial Outlay & Baseline Projection** | **~$970.00** | <br> ### Labor Baseline (Sweat Equity) <br> 10 hours/week over 2.5 years equates to ~1,250 development hours. Evaluated at a senior system architect market rate ($100/hr), the total sweat equity project baseline valuation is **$125,000**. <br> ## 5. Project Quality Management (QA & Control) <br> To enforce the <1% unverifiable output SLA, the following protocol checks are automated in code: <br> * **Intelligent VRF Assignment:** Tasks are routed via a Commit-and-Reveal seed using Least-Loaded-First logic, Battery-Curve Weighting (heavy layers to AC-powered nodes), and Thermal-Aware routing (deprioritizing CPUs over 75°C). <br> * **Dynamic Triangulation:** The VRF assigns 3 Primary and 2 Standby workers per job. Standbys instantly replace dropping primaries without requiring a DAG restart. <br> * **Free-Rider Prevention:** Each node must submit Cryptographic Hash Chains of their WASM execution trace to prove actual computation occurred, rather than simple data forwarding. <br> * **Hardware Quarantine:** Tensors undergo Statistical Anomaly Detection. Nodes failing 3 checks are forced into Quarantine to run a 1-hour hardware diagnostic benchmark checking for silent CPU decay. <br> * **Cartel Eradication:** Hubs silently replay historically verified jobs via Onion-Routed Honeypots. Unproven cartels agreeing on fake hashes are instantly slashed and banned. <br> ## 6. Project Risk Management (Risk Register)
+**Chess engine (`engine` crate).** Real shakmaty 0.27 bitboards: legal move
+generation, checkmate detection, as a library.
 
-| Risk Event | Impact | Probability | Mitigation Strategy (Response Plan) |
-| :--- | :--- | :--- | :--- |
-| **Apple iOS Wi-Fi Drops (Kernel Panics)** | Critical | High | **Mitigate:** Mandate sudo rpi-update patches; force systemd-timesyncd offline time sync to local NTP prior to deployment. |
-| **Upstream Dependency Abandonment** | High | Medium | **Mitigate:** "Fork and Maintain" strategy. Vendor or fork core crates like reticulum-rs directly to the project organization to shield against bit-rot. |
-| **ASIC/GPU Spam Farms (Sybil Attacks)** | High | Medium | **Mitigate:** Require sequential Wesolowski VDF evaluation (repeated squaring mod the RSA-2048 challenge integer) to generate Ephemeral Job DIDs, raising the cost of parallel hardware. Verification is milliseconds regardless of delay (no CPU-DoS amplifier; see docs/math-wesolowski-vdf.md). |
-| **Storage Bloat Exhausting Edge RAM** | High | Medium | **Mitigate:** Utilize nova-snark MicroSpartan preprocessing to ensure verification circuits remain constant-sized (~10,000 gates). |
-| **Regional SSD Hub Destruction** | High | Low | **Mitigate:** Securely anchor 200-byte ZK-SNARK ledger proofs to neighboring macro-islands via High-Frequency (Ham) radio bursts up to 300 miles away. |
-| **Solo Developer Burnout** | Critical | High | **Mitigate:** Adhere strictly to the 10-hour/week allocation constraint. Enforce sequential, phase-by-phase completion to minimize context-switching. |
+**Consensus trie (`consensus` crate).** Hand-rolled Merkle-Patricia trie over
+Blake3, radix-16, as a library. Note: the old README credited `trie-db` and
+`ipld-core`; the code uses neither.
 
-## 7. Procurement, Governance & Stakeholders
-### Procurement Strategy (Make vs. Buy)
- * **Open-Source Integration over Custom Build:** To maximize productivity under a strict hobby time allocation, the project explicitly rejects "Not Invented Here" syndrome. The core engine integrates battle-tested components (shakmaty for bitboards and yrs for CRDT document updates) to save hundreds of custom engineering hours.
- * **Sneakernet Procurement Logistics:** Large assets (like 4GB AI Base Models) physically bypass severe radio frequency limits using air-gapped human couriers with High-Capacity USB Flash Drives. Subsequent delta updates use Radio-transmitted AI LoRA Weight Patching (<10MB).
-### Governance & Economy
- * **Web of Trust (WoT) Onboarding:** New nodes require a voucher who locks Quadratic Staking collateral. Vouchers are financially slashed if their invitees behave maliciously.
- * **Liquid DAO Governance:** The network initiates with a 3-of-5 admin multi-sig that mathematically decays to zero authority over 90 days. Control transitions to ZK-Blinded Voting by verified edge nodes.
- * **Incentives:** Genesis nodes operating entirely offline earn Retroactive AMM Liquidity Mining points, resulting in airdropped governance tokens upon internet reconnection.
+**VDF Sybil gate (`mesh-transport`).** Real Wesolowski VDF over RSA-2048 with
+logarithmic verification. Caveat, stated plainly: RSA-2048 needs a trusted
+setup. The factors were claimed destroyed in 2001; anyone who learns them can
+evaluate the VDF instantly, mint identity proofs without the delay, and the
+Sybil gate collapses. The zero-trusted-setup alternative (Pietrzak over class
+groups) is archived as follow-up work. Full math and the rotation plan are in
+[docs/math-wesolowski-vdf.md](docs/math-wesolowski-vdf.md).
+
+## What is partial
+
+**HTTP job queue.** `POST /api/v1/submit_job` returns 200 and appends the job
+to an in-memory `VecDeque`. Nothing in the running daemon drains it. Jobs are
+accepted, not executed.
+
+**Frontend (Vite + React + TypeScript, PWA).** Builds clean and renders a
+chessboard. Its backend contract is broken in two places: after a 200 from
+`/api/v1/submit_job` it shows "Move confirmed by swarm", while the move sits in
+the undrained outbox; and it fetches `/api/v1/engine_eval`, an endpoint the
+backend does not define, which 404s.
+
+**Sandbox.** The default is an honest, documented host *simulation* of the WASI
+surface: fixed-block heap, bounded aux stack. Native WAMR FFI exists behind a
+feature gate and is not linked in the default build.
+
+**BLE peripheral.** Real peripheral code (567 lines) plus a hardware
+abstraction layer and 25 tests. Not wired into the daemon, and never tested
+against real radio hardware.
+
+**TWAMM / HTLC (`interop` crate).** The math is real and tested: spread caps,
+order slicing, timelocks. There is no market, no counterparty, and no network
+for it to run on.
+
+**Kademlia DHT, LoRa, WiFi-Direct, STUN-less hole punch (`mesh-transport`).**
+Real library helpers with tests. The daemon does not use them for live traffic;
+the only live transport is the libp2p path above.
+
+## What is a prototype
+
+**SNARK / Nova-style folding (`consensus` crate).** Deterministic mock provers.
+The code says so, and so does this README. No real nova-snark proofs are
+produced.
+
+**Captive portal.** Static files only. No portal logic runs.
+
+## What is unwired
+
+**`governance` crate.** Compiles, 47 tests (multisig, voting, staking,
+web-of-trust). The daemon never initializes it.
+
+**`ai` crate.** Compiles, 29 tests. The Vulkan compute backend is a stub, labeled
+as one in the code. The daemon never initializes it.
+
+## What is a demo
+
+When `MESH_LISTEN_ADDR` is not set, the daemon boots in demo mode: it inserts
+8 fake peers (`mesh://boot/1` through `mesh://boot/8`) into an in-memory table
+and runs a scripted WiFi-Direct negotiation with hardcoded weights (local 950
+vs fake peer 150, so the local node always wins). The Kademlia, BLE, and
+hole-punch boot lines describe in-memory sketches, not live routing or live
+radio. Treat that output as a demo, not a network.
+
+## Build, test, run
+
+```sh
+cargo build --workspace          # one binary: mesh-daemon
+cargo test --workspace
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+./target/debug/mesh-daemon       # demo boot + HTTP gateway
+# Real p2p (two terminals):
+MESH_LISTEN_ADDR=127.0.0.1:19091 MESH_STATUS_FILE=/tmp/a.jsonl ./target/debug/mesh-daemon
+MESH_LISTEN_ADDR=127.0.0.1:19092 MESH_PEER_ADDR=/ip4/127.0.0.1/tcp/19091/p2p/<peer-id-from-/tmp/a.jsonl> \
+  MESH_STATUS_FILE=/tmp/b.jsonl ./target/debug/mesh-daemon
 ```
+
+Frontend: `cd frontend && npm ci && npm run build`.
+
+Smoke tests: `devops/smoke-boot.sh` (daemon boot + `GET /api/v1/health` -> 200),
+`devops/smoke-p2p.sh` (two-node libp2p ping). Both run in CI.
+
+## Workspace layout
+
+`mesh-transport` (networking, VDF, identity), `consensus` (trie, mocks for
+SNARK folding, erasure coding, CRDT), `engine` (shakmaty chess), `sandbox`
+(WASI surface), `interop` (HTTP gateway, OpenAPI docs, TWAMM/HTLC math),
+`governance`, `ai`, `integration` (cross-crate smoke), `frontend`,
+`captive-portal`, `devops`, `docs`.
