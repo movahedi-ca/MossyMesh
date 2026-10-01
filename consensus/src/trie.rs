@@ -430,6 +430,9 @@ fn insert_extension(
     let mut branch_value: Option<Vec<u8>> = None;
 
     let ext_nibble = path[shared] as usize;
+    if ext_nibble > 15 {
+        return Err(ConsensusError::InvalidInput("nibble out of range"));
+    }
     let ext_rem = path[shared + 1..].to_vec();
     let existing_child = if ext_rem.is_empty() {
         child
@@ -445,6 +448,9 @@ fn insert_extension(
         branch_value = Some(value);
     } else {
         let k_nibble = key[shared] as usize;
+        if k_nibble > 15 {
+            return Err(ConsensusError::InvalidInput("nibble out of range"));
+        }
         let k_rem = key[shared + 1..].to_vec();
         children[k_nibble] = Some(Box::new(MptNode::Leaf {
             path: k_rem,
@@ -749,6 +755,18 @@ fn hash_legacy_node(children: &HashMap<u8, Box<TrieNode>>, value: Option<&[u8]>)
 mod tests {
     use super::*;
     use crate::proof::verify_proof;
+
+    #[test]
+    fn insert_extension_rejects_out_of_range_nibble() {
+        // Direct internal call with a raw nibble of 16 must fail with
+        // InvalidInput, like split_leaf and insert_branch, not panic.
+        let child = MptNode::Leaf {
+            path: vec![],
+            value: b"v".to_vec(),
+        };
+        let err = insert_extension(vec![16], child, &[1], b"w".to_vec()).unwrap_err();
+        assert!(matches!(err, ConsensusError::InvalidInput(_)));
+    }
 
     #[test]
     fn insert_get_roundtrip() {
