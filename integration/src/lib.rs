@@ -56,7 +56,9 @@ pub fn job_pipeline(module_bytes: Vec<u8>) -> Result<JobPipelineResult, String> 
     // 1) Interop gateway accepts the job (REST surface).
     let req = interop::AsyncApiRequest {
         endpoint: "/api/v1/submit_job".to_string(),
-        payload: "startpos".to_string(),
+        // The /api/v1/submit_job endpoint validates job JSON (issue #14);
+        // send a well-formed payload so the pipeline exercises the accept path.
+        payload: r#"{"action":"startpos"}"#.to_string(),
     };
     let accept = interop::handle_rest_call(&req).map_err(|_| "interop rejected job".to_string())?;
     if accept.is_empty() {
