@@ -151,6 +151,7 @@ impl LightClient {
     ///   from the future beyond clock skew,
     /// - at least `quorum` distinct validators signed the canonical
     ///   checkpoint message.
+    ///
     /// The pinned root changes only after every check passes.
     pub fn retarget(
         &mut self,
@@ -307,7 +308,7 @@ mod tests {
 
     #[test]
     fn retarget_rotates_trust_with_quorum() {
-        let (t, lc) = fixture();
+        let (_t, lc) = fixture();
         let root = lc.trusted_root();
         let (mut lc, sks) = gated_client(root);
         let old_proof = {
