@@ -16,6 +16,7 @@
 //! - [`trie`] — insert/get, root hash, size budget, legacy `TrieNode`
 //! - [`proof`] — Merkle inclusion proofs + verification
 //! - [`ipld_codec`] — CBOR encode/decode and tagged hashing
+//! - [`light_client`] — light client: verify state without the full trie
 //! - [`error`] — [`ConsensusError`]
 //! - [`crdt`] — YATA/RGA document merge (peer agent surface; already present)
 //! - [`erasure`] / [`ring_buffer`] — DA helpers (peer agent surface)
@@ -29,6 +30,7 @@ pub mod error;
 pub mod erasure;
 pub mod folding;
 pub mod ipld_codec;
+pub mod light_client;
 pub mod proof;
 pub mod ring_buffer;
 pub mod snark;
@@ -40,6 +42,7 @@ pub use folding::{
     fold_proofs, fold_sequence, fold_snarks, verify_folded_proof, verify_preprocessing,
 };
 pub use ipld_codec::{decode_cbor, empty_root, encode_cbor, CryptoPointer};
+pub use light_client::LightClient;
 pub use proof::{verify_proof, verify_proof_bool, MerkleProof, ProofStep, ProofTerminal};
 pub use snark::{
     MicroSpartanPreprocessing, PublicInput, SnarkProof, StepInstance, ANCHOR_PROOF_SIZE,
