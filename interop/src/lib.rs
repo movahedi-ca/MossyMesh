@@ -10,6 +10,7 @@ pub mod twamm;
 use std::sync::{Mutex, OnceLock};
 use axum::{routing::{get, post}, Router, Json, extract::State};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use liquidity::LiquidityMiner;
 use openapi_gateway::OpenApiGateway;
