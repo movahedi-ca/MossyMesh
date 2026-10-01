@@ -12,6 +12,32 @@ pub const POINTS_PER_OFFLINE_EPOCH: u64 = 100;
 /// Conversion rate: governance tokens per mining point (scale 1e6 token units).
 pub const TOKENS_PER_POINT: u64 = 1_000;
 
+/// Max epochs accepted in a single accrue call (~30 days of hourly ticks).
+/// Larger self-reported values are rejected, not saturated (issue #184).
+pub const MAX_EPOCHS_PER_CALL: u64 = 24 * 30;
+
+/// Hard ceiling on lifetime offline epochs per node (~1 year of hourly
+/// ticks). The effective per-node cap is the smaller of this and the
+/// wall-clock hours elapsed since the node registered (issue #184).
+pub const MAX_EPOCHS_PER_NODE: u64 = 24 * 365;
+
+/// Grace hours added to the wall-clock lifetime cap. A node's registration
+/// record is created when the miner first learns about it, which can lag the
+/// node's actual genesis participation (restarts, re-registration, or an
+/// offline node registering after the fact), so up to a day of pre-record
+/// offline time stays claimable. The lifetime take stays bounded by elapsed
+/// time plus this constant; it does not reopen the unbounded mint.
+pub const PRE_REGISTRATION_GRACE_HOURS: u64 = 24;
+
+/// Wall-clock time as unix seconds. Used only to bound epoch claims by
+/// elapsed real time; never for consensus-critical ordering.
+fn unix_now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 /// Metadata for a genesis (or later) node participating in liquidity mining.
 #[derive(Debug, Clone)]
 pub struct MiningAccount {
@@ -24,6 +50,9 @@ pub struct MiningAccount {
     pub offline_epochs: u64,
     /// Governance tokens already claimed after reconnect (scale 1e6).
     pub claimed_tokens: u64,
+    /// Unix timestamp (seconds) when the node registered. Bounds the
+    /// lifetime offline-epoch claim by elapsed wall-clock time (issue #184).
+    pub registered_at_secs: u64,
 }
 
 impl MiningAccount {
@@ -34,6 +63,7 @@ impl MiningAccount {
             points: 0,
             offline_epochs: 0,
             claimed_tokens: 0,
+            registered_at_secs: unix_now_secs(),
         }
     }
 
@@ -44,6 +74,7 @@ impl MiningAccount {
             points: 0,
             offline_epochs: 0,
             claimed_tokens: 0,
+            registered_at_secs: unix_now_secs(),
         }
     }
 }
@@ -56,6 +87,9 @@ pub enum LiquidityError {
     NothingToClaim,
     /// Claims are only allowed once the mesh has reconnected upstream.
     StillOffline,
+    /// The self-reported epoch count exceeded the per-call cap or the
+    /// node's wall-clock-bounded lifetime cap (issue #184).
+    EpochCapExceeded,
 }
 
 impl std::fmt::Display for LiquidityError {
@@ -68,6 +102,9 @@ impl std::fmt::Display for LiquidityError {
             LiquidityError::NothingToClaim => write!(f, "no unclaimed points"),
             LiquidityError::StillOffline => {
                 write!(f, "airdrop claim requires internet reconnection")
+            }
+            LiquidityError::EpochCapExceeded => {
+                write!(f, "offline epoch count exceeds the allowed cap")
             }
         }
     }
@@ -112,6 +149,18 @@ impl LiquidityMiner {
             .or_insert_with(|| MiningAccount::new_genesis(id));
     }
 
+    /// Register a genesis node with an explicit registration timestamp
+    /// (unix seconds). Used for nodes re-registering with a known genesis
+    /// time and by tests to simulate long-lived registrations.
+    pub fn register_genesis_at(&mut self, node_id: impl Into<String>, registered_at_secs: u64) {
+        let id = node_id.into();
+        self.accounts.entry(id.clone()).or_insert_with(|| {
+            let mut acct = MiningAccount::new_genesis(id);
+            acct.registered_at_secs = registered_at_secs;
+            acct
+        });
+    }
+
     /// Register a non-genesis participant (no retroactive offline points).
     pub fn register_standard(&mut self, node_id: impl Into<String>) {
         let id = node_id.into();
@@ -134,6 +183,12 @@ impl LiquidityMiner {
 
     /// Accrue retroactive points for a genesis node that stayed offline for `epochs`.
     /// Non-genesis accounts may be tracked but earn zero retroactive points.
+    ///
+    /// Epoch counts are capped (issue #184): a per-call ceiling rejects
+    /// absurd self-reported values outright, and a per-node lifetime ceiling
+    /// bounded by wall-clock hours since registration rejects claims for
+    /// offline time that cannot have elapsed. Rejections leave all balances
+    /// untouched; nothing saturates.
     pub fn accrue_offline_epochs(
         &mut self,
         node_id: &str,
@@ -146,9 +201,21 @@ impl LiquidityMiner {
         if !acct.is_genesis {
             return Err(LiquidityError::NotGenesis);
         }
+        if epochs > MAX_EPOCHS_PER_CALL {
+            return Err(LiquidityError::EpochCapExceeded);
+        }
         // Only offline islands earn retroactive points.
         if self.internet_reconnected {
             return Ok(0);
+        }
+        let elapsed_hours = unix_now_secs().saturating_sub(acct.registered_at_secs) / 3600;
+        let max_node_epochs = MAX_EPOCHS_PER_NODE.min(
+            elapsed_hours
+                .saturating_add(1)
+                .saturating_add(PRE_REGISTRATION_GRACE_HOURS),
+        );
+        if acct.offline_epochs.saturating_add(epochs) > max_node_epochs {
+            return Err(LiquidityError::EpochCapExceeded);
         }
         let gained = epochs.saturating_mul(POINTS_PER_OFFLINE_EPOCH);
         acct.offline_epochs = acct.offline_epochs.saturating_add(epochs);
@@ -188,15 +255,17 @@ impl LiquidityMiner {
 
     pub fn status_json(&self) -> String {
         let genesis = self.accounts.values().filter(|a| a.is_genesis).count();
-        format!(
-            "{{\"internet_reconnected\":{},\"genesis_nodes\":{},\"total_points_issued\":{},\"total_tokens_airdropped\":{},\"points_per_epoch\":{},\"tokens_per_point\":{}}}",
-            self.internet_reconnected,
-            genesis,
-            self.total_points_issued,
-            self.total_tokens_airdropped,
-            POINTS_PER_OFFLINE_EPOCH,
-            TOKENS_PER_POINT
-        )
+        // Issue #187: serialize, never hand-format. A hand-built string
+        // cannot escape node-controlled values safely.
+        serde_json::json!({
+            "internet_reconnected": self.internet_reconnected,
+            "genesis_nodes": genesis,
+            "total_points_issued": self.total_points_issued,
+            "total_tokens_airdropped": self.total_tokens_airdropped,
+            "points_per_epoch": POINTS_PER_OFFLINE_EPOCH,
+            "tokens_per_point": TOKENS_PER_POINT,
+        })
+        .to_string()
     }
 
     pub fn account_json(&self, node_id: &str) -> Result<String, LiquidityError> {
@@ -205,10 +274,17 @@ impl LiquidityMiner {
             .get(node_id)
             .ok_or(LiquidityError::UnknownNode)?;
         let unclaimed = self.unclaimed_points(node_id)?;
-        Ok(format!(
-            "{{\"node_id\":\"{}\",\"is_genesis\":{},\"points\":{},\"offline_epochs\":{},\"claimed_tokens\":{},\"unclaimed_points\":{}}}",
-            a.node_id, a.is_genesis, a.points, a.offline_epochs, a.claimed_tokens, unclaimed
-        ))
+        // Issue #187: node_id is attacker-controlled; it must be escaped by
+        // the serializer, not interpolated into a format string.
+        Ok(serde_json::json!({
+            "node_id": a.node_id,
+            "is_genesis": a.is_genesis,
+            "points": a.points,
+            "offline_epochs": a.offline_epochs,
+            "claimed_tokens": a.claimed_tokens,
+            "unclaimed_points": unclaimed,
+        })
+        .to_string())
     }
 }
 
@@ -216,10 +292,18 @@ impl LiquidityMiner {
 mod tests {
     use super::*;
 
+    /// Register a genesis node as if it joined `hours_ago` hours back, so
+    /// the wall-clock lifetime cap (issue #184) does not block the accruals
+    /// under test.
+    fn old_genesis(miner: &mut LiquidityMiner, node_id: &str, hours_ago: u64) {
+        let at = unix_now_secs().saturating_sub(hours_ago.saturating_mul(3600));
+        miner.register_genesis_at(node_id, at);
+    }
+
     #[test]
     fn genesis_offline_nodes_earn_points() {
         let mut miner = LiquidityMiner::new();
-        miner.register_genesis("pi-zero-1");
+        old_genesis(&mut miner, "pi-zero-1", 24);
         let gained = miner.accrue_offline_epochs("pi-zero-1", 3).unwrap();
         assert_eq!(gained, 300);
         assert_eq!(miner.get("pi-zero-1").unwrap().points, 300);
@@ -228,7 +312,7 @@ mod tests {
     #[test]
     fn claim_requires_reconnect() {
         let mut miner = LiquidityMiner::new();
-        miner.register_genesis("pi-zero-1");
+        old_genesis(&mut miner, "pi-zero-1", 24);
         miner.accrue_offline_epochs("pi-zero-1", 2).unwrap();
         assert_eq!(
             miner.claim_airdrop("pi-zero-1"),
@@ -268,7 +352,7 @@ mod tests {
     #[test]
     fn invariant_l1_l3_offline_online_boundary() {
         let mut miner = LiquidityMiner::new();
-        miner.register_genesis("g1");
+        old_genesis(&mut miner, "g1", 24);
         assert!(!miner.is_online());
         assert_eq!(miner.accrue_offline_epochs("g1", 4).unwrap(), 400);
         assert_eq!(miner.claim_airdrop("g1"), Err(LiquidityError::StillOffline));
@@ -285,7 +369,7 @@ mod tests {
     #[test]
     fn invariant_l4_l5_point_conservation_and_single_claim() {
         let mut miner = LiquidityMiner::new();
-        miner.register_genesis("n");
+        old_genesis(&mut miner, "n", 24);
         miner.accrue_offline_epochs("n", 5).unwrap(); // 500 points
         miner.on_internet_reconnect();
 
@@ -311,8 +395,8 @@ mod tests {
     #[test]
     fn invariant_l6_l7_network_conservation() {
         let mut miner = LiquidityMiner::new();
-        miner.register_genesis("a");
-        miner.register_genesis("b");
+        old_genesis(&mut miner, "a", 24);
+        old_genesis(&mut miner, "b", 24);
         miner.accrue_offline_epochs("a", 2).unwrap(); // 200
         miner.accrue_offline_epochs("b", 3).unwrap(); // 300
         assert_eq!(miner.total_points_issued, 500);
@@ -335,6 +419,71 @@ mod tests {
         assert!(miner.total_tokens_airdropped <= TOKENS_PER_POINT * miner.total_points_issued);
     }
 
+    // --- Issue #184 regression tests ---
+
+    #[test]
+    fn u64_max_epochs_rejected_not_saturated() {
+        // The unbounded-mint attack: epochs = u64::MAX must be rejected,
+        // leaving every balance untouched.
+        let mut miner = LiquidityMiner::new();
+        old_genesis(&mut miner, "attacker", 24 * 365);
+        assert_eq!(
+            miner.accrue_offline_epochs("attacker", u64::MAX),
+            Err(LiquidityError::EpochCapExceeded)
+        );
+        let acct = miner.get("attacker").unwrap();
+        assert_eq!(acct.points, 0);
+        assert_eq!(acct.offline_epochs, 0);
+        assert_eq!(miner.total_points_issued, 0);
+    }
+
+    #[test]
+    fn per_call_cap_boundary() {
+        let mut miner = LiquidityMiner::new();
+        old_genesis(&mut miner, "patient", 24 * 31);
+        // Exactly at the cap: accepted.
+        let gained = miner
+            .accrue_offline_epochs("patient", MAX_EPOCHS_PER_CALL)
+            .unwrap();
+        assert_eq!(gained, MAX_EPOCHS_PER_CALL * POINTS_PER_OFFLINE_EPOCH);
+        // One over: rejected.
+        assert_eq!(
+            miner.accrue_offline_epochs("patient", MAX_EPOCHS_PER_CALL + 1),
+            Err(LiquidityError::EpochCapExceeded)
+        );
+    }
+
+    #[test]
+    fn per_node_lifetime_cap_bounded_by_wall_clock() {
+        // Fresh registration: at most 25 epochs claimable (0 elapsed + 1 +
+        // 24h pre-registration grace).
+        let mut miner = LiquidityMiner::new();
+        miner.register_genesis("newbie");
+        miner.accrue_offline_epochs("newbie", 20).unwrap();
+        // 20 + 10 = 30 > 25: rejected, balances untouched.
+        assert_eq!(
+            miner.accrue_offline_epochs("newbie", 10),
+            Err(LiquidityError::EpochCapExceeded)
+        );
+        assert_eq!(miner.get("newbie").unwrap().offline_epochs, 20);
+        assert_eq!(miner.get("newbie").unwrap().points, 2000);
+        // The remaining 5 epochs fit exactly.
+        miner.accrue_offline_epochs("newbie", 5).unwrap();
+        assert_eq!(miner.get("newbie").unwrap().offline_epochs, 25);
+    }
+
+    #[test]
+    fn per_call_cap_rejects_even_while_online() {
+        // Input validation runs before the online no-op path.
+        let mut miner = LiquidityMiner::new();
+        miner.register_genesis("n1");
+        miner.on_internet_reconnect();
+        assert_eq!(
+            miner.accrue_offline_epochs("n1", u64::MAX),
+            Err(LiquidityError::EpochCapExceeded)
+        );
+    }
+
     #[test]
     fn invariant_l2_non_genesis_blocked() {
         let mut miner = LiquidityMiner::new();
@@ -344,5 +493,17 @@ mod tests {
             Err(LiquidityError::NotGenesis)
         );
         assert_eq!(miner.total_points_issued, 0);
+    }
+
+    /// Issue #187: a node id containing JSON metacharacters must round-trip
+    /// through account_json instead of breaking out of the string.
+    #[test]
+    fn account_json_escapes_hostile_node_id() {
+        let mut miner = LiquidityMiner::new();
+        let evil = "node-\"quoted\"-\\-back\ttab";
+        miner.register_genesis(evil);
+        let json = miner.account_json(evil).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).expect("must be valid JSON");
+        assert_eq!(v["node_id"], evil);
     }
 }
