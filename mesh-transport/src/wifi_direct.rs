@@ -11,6 +11,18 @@ pub const GO_HYSTERESIS: u32 = 25;
 /// Minimum battery weight to volunteer as GO when alone / forming a group.
 pub const MIN_GO_WEIGHT: u32 = 50;
 
+/// Maximum battery weight any peer may claim (documented 0–1000 range).
+pub const MAX_BATTERY_WEIGHT: u32 = 1000;
+
+/// Clamp a claimed battery weight into the documented 0–1000 range.
+///
+/// NOTE: clamping bounds the election, it does not authenticate the claim.
+/// A peer can still lie within the range; signed battery-weight attestation
+/// is future work (see #202).
+pub fn clamp_battery_weight(weight: u32) -> u32 {
+    weight.min(MAX_BATTERY_WEIGHT)
+}
+
 #[derive(Debug, PartialEq, Clone)]
 pub enum WifiState {
     /// DOC 2: Node is actively sweeping channels for other MossyMesh peers.
@@ -32,8 +44,10 @@ pub struct WifiPeer {
 }
 
 impl WifiPeer {
+    /// Build a peer advertisement, clamping `battery_weight` into 0–1000
+    /// (fixes #202: an unclamped u32::MAX claim auto-won every election).
     pub fn new(peer_id: impl Into<String>, battery_weight: u32) -> Self {
-        let w = battery_weight;
+        let w = clamp_battery_weight(battery_weight);
         Self {
             peer_id: peer_id.into(),
             battery_weight: w,
@@ -95,7 +109,7 @@ impl WifiDirectManager {
         WifiDirectManager {
             local_id: local_id.into(),
             state: WifiState::Disconnected,
-            battery_weight,
+            battery_weight: clamp_battery_weight(battery_weight),
             peers_in_range: Vec::new(),
             group_owner_id: None,
             hysteresis: GO_HYSTERESIS,
@@ -127,7 +141,7 @@ impl WifiDirectManager {
     }
 
     pub fn set_battery_weight(&mut self, weight: u32) {
-        self.battery_weight = weight;
+        self.battery_weight = clamp_battery_weight(weight);
     }
 
     /// Elect the GO among local node + peers using battery weights and id tie-break.
@@ -347,5 +361,40 @@ mod tests {
         m.negotiate_group_owner();
         assert_eq!(m.group_owner_id.as_deref(), Some("A"));
         assert!(m.is_group_owner());
+    }
+
+    /// Regression test for #202: a u32::MAX weight claim is clamped to 1000
+    /// and no longer auto-wins the election.
+    #[test]
+    fn u32_max_weight_clamps_and_does_not_auto_win() {
+        let peer = WifiPeer::new("attacker", u32::MAX);
+        assert_eq!(peer.battery_weight, MAX_BATTERY_WEIGHT);
+        assert_eq!(peer.go_intent, 15);
+
+        // Local id sorts after the attacker's, so on the clamped tie the
+        // deterministic id tie-break (not the raw weight) decides.
+        let mut m = WifiDirectManager::with_id("zzz-local", 1000);
+        m.add_peer("aaa-attacker", u32::MAX);
+        assert_eq!(
+            m.peers_in_range[0].battery_weight,
+            MAX_BATTERY_WEIGHT,
+            "stored weight must be clamped"
+        );
+        m.negotiate_group_owner();
+        assert_eq!(
+            m.group_owner_id.as_deref(),
+            Some("zzz-local"),
+            "attacker must not win on an unclamped weight claim"
+        );
+
+        // Construction paths all clamp.
+        let m2 = WifiDirectManager::with_id("x", u32::MAX);
+        assert_eq!(m2.battery_weight, MAX_BATTERY_WEIGHT);
+        let mut m3 = WifiDirectManager::with_id("y", 10);
+        m3.set_battery_weight(u32::MAX);
+        assert_eq!(m3.battery_weight, MAX_BATTERY_WEIGHT);
+        assert_eq!(clamp_battery_weight(0), 0);
+        assert_eq!(clamp_battery_weight(1000), 1000);
+        assert_eq!(clamp_battery_weight(1001), 1000);
     }
 }
