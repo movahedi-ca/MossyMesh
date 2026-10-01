@@ -36,6 +36,19 @@ BUILD_ARGS+=("${EXTRA[@]+"${EXTRA[@]}"}")
 echo "+ cargo ${BUILD_ARGS[*]}"
 cargo "${BUILD_ARGS[@]}"
 
+# Stage the cdylib artifact where the sandbox loader expects it.
+# (engine/Cargo.toml [lib] crate-type includes cdylib for this.)
+WASM_OUT="target/wasm32-wasip1/${PROFILE}/engine.wasm"
+if [[ ! -f "$WASM_OUT" ]]; then
+  echo "error: expected artifact $WASM_OUT was not produced." >&2
+  echo "hint: engine must build a cdylib for wasm32-wasip1 (see engine/Cargo.toml)." >&2
+  exit 1
+fi
+
+mkdir -p sandbox/assets
+cp "$WASM_OUT" sandbox/assets/engine.wasm
+
 echo
 echo "OK: engine built for wasm32-wasip1 ($PROFILE)"
 echo "    target/wasm32-wasip1/${PROFILE}/libengine.rlib"
+echo "    $WASM_OUT -> sandbox/assets/engine.wasm"
