@@ -120,7 +120,7 @@ async fn submit_job_handler(body: String) -> &'static str {
 }
 
 /// A validated job accepted by the gateway, ready for DHT dispatch.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MeshJob {
     pub action: String,
     pub from: String,
