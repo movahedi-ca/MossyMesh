@@ -46,7 +46,10 @@ use std::path::{Path, PathBuf};
 use crate::sitf::{DType, SitfError, SitfTensor};
 
 /// Opaque physical page identifier.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+///
+/// Total ordering is used as the deterministic LRU tie-break (issue #177):
+/// among pages with equal `last_used`, the lowest `PageId` is evicted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd)]
 pub struct PageId(pub u32);
 
 /// Errors for page table / paged attention operations.
@@ -345,10 +348,13 @@ impl PageTable {
             return Ok(id);
         }
         // Evict deterministic LRU among physical pages, detach from slots, reuse.
+        // Tie-break by PageId (issue #177): HashMap iteration order is
+        // randomized, so min_by_key on last_used alone picked a different
+        // victim on different nodes for identical op sequences.
         let victim = self
             .pages
             .values()
-            .min_by_key(|p| p.last_used)
+            .min_by_key(|p| (p.last_used, p.id))
             .map(|p| p.id)
             .ok_or(PagedAttentionError::Full)?;
         for slot in self.table.iter_mut() {
@@ -411,12 +417,15 @@ impl PageTable {
                 ))
             })?
             .clone();
-        // Ensure capacity for re-insert
+        // Ensure capacity for re-insert: when the pool is full, recycle the
+        // LRU page via alloc_page and remove exactly the page it recycled, so
+        // the pool never grows past max_physical_pages (issue #178). The old
+        // code discarded the recycled id and popped a free-list entry that
+        // the evict path never pushes, so no page was removed and every
+        // reload leaked one page while destroying an unrelated live page.
         if !self.pages.contains_key(&id) && self.pages.len() >= self.max_physical_pages {
-            let _ = self.alloc_page()?;
-            if let Some(extra) = self.free_list.pop() {
-                self.pages.remove(&extra);
-            }
+            let recycled = self.alloc_page()?;
+            self.pages.remove(&recycled);
         }
         let mut f = File::open(&path)?;
         let offset = (slot * self.page_size) as u64;
@@ -687,5 +696,54 @@ mod tests {
         assert_eq!(snap[1], Some(id1));
         assert_eq!(snap[2], None);
         assert_eq!(pt.backend_kind(), PageBackendKind::Memory);
+    }
+
+    #[test]
+    fn lru_eviction_tie_breaks_by_page_id() {
+        // Issue #177: identical op sequences must evict the same victim even
+        // when several pages share last_used (HashMap order is randomized
+        // per map instance, so last_used alone was nondeterministic).
+        let build = || {
+            let mut pt = PageTable::new_memory(4, 4, 2).unwrap();
+            pt.write_slot(0, &[1, 1, 1, 1]).unwrap();
+            pt.write_slot(1, &[2, 2, 2, 2]).unwrap();
+            // Force a tie: both live pages share the same generation.
+            for p in pt.pages.values_mut() {
+                p.last_used = 5;
+            }
+            pt
+        };
+        let mut a = build();
+        let mut b = build();
+        a.write_slot(2, &[3, 3, 3, 3]).unwrap();
+        b.write_slot(2, &[3, 3, 3, 3]).unwrap();
+        assert_eq!(a.snapshot(), b.snapshot());
+        // Lowest PageId wins ties deterministically.
+        assert_eq!(a.snapshot()[2], Some(PageId(0)));
+    }
+
+    #[test]
+    fn reload_page_never_exceeds_max_physical_pages() {
+        // Issue #178: a reload into a full pool must reclaim exactly one page,
+        // never grow past max_physical_pages, and return the persisted bytes.
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("mossymesh_ai_reload_{nanos}.bin"));
+        let mut pt = PageTable::new_file(&path, 4, 4, 2).unwrap();
+        pt.write_slot(0, &[1, 1, 1, 1]).unwrap(); // persisted to file, page0
+        pt.write_slot(1, &[2, 2, 2, 2]).unwrap(); // persisted to file, page1 (pool full)
+        let id0 = pt.snapshot()[0].unwrap();
+        // Evict page0 from RAM while topping the pool back to full, so the
+        // reload faces a full pool of other live pages.
+        pt.pages.remove(&id0);
+        pt.alloc_page().unwrap();
+        assert_eq!(pt.pages.len(), 2);
+        pt.reload_page(0, id0).unwrap();
+        assert!(pt.pages.len() <= 2);
+        assert_eq!(pt.pages.len(), 2);
+        assert_eq!(pt.read_slot(0).unwrap(), vec![1, 1, 1, 1]);
+        let _ = std::fs::remove_file(&path);
     }
 }

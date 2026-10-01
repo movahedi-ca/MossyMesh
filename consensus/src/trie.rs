@@ -284,40 +284,11 @@ impl MerklePatriciaTrie {
         let mut steps: Vec<ProofStep> = Vec::new();
         let (terminal, value) = build_proof(root, &nibbles, &mut steps)?;
 
-        let leaf_path = match &terminal {
-            ProofTerminal::Leaf { path, .. } => path.clone(),
-            ProofTerminal::BranchValue { .. } => Vec::new(),
-        };
-
-        let mut siblings = Vec::new();
-        for step in &steps {
-            if let ProofStep::Branch {
-                nibble, children, ..
-            } = step
-            {
-                for (i, h) in children.iter().enumerate() {
-                    if i != *nibble as usize {
-                        if let Some(hash) = h {
-                            siblings.push(*hash);
-                        }
-                    }
-                }
-            }
-        }
-        // Include sibling hashes from a branch-terminal as well.
-        if let ProofTerminal::BranchValue { children, .. } = &terminal {
-            for h in children.iter().flatten() {
-                siblings.push(*h);
-            }
-        }
-
         Ok(MerkleProof {
             key: key.to_vec(),
             value,
-            leaf_path,
             terminal,
             steps,
-            siblings,
         })
     }
 
@@ -444,7 +415,16 @@ fn merge_nodes(local: MptNode, remote: &MptNode) -> Result<MptNode, ConsensusErr
         (mut local, remote) => {
             let leaves = collect_leaves(remote, &[]);
             for (full_path, val) in leaves {
-                local = insert_into(local, &full_path, val)?;
+                // Lexical max on conflicts (issue #192): keep max(local, remote)
+                // instead of letting the remote value win unconditionally, so
+                // the result matches the leaf-leaf fast path and the documented
+                // merge strategy regardless of trie shape.
+                match get_from(&local, &full_path) {
+                    Some(existing) if existing >= val => {}
+                    _ => {
+                        local = insert_into(local, &full_path, val)?;
+                    }
+                }
             }
             Ok(local)
         }
@@ -710,13 +690,9 @@ fn get_from(node: &MptNode, key: &[u8]) -> Option<Vec<u8>> {
                 if nibble > 15 {
                     return None;
                 }
-                match children[nibble].as_ref() {
-                    Some(child) => {
-                        rest = &rest[1..];
-                        current = child;
-                    }
-                    None => return None,
-                }
+                let child = children[nibble].as_ref()?;
+                rest = &rest[1..];
+                current = child;
             }
         }
     }
@@ -1121,6 +1097,42 @@ mod tests {
         b.insert(b"k", b"zzz".to_vec()).unwrap();
         a.merge_with(&b).unwrap();
         assert_eq!(a.get(b"k").as_deref(), Some(b"zzz".as_ref()));
+    }
+
+    #[test]
+    fn merge_conflict_lexical_max_in_structured_tries() {
+        // Issue #192: the documented strategy is lexical max on conflicts.
+        // The old generic arm gave the remote value unconditional priority
+        // whenever either trie had more structure than a single leaf.
+        // Multi-key tries force the generic arm (collect_leaves + insert_into).
+        let mut a = MerklePatriciaTrie::new();
+        let mut b = MerklePatriciaTrie::new();
+        for (k, v) in [
+            ("conflict", "local-wins"),
+            ("alpha", "a1"),
+            ("beta", "a2"),
+            ("gamma", "a3"),
+        ] {
+            a.insert(k.as_bytes(), v.as_bytes().to_vec()).unwrap();
+        }
+        for (k, v) in [
+            ("conflict", "aaa"),
+            ("alpha", "b1"),
+            ("beta", "b2"),
+            ("gamma", "b3"),
+        ] {
+            b.insert(k.as_bytes(), v.as_bytes().to_vec()).unwrap();
+        }
+
+        // Lexically larger local value must survive in both merge directions.
+        let mut ab = a.clone();
+        ab.merge_with(&b).unwrap();
+        assert_eq!(ab.get(b"conflict").as_deref(), Some(b"local-wins".as_ref()));
+
+        let mut ba = b.clone();
+        ba.merge_with(&a).unwrap();
+        assert_eq!(ba.get(b"conflict").as_deref(), Some(b"local-wins".as_ref()));
+        assert_eq!(ab.root_hash(), ba.root_hash());
     }
 
     #[test]
