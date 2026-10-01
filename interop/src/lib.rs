@@ -99,6 +99,9 @@ pub struct GenericPayload {
 ///
 /// Binds loopback by default (override with `MESH_GATEWAY_BIND`); the old
 /// 0.0.0.0 bind exposed an unauthenticated remote surface on shared LANs.
+/// A non-loopback bind without `MESH_GATEWAY_TOKEN` set is refused outright
+/// (fail closed); binding without a token is only allowed on loopback, where
+/// the bind itself is the access control, and warns loudly (issue #186).
 pub async fn run_http_server() {
     let app = Router::new()
         .route("/api/v1/health", get(health_handler).post(health_handler))
@@ -107,6 +110,24 @@ pub async fn run_http_server() {
         .merge(api_docs::swagger_ui());
 
     let bind = std::env::var("MESH_GATEWAY_BIND").unwrap_or_else(|_| "127.0.0.1:8080".into());
+    match validate_gateway_bind(&bind, gateway_token().as_deref()) {
+        GatewayBindDecision::Allow => {}
+        GatewayBindDecision::AllowWithWarning => {
+            eprintln!(
+                "WARNING: MESH_GATEWAY_TOKEN is not set, so the job API on {bind} \
+                 accepts unauthenticated requests. The loopback bind is the only \
+                 access control. Set MESH_GATEWAY_TOKEN to require a bearer token."
+            );
+        }
+        GatewayBindDecision::Refuse => {
+            eprintln!(
+                "REFUSING to bind {bind}: a non-loopback MESH_GATEWAY_BIND without \
+                 MESH_GATEWAY_TOKEN would expose the job API to the network \
+                 unauthenticated. Set MESH_GATEWAY_TOKEN or bind loopback. Failing closed."
+            );
+            std::process::exit(1);
+        }
+    }
     let listener = tokio::net::TcpListener::bind(&bind).await.unwrap();
     println!("Interop: HTTP Server listening on {}", bind);
     axum::serve(
@@ -115,6 +136,51 @@ pub async fn run_http_server() {
     )
     .await
     .unwrap();
+}
+
+/// Outcome of validating the HTTP gateway bind address (issue #186).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GatewayBindDecision {
+    /// Bind as requested.
+    Allow,
+    /// Bind, but authentication is disabled: warn loudly.
+    AllowWithWarning,
+    /// Refuse to start: fail closed.
+    Refuse,
+}
+
+/// True when `bind` (a `host:port` string) targets the loopback interface.
+/// Unparseable hosts are NOT loopback: validation fails closed.
+fn bind_host_is_loopback(bind: &str) -> bool {
+    let host = bind.rsplit_once(':').map(|(h, _)| h).unwrap_or(bind);
+    let host = host.trim_matches(|c| c == '[' || c == ']');
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    host.parse::<IpAddr>()
+        .map(|ip| ip.is_loopback())
+        .unwrap_or(false)
+}
+
+/// Decide whether the gateway may bind `bind` given the auth configuration.
+///
+/// A non-loopback bind without a bearer token would expose the job API to the
+/// network unauthenticated, so it is refused outright. Binding without a
+/// token is only acceptable on loopback, where the bind itself is the access
+/// control, and even then the operator gets a loud warning at startup.
+fn validate_gateway_bind(bind: &str, token: Option<&str>) -> GatewayBindDecision {
+    let has_token = token.is_some_and(|t| !t.is_empty());
+    if bind_host_is_loopback(bind) {
+        if has_token {
+            GatewayBindDecision::Allow
+        } else {
+            GatewayBindDecision::AllowWithWarning
+        }
+    } else if has_token {
+        GatewayBindDecision::Allow
+    } else {
+        GatewayBindDecision::Refuse
+    }
 }
 
 async fn health_handler() -> &'static str {
@@ -1025,5 +1091,52 @@ mod tests {
         assert_eq!(sm.step(true), WsStep::Tick);
         assert_eq!(sm.consecutive_failures, 0);
         assert_eq!(sm.step(false), WsStep::Retry(Duration::from_secs(1)));
+    }
+
+    /// Issue #186: bind validation fails closed on non-loopback binds without
+    /// a token, and warns on tokenless loopback binds.
+    #[test]
+    fn gateway_bind_validation_fails_closed_without_token() {
+        use GatewayBindDecision::{Allow, AllowWithWarning, Refuse};
+
+        // Loopback without a token: allowed, but warns.
+        assert_eq!(
+            validate_gateway_bind("127.0.0.1:8080", None),
+            AllowWithWarning
+        );
+        assert_eq!(
+            validate_gateway_bind("[::1]:8080", None),
+            AllowWithWarning
+        );
+        assert_eq!(
+            validate_gateway_bind("localhost:8080", None),
+            AllowWithWarning
+        );
+        // Loopback with a token: clean allow.
+        assert_eq!(
+            validate_gateway_bind("127.0.0.1:8080", Some("tok")),
+            Allow
+        );
+        // Non-loopback without a token: refused outright.
+        assert_eq!(validate_gateway_bind("0.0.0.0:8080", None), Refuse);
+        assert_eq!(validate_gateway_bind("192.168.1.5:8080", None), Refuse);
+        assert_eq!(validate_gateway_bind("[::]:8080", None), Refuse);
+        // Non-loopback with a token: allowed.
+        assert_eq!(
+            validate_gateway_bind("0.0.0.0:8080", Some("tok")),
+            Allow
+        );
+        assert_eq!(
+            validate_gateway_bind("192.168.1.5:8080", Some("tok")),
+            Allow
+        );
+        // Empty token is the same as no token.
+        assert_eq!(validate_gateway_bind("0.0.0.0:8080", Some("")), Refuse);
+        // Unparseable host fails closed.
+        assert_eq!(validate_gateway_bind("not a bind addr", None), Refuse);
+        assert_eq!(
+            validate_gateway_bind("not a bind addr", Some("tok")),
+            Allow
+        );
     }
 }
