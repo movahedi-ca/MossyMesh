@@ -1,5 +1,6 @@
 import { useCallback, useMemo, useState } from "react";
 import { Chess, type Square, type Move } from "chess.js";
+import { playMoveSound, playCheckmateSound } from "../lib/sound";
 import { formatEval, useEngineEval } from "../lib/engineEval";
 import "./Chessboard.css";
 
@@ -93,6 +94,8 @@ export const Chessboard = () => {
       setLastMove({ from, to });
       setStatus(describeStatus(next));
       clearSelection();
+      if (next.isCheckmate()) playCheckmateSound();
+      else playMoveSound();
       void publishMove(from, to);
     },
     [game, clearSelection, publishMove],
