@@ -1,5 +1,8 @@
 pub mod battery_tracker;
+pub mod ble_auth;
+pub mod ble_hal;
 pub mod ble_mesh;
+pub mod ble_peripheral;
 pub mod encryption_layer;
 pub mod fen;
 pub mod hash_chain;
