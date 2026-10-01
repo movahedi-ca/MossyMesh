@@ -28,7 +28,7 @@ All cross-crate messages SHOULD be `serde`-serializable (CBOR preferred on mesh;
         │ ExecuteRequest                │ CommitReceipt
 ┌───────▼──────────────┐                │
 │  sandbox (WAMR)      ├────────────────┘
-│  MEM_LIMIT 10MB      │
+│  MEM_LIMIT 10 MiB     │
 └───────┬──────────────┘
         │ FFI: evaluate_move / get_best_move / …
 ┌───────▼──────────────┐
@@ -98,7 +98,7 @@ TraceHash     = 32-byte hash-chain link of WASM execution trace
 | --- | --- | --- |
 | `root_hash` | `[u8;32]` | Trie root after insert/merge |
 | `proof` | Merkle and/or SNARK bytes | Prefer constant-size SNARK |
-| `ledger_bytes` | `u32` | **must be ≤ 10_000_000** |
+| `ledger_bytes` | `u32` | **must be ≤ 10_485_760 (10 MiB)** |
 
 ### `EscrowEvent` (interop)
 
@@ -108,7 +108,7 @@ TraceHash     = 32-byte hash-chain link of WASM execution trace
 | `amount` | `u128` | Abstract credit units |
 | `hash_lock` | `[u8;32]` | |
 | `vdf_cancel_deadline` | VDF or step counter | VDF-delayed cancellation |
-| `state` | `Open\|Claimed\|Refunded\|Slashed` | |
+| `state` | `Funded\|Claimed\|Refunded\|VdfCancelled` | Matches `HtlcState` in `interop/src/htlc.rs` |
 
 ---
 
@@ -117,7 +117,6 @@ TraceHash     = 32-byte hash-chain link of WASM execution trace
 | Op | Signature (logical) | Producer | Consumer |
 | --- | --- | --- | --- |
 | Gate job | `verify_vdf_proof(proof) -> bool` | transport (`vdf_sybil`) | sandbox / transport admit |
-| Assign | `assign_workers(job, topology) -> VrfAssignment` | transport (`vrf_assigner`) | transport + interop |
 | Execute | `WamrInstance::invoke_wasm_function(fn, args) -> Result<bytes>` | sandbox | transport worker loop |
 | Cap RAM | `allocate(size) -> Result<ptr>` enforces `MEM_LIMIT = 10 MiB` | sandbox | all guests |
 | Prove work | `hash_chain::append(trace) -> TraceHash` | transport | consensus / security |
@@ -149,7 +148,7 @@ TraceHash     = 32-byte hash-chain link of WASM execution trace
 | Merge islands | `TrieNode::merge_state(remote)` |
 | Verify | `verify_proof() -> bool` |
 | Compress | `fold_snarks()` / `verify_snark()` |
-| Bound | `MAX_LEDGER_SIZE = 10_000_000` |
+| Bound | `MAX_LEDGER_SIZE = 10_485_760` (10 MiB) |
 
 Transport must not store full historical ledger on edge; only active roots + proofs + ring buffers.
 

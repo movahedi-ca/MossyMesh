@@ -8,8 +8,8 @@
  * **Target Capacity:** 100 Resilient Verifiable Compute-Hours (RVCH) per day per 20-node island, with zero upstream internet.
  * **Determinism Guarantee:** Less than 1% unverifiable AI/Compute outputs (Perfect Cross-Device Determinism).
  * **Reliability:** Less than 5% job timeout rate in highly unstable physical environments.
- * **Edge Footprint:** Strict maximum of 10 MB RAM overhead for the active ledger on edge devices.
-**Integrated Change Control:** Any architectural changes to the cryptographic stack or memory allocations must be mathematically proven not to violate the 10 MB RAM edge constraint or the cross-device determinism SLA before merging.
+ * **Edge Footprint:** Strict maximum of 10 MiB RAM overhead for the active ledger on edge devices.
+**Integrated Change Control:** Any architectural changes to the cryptographic stack or memory allocations must be mathematically proven not to violate the 10 MiB RAM edge constraint or the cross-device determinism SLA before merging.
 ## 2. Project Scope Management (Architecture & Baselines)
 ### In-Scope Technical Stack
 
@@ -48,7 +48,7 @@
 | :--- | :--- | :--- | :--- |
 | **Apple iOS Wi-Fi Drops (Kernel Panics)** | Critical | High | **Mitigate:** Mandate sudo rpi-update patches; force systemd-timesyncd offline time sync to local NTP prior to deployment. |
 | **Upstream Dependency Abandonment** | High | Medium | **Mitigate:** "Fork and Maintain" strategy. Vendor or fork core crates like reticulum-rs directly to the project organization to shield against bit-rot. |
-| **ASIC/GPU Spam Farms (Sybil Attacks)** | High | Medium | **Mitigate:** Require memory-hard MinRoot VDF calculations (x \to x^{1/5} \pmod p) to generate Ephemeral Job DIDs, neutralizing parallel hardware. |
+| **ASIC/GPU Spam Farms (Sybil Attacks)** | High | Medium | **Mitigate:** Require sequential MinRoot VDF calculations (x \to x^{1/5} \pmod p) to generate Ephemeral Job DIDs, raising the cost of parallel hardware. Sequentiality is heuristic and MinRoot is not memory-hard (see docs/math-minroot-vdf.md). |
 | **Storage Bloat Exhausting Edge RAM** | High | Medium | **Mitigate:** Utilize nova-snark MicroSpartan preprocessing to ensure verification circuits remain constant-sized (~10,000 gates). |
 | **Regional SSD Hub Destruction** | High | Low | **Mitigate:** Securely anchor 200-byte ZK-SNARK ledger proofs to neighboring macro-islands via High-Frequency (Ham) radio bursts up to 300 miles away. |
 | **Solo Developer Burnout** | Critical | High | **Mitigate:** Adhere strictly to the 10-hour/week allocation constraint. Enforce sequential, phase-by-phase completion to minimize context-switching. |
