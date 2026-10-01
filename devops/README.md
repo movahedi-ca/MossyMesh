@@ -38,13 +38,19 @@ GitHub Actions (`.github/workflows/ci.yml`) on push/PR to `main` (and push to
 | Job | What it runs |
 | --- | --- |
 | Frontend + portal | `npm ci` + build for `frontend` and `captive-portal` |
-| **Cargo test (workspace lib)** | `cargo test --workspace --lib` on `ubuntu-latest` / Rust stable (30m timeout, cargo cache) |
-| Docker portal image | Builds `captive-portal` image after frontend jobs |
+| **Cargo test (workspace lib)** | `cargo test --locked --workspace --lib` on `ubuntu-latest` / Rust stable (30m timeout, cargo cache) |
+| cargo check + test (windows-msvc) | `cargo check --locked --workspace --all-targets` and `cargo test --locked --workspace --lib` on `windows-latest` (issue #148) |
+| Feature matrix | documented non-default combos: `sandbox --features wamr`, `engine --features syzygy` / `syzygy-mmap` (issue #147) |
+| Integration smoke tests | `cargo test --locked -p integration`, default and `--features transport` (issue #172) |
+| Docker portal image | Builds the `captive-portal` image, then runs it and probes `/healthz` and `/app/` (15m timeout, issue #151) |
 
-**Rust gate notes:** CI uses `--lib` only (unit tests in library crates), not
-`--all-targets`, so bin/integration tests that need RF hardware or long runtime
-do not block the monorepo. If a single crate is known broken, exclude it with
-`cargo test --workspace --lib --exclude <crate>` in the workflow and list it
-here — do not paper over failures with `continue-on-error`.
+**Rust gate notes:** `rust-lib` runs `--lib` only (unit tests in library crates)
+so bin/integration tests that need RF hardware or long runtime do not block
+the monorepo; `rust-windows` additionally compiles `--all-targets` and runs
+the lib suite on `windows-latest`, and the `integration-smoke` job covers the
+cross-crate suite. All cargo invocations use `--locked` so CI tests exactly
+the committed `Cargo.lock` (issue #152). If a single crate is known broken,
+exclude it with `--exclude <crate>` in the workflow and list it here, do not
+paper over failures with `continue-on-error`.
 
 **Currently excluded:** none.
