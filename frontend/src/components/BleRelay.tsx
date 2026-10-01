@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   connectBleRelay,
-  isBleSupported,
+  isBleRelayAvailable,
   type BleRelay,
   type BleRelayState,
 } from "../lib/bleRelay";
@@ -16,11 +16,13 @@ const LABEL: Record<BleRelayState, string> = {
 
 /**
  * Lets the browser act as a mesh relay over Web Bluetooth when the native
- * daemon is unreachable. Renders nothing on browsers without Web Bluetooth.
+ * daemon is unreachable. EXPERIMENTAL: no peer implementation ships yet,
+ * and the toggle renders only in a secure context (Web Bluetooth refuses
+ * plain HTTP, so it stays hidden on the real portal deployment).
  */
 export const BleRelayToggle = () => {
   const [state, setState] = useState<BleRelayState>(
-    isBleSupported() ? "idle" : "unsupported",
+    isBleRelayAvailable() ? "idle" : "unsupported",
   );
   const [peer, setPeer] = useState<string | null>(null);
   const [frames, setFrames] = useState(0);
@@ -56,8 +58,9 @@ export const BleRelayToggle = () => {
       setPeer(relay.deviceName);
       setState("connected");
     } catch {
-      // User cancelled the picker or the link dropped: stay idle, not stuck.
-      setState(isBleSupported() ? "idle" : "unsupported");
+      // User cancelled the picker, auth failed, or the link dropped:
+      // stay idle, not stuck.
+      setState(isBleRelayAvailable() ? "idle" : "unsupported");
     }
   }, [state]);
 
