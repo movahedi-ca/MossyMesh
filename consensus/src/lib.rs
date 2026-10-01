@@ -49,9 +49,9 @@ pub use snark::{
     MAX_VERIFICATION_PAYLOAD_BYTES, MICROSPARTAN_GATE_COUNT, MICROSPARTAN_PREPROCESS_META_BYTES,
 };
 pub use trie::{bytes_to_nibbles, MerklePatriciaTrie, MptNode, StateMerge, TrieNode};
-pub use verifier::{default_verifier, FoldingVerifier, NovaSnarkVerifier};
 #[cfg(test)]
 pub use verifier::MockFoldingVerifier;
+pub use verifier::{default_verifier, FoldingVerifier, NovaSnarkVerifier};
 
 /// 32-byte cryptographic digest / content pointer.
 pub type Hash32 = [u8; 32];
