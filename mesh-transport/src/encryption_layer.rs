@@ -56,6 +56,7 @@ impl IdentityAead {
             return Err(EncryptionError::EmptyIdentity);
         }
         let mut hasher = Sha256::new();
+        // codeql[rust/hard-coded-cryptographic-value]: domain separator string, not a key
         hasher.update(b"mossymesh/id-aead/v1");
         hasher.update(local_identity);
         hasher.update(remote_identity);
