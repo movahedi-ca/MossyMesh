@@ -1397,6 +1397,7 @@ mod tests {
     /// Issue #162: the local enqueue rejects at the cap and never evicts the
     /// oldest job.
     #[test]
+    #[allow(clippy::cast_possible_truncation)]
     fn enqueue_job_rejects_at_cap_without_eviction() {
         let mut outbox = std::collections::VecDeque::new();
         for i in 0..JOB_OUTBOX_CAP {
@@ -1418,6 +1419,7 @@ mod tests {
     /// Issue #162: end to end, a full outbox surfaces backpressure through
     /// dispatch_job, the REST shim, and the HTTP handler (429).
     #[tokio::test]
+    #[allow(clippy::cast_possible_truncation)]
     async fn outbox_full_surfaces_backpressure_everywhere() {
         {
             let mut outbox = job_outbox().lock().unwrap();
