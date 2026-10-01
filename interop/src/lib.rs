@@ -147,32 +147,74 @@ fn check_auth(headers: &HeaderMap) -> bool {
 }
 
 /// Bounded per-peer rate limiter: 60 requests per 60 seconds per IP.
-/// The table is capped at 1024 peers so a LAN-wide scan cannot grow it
-/// without bound.
-fn rate_limited_peers() -> &'static Mutex<HashMap<IpAddr, Vec<Instant>>> {
-    static RL: OnceLock<Mutex<HashMap<IpAddr, Vec<Instant>>>> = OnceLock::new();
-    RL.get_or_init(|| Mutex::new(HashMap::new()))
+///
+/// Issue #160: the old table stored only timestamps and never evicted stale
+/// entries, so once 1024 distinct IPs had ever been seen, every new IP was
+/// rejected forever. Each entry now records a last-seen instant; when a new
+/// IP arrives at a full table, entries whose last-seen is older than the
+/// window are evicted first, and only a genuinely full table rejects.
+#[derive(Debug, Default)]
+struct RateLimiter {
+    peers: HashMap<IpAddr, RatePeerState>,
+}
+
+/// Per-IP rate-limit state.
+#[derive(Debug, Clone)]
+struct RatePeerState {
+    /// Request instants inside the current window (pruned on each check).
+    stamps: Vec<Instant>,
+    /// Last request seen from this IP, used for stale-entry eviction.
+    last_seen: Instant,
+}
+
+/// Max distinct IPs tracked before eviction kicks in.
+const RATE_LIMIT_PEERS_CAP: usize = 1024;
+
+impl RateLimiter {
+    fn check(&mut self, ip: IpAddr, now: Instant) -> bool {
+        // A new IP at a full table: evict entries idle longer than the
+        // window before turning anyone away.
+        if self.peers.len() >= RATE_LIMIT_PEERS_CAP && !self.peers.contains_key(&ip) {
+            self.peers
+                .retain(|_, st| now.saturating_duration_since(st.last_seen) < RATE_WINDOW);
+        }
+        if self.peers.len() >= RATE_LIMIT_PEERS_CAP && !self.peers.contains_key(&ip) {
+            return false;
+        }
+        let entry = self.peers.entry(ip).or_insert_with(|| RatePeerState {
+            stamps: Vec::new(),
+            last_seen: now,
+        });
+        entry.last_seen = now;
+        entry
+            .stamps
+            .retain(|t| now.saturating_duration_since(*t) < RATE_WINDOW);
+        if entry.stamps.len() >= RATE_LIMIT {
+            return false;
+        }
+        entry.stamps.push(now);
+        true
+    }
+
+    #[cfg(test)]
+    fn peer_count(&self) -> usize {
+        self.peers.len()
+    }
+}
+
+fn rate_limited_peers() -> &'static Mutex<RateLimiter> {
+    static RL: OnceLock<Mutex<RateLimiter>> = OnceLock::new();
+    RL.get_or_init(|| Mutex::new(RateLimiter::default()))
 }
 
 const RATE_LIMIT: usize = 60;
 const RATE_WINDOW: Duration = Duration::from_secs(60);
 
 fn check_rate_limit(ip: IpAddr) -> bool {
-    let now = Instant::now();
-    let mut table = match rate_limited_peers().lock() {
-        Ok(t) => t,
-        Err(_) => return false,
-    };
-    if table.len() > 1024 && !table.contains_key(&ip) {
-        return false;
+    match rate_limited_peers().lock() {
+        Ok(mut limiter) => limiter.check(ip, Instant::now()),
+        Err(_) => false,
     }
-    let entry = table.entry(ip).or_default();
-    entry.retain(|t| now.duration_since(*t) < RATE_WINDOW);
-    if entry.len() >= RATE_LIMIT {
-        return false;
-    }
-    entry.push(now);
-    true
 }
 
 /// Payload digest for logs: never print raw request bodies (log injection
@@ -1025,5 +1067,76 @@ mod tests {
         assert_eq!(sm.step(true), WsStep::Tick);
         assert_eq!(sm.consecutive_failures, 0);
         assert_eq!(sm.step(false), WsStep::Retry(Duration::from_secs(1)));
+    }
+
+    /// Issue #160: per-IP 60/60s limit still enforced.
+    #[test]
+    fn rate_limiter_enforces_per_ip_window() {
+        let mut limiter = RateLimiter::default();
+        let t0 = Instant::now();
+        let ip: IpAddr = "10.9.0.1".parse().unwrap();
+        for _ in 0..RATE_LIMIT {
+            assert!(limiter.check(ip, t0));
+        }
+        assert!(!limiter.check(ip, t0), "61st request in the window is rejected");
+        // After the window passes, the IP is allowed again.
+        let later = t0 + RATE_WINDOW + Duration::from_secs(1);
+        assert!(limiter.check(ip, later));
+        assert_eq!(limiter.peer_count(), 1);
+    }
+
+    /// Issue #160: stale entries are evicted so the 1024 cap cannot become a
+    /// permanent blocklist.
+    #[test]
+    fn rate_limiter_evicts_stale_ips_at_cap() {
+        let mut limiter = RateLimiter::default();
+        let t0 = Instant::now();
+        // Fill the table to the cap with distinct IPs.
+        for i in 0..RATE_LIMIT_PEERS_CAP {
+            let ip: IpAddr = format!("10.10.{}.{}", i / 256, i % 256).parse().unwrap();
+            assert!(limiter.check(ip, t0));
+        }
+        assert_eq!(limiter.peer_count(), RATE_LIMIT_PEERS_CAP);
+
+        // A fresh IP at a genuinely full table is still rejected...
+        let fresh: IpAddr = "10.11.0.1".parse().unwrap();
+        assert!(!limiter.check(fresh, t0 + Duration::from_secs(1)));
+
+        // ...but after the window, all entries are stale, so the same IP is
+        // admitted and the stale blocklist is gone.
+        let later = t0 + RATE_WINDOW + Duration::from_secs(1);
+        assert!(limiter.check(fresh, later));
+        assert_eq!(limiter.peer_count(), 1);
+    }
+
+    /// Issue #160: an idle IP keeps its slot across the sweep while active
+    /// IPs are retained; a returning stale IP starts with a clean window.
+    #[test]
+    fn rate_limiter_keeps_active_ips_during_eviction() {
+        let mut limiter = RateLimiter::default();
+        let t0 = Instant::now();
+        let busy: IpAddr = "10.12.0.1".parse().unwrap();
+        for i in 1..RATE_LIMIT_PEERS_CAP {
+            let ip: IpAddr = format!("10.13.{}.{}", i / 256, i % 256).parse().unwrap();
+            limiter.check(ip, t0);
+        }
+        // `busy` stays active past the window.
+        limiter.check(busy, t0);
+        limiter.check(busy, t0 + RATE_WINDOW + Duration::from_secs(1));
+        assert_eq!(limiter.peer_count(), RATE_LIMIT_PEERS_CAP);
+
+        // New IP arrives at a full table: the stale 1023 are evicted, `busy`
+        // keeps its timestamps.
+        let fresh: IpAddr = "10.12.0.2".parse().unwrap();
+        assert!(limiter.check(fresh, t0 + RATE_WINDOW + Duration::from_secs(2)));
+        assert_eq!(limiter.peer_count(), 2);
+
+        // `busy` hit the per-IP cap long ago is irrelevant here; verify its
+        // window accounting still works: 59 more allowed at this instant.
+        let now = t0 + RATE_WINDOW + Duration::from_secs(2);
+        for _ in 0..(RATE_LIMIT - 1) {
+            assert!(limiter.check(busy, now));
+        }
+        assert!(!limiter.check(busy, now));
     }
 }
