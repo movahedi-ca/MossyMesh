@@ -24,6 +24,16 @@ pub const FRAG_HEADER_LEN: usize = 14;
 /// Maximum application bytes per LoRa fragment.
 pub const LORA_FRAG_MTU: usize = LORA_MAX_PAYLOAD - FRAG_HEADER_LEN;
 
+/// Maximum fragments a single message may claim on the wire.
+///
+/// Bounds the reassembly buffer: 512 slots × 24-byte `Option<Vec<u8>>` ≈ 12 KiB
+/// worst case, far under the 10 MB edge ledger cap. Any fragment header with a
+/// larger count is rejected at decode time (fixes #201).
+pub const MAX_REASSEMBLY_FRAGMENTS: u16 = 512;
+
+/// Maximum reassembled message size implied by the fragment cap.
+pub const MAX_REASSEMBLED_LEN: usize = MAX_REASSEMBLY_FRAGMENTS as usize * LORA_FRAG_MTU;
+
 const MAGIC: [u8; 2] = [0x4D, 0x4D];
 const VERSION: u8 = 1;
 const FLAG_MORE: u8 = 0x01;
@@ -95,6 +105,13 @@ impl LoRaFragment {
         if count == 0 || index >= count {
             return Err(TranslateError::InvalidFragmentIndex { index, count });
         }
+        // Fix #201: reject unbounded wire counts before any allocation.
+        if count > MAX_REASSEMBLY_FRAGMENTS {
+            return Err(TranslateError::FragmentCountTooLarge {
+                count,
+                max: MAX_REASSEMBLY_FRAGMENTS,
+            });
+        }
         let payload = bytes[FRAG_HEADER_LEN..FRAG_HEADER_LEN + payload_len].to_vec();
         Ok(Self {
             message_id,
@@ -128,15 +145,29 @@ impl LoRaFragment {
 pub enum TranslateError {
     UnroutableIp(String),
     EmptyPayload,
-    FragmentTooLarge { len: usize, max: usize },
+    FragmentTooLarge {
+        len: usize,
+        max: usize,
+    },
     TruncatedHeader,
     TruncatedPayload,
     BadMagic,
     UnsupportedVersion(u8),
-    InvalidFragmentIndex { index: u16, count: u16 },
-    IncompleteReassembly { have: usize, need: usize },
+    InvalidFragmentIndex {
+        index: u16,
+        count: u16,
+    },
+    IncompleteReassembly {
+        have: usize,
+        need: usize,
+    },
     CrcMismatch,
     InconsistentMessage,
+    /// Fragment header claims more fragments than [`MAX_REASSEMBLY_FRAGMENTS`].
+    FragmentCountTooLarge {
+        count: u16,
+        max: u16,
+    },
     Mac(String),
 }
 
@@ -235,7 +266,14 @@ pub struct ReassemblyBuffer {
 }
 
 impl ReassemblyBuffer {
+    /// Create a buffer for `count` fragments. Panics if `count` exceeds
+    /// [`MAX_REASSEMBLY_FRAGMENTS`]: wire-decoded fragments are capped in
+    /// [`LoRaFragment::decode`], so only direct misuse can hit this.
     pub fn new(message_id: u32, count: u16) -> Self {
+        assert!(
+            count <= MAX_REASSEMBLY_FRAGMENTS,
+            "reassembly count {count} exceeds MAX_REASSEMBLY_FRAGMENTS"
+        );
         Self {
             message_id,
             count,
@@ -594,5 +632,44 @@ mod tests {
         assert!(cache.forget(7));
         // Now 7 is gone; forgetting again returns false.
         assert!(!cache.forget(7));
+    }
+
+    /// Regression test for #201: a fragment header with count=65535 must be
+    /// rejected at decode time, so the reassembly buffer never allocates
+    /// ~1.5 MB from one malicious fragment.
+    #[test]
+    fn decode_rejects_oversized_fragment_count() {
+        // Build a minimal valid header with count = 65535, index = 0.
+        let mut bytes = vec![0x4Du8, 0x4D, 1, 0];
+        bytes.extend_from_slice(&0xDEAD_BEEFu32.to_be_bytes()); // message_id
+        bytes.extend_from_slice(&0u16.to_be_bytes()); // index
+        bytes.extend_from_slice(&65535u16.to_be_bytes()); // count
+        bytes.extend_from_slice(&0u16.to_be_bytes()); // payload_len
+        match LoRaFragment::decode(&bytes) {
+            Err(TranslateError::FragmentCountTooLarge { count, max }) => {
+                assert_eq!(count, 65535);
+                assert_eq!(max, MAX_REASSEMBLY_FRAGMENTS);
+            }
+            other => panic!("expected FragmentCountTooLarge, got {other:?}"),
+        }
+
+        // The boundary value is still accepted.
+        let mut ok = vec![0x4Du8, 0x4D, 1, 0];
+        ok.extend_from_slice(&1u32.to_be_bytes());
+        ok.extend_from_slice(&0u16.to_be_bytes());
+        ok.extend_from_slice(&MAX_REASSEMBLY_FRAGMENTS.to_be_bytes());
+        ok.extend_from_slice(&0u16.to_be_bytes());
+        let frag = LoRaFragment::decode(&ok).unwrap();
+        assert_eq!(frag.count, MAX_REASSEMBLY_FRAGMENTS);
+
+        // Bounded buffer: worst-case allocation stays far under the 10 MB cap.
+        let buf = ReassemblyBuffer::new(1, MAX_REASSEMBLY_FRAGMENTS);
+        assert_eq!(buf.count, MAX_REASSEMBLY_FRAGMENTS);
+    }
+
+    #[test]
+    #[should_panic(expected = "exceeds MAX_REASSEMBLY_FRAGMENTS")]
+    fn reassembly_buffer_rejects_unbounded_count() {
+        let _ = ReassemblyBuffer::new(1, u16::MAX);
     }
 }
