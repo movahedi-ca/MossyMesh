@@ -134,7 +134,6 @@ struct LwwValue {
 /// stays monotone and keeps advancing, so a crafted op can never freeze it.
 pub const MAX_REMOTE_WALL_SKEW: u64 = 1_000_000;
 
-
 /// Document CRDT: RGA sequence + LWW map, with full op log for deltas.
 #[derive(Clone, Debug, Default)]
 pub struct Doc {
@@ -624,7 +623,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn remote_wall_clock_adoption_is_bounded() {
         // Issue #191: a crafted remote op with wall = u64::MAX must not panic
         // (debug) or brick the replica clock (wrap to 0 in release).
@@ -653,6 +651,7 @@ mod tests {
             _ => panic!("expected MapSet"),
         }
     }
+    #[test]
     fn map_lww_deterministic() {
         let mut a = Doc::new(1);
         let mut b = Doc::new(2);
