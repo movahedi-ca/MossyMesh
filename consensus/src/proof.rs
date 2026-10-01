@@ -194,7 +194,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn relabelled_key_proof_fails() {
         // Issue #190: a valid proof for key K' with the key field rewritten to K
         // must not verify. Without key binding this is a key-substitution attack
@@ -227,10 +226,7 @@ mod tests {
         let root = t.root_hash();
 
         let proof = t.prove(b"a").unwrap();
-        assert!(matches!(
-            proof.terminal,
-            ProofTerminal::BranchValue { .. }
-        ));
+        assert!(matches!(proof.terminal, ProofTerminal::BranchValue { .. }));
         assert!(verify_proof(&proof, &root).unwrap());
 
         let mut forged = proof.clone();
@@ -240,6 +236,7 @@ mod tests {
             "relabelled branch-value proof must not verify"
         );
     }
+    #[test]
     fn single_key_is_leaf_root() {
         let mut t = MerklePatriciaTrie::new();
         t.insert(b"solo", b"x".to_vec()).unwrap();
