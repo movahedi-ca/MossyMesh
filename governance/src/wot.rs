@@ -291,6 +291,8 @@ mod tests {
         let (mut g, sk, root) = vouching_graph();
         let alice = NodeId::from_label("alice");
 
+        // codeql[rust/hard-coded-cryptographic-value]
+        // Test-only deterministic nonce.
         let lock = g.onboard(&consent(&sk, root, alice, 3, 1)).expect("onboard");
         assert_eq!(lock.collateral, quadratic_cost(3));
         assert!(g.is_onboarded(&alice));
@@ -307,6 +309,8 @@ mod tests {
         // codeql[rust/hard-coded-cryptographic-value]
         // Test-only fixed key for forging an invalid voucher signature.
         let attacker_sk = SigningKey::from_bytes(&[9u8; 32]);
+        // codeql[rust/hard-coded-cryptographic-value]
+        // Test-only deterministic nonce.
         let forged = consent(&attacker_sk, root, alice, 3, 2);
         assert_eq!(
             g.onboard(&forged),
@@ -322,6 +326,8 @@ mod tests {
         let bob = NodeId::from_label("bob");
 
         // Signature bit flip.
+        // codeql[rust/hard-coded-cryptographic-value]
+        // Test-only deterministic nonce.
         let mut bad_sig = consent(&sk, root, bob, 4, 3);
         bad_sig.signature[0] ^= 0xff;
         assert_eq!(
@@ -330,6 +336,8 @@ mod tests {
         );
 
         // Power units changed after signing.
+        // codeql[rust/hard-coded-cryptographic-value]
+        // Test-only deterministic nonce.
         let mut bad_power = consent(&sk, root, bob, 4, 4);
         bad_power.power_units = 40;
         assert_eq!(
@@ -343,6 +351,8 @@ mod tests {
     fn consent_cannot_be_replayed() {
         let (mut g, sk, root) = vouching_graph();
         let carol = NodeId::from_label("carol");
+        // codeql[rust/hard-coded-cryptographic-value]
+        // Test-only deterministic nonce.
         let c = consent(&sk, root, carol, 2, 5);
         g.onboard(&c).expect("first onboard");
         assert_eq!(g.onboard(&c), Err(WotError::ConsentReplayed));
@@ -354,6 +364,8 @@ mod tests {
         let stranger = NodeId::from_label("stranger");
         let n = NodeId::from_label("n");
         // Stranger never registered a voucher key and is not onboarded.
+        // codeql[rust/hard-coded-cryptographic-value]
+        // Test-only deterministic nonce.
         let c = consent(&sk, stranger, n, 1, 6);
         assert_eq!(g.onboard(&c), Err(WotError::UnknownVoucher));
         let _ = root;
@@ -363,6 +375,8 @@ mod tests {
     fn slash_voucher_when_invitee_malicious() {
         let (mut g, sk, root) = vouching_graph();
         let bob = NodeId::from_label("bob");
+        // codeql[rust/hard-coded-cryptographic-value]
+        // Test-only deterministic nonce.
         g.onboard(&consent(&sk, root, bob, 4, 7)).unwrap();
 
         let expected = quadratic_cost(4);
@@ -387,6 +401,8 @@ mod tests {
         let (mut g, sk, root) = vouching_graph();
         let bad = NodeId::from_label("bad");
         let victim = NodeId::from_label("victim");
+        // codeql[rust/hard-coded-cryptographic-value]
+        // Test-only deterministic nonce.
         g.onboard(&consent(&sk, root, bad, 2, 8)).unwrap();
         g.mark_malicious_and_slash(bad).unwrap();
 
@@ -397,6 +413,8 @@ mod tests {
         // Test-only fixed key for the malicious-voucher scenario.
         let bad_sk = SigningKey::from_bytes(&[8u8; 32]);
         g.register_voucher_key(bad, bad_sk.verifying_key());
+        // codeql[rust/hard-coded-cryptographic-value]
+        // Test-only deterministic nonce.
         let c = consent(&bad_sk, bad, victim, 1, 9);
         assert_eq!(g.onboard(&c), Err(WotError::MaliciousInvitee));
     }
