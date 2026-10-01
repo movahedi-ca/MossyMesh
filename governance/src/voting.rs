@@ -604,11 +604,11 @@ mod tests {
                 1,
                 &a,
                 BallotChoice::Yes,
-                &test_nonce(31),
+                &test_short_nonce(),
                 &test_nonce(46),
             ),
             proof: BlindingProof::stub(
-                &ZkBlindedVoting::make_commitment(1, &a, BallotChoice::Yes, &test_nonce(31), &test_nonce(46)),
+                &ZkBlindedVoting::make_commitment(1, &a, BallotChoice::Yes, &test_short_nonce(), &test_nonce(46)),
                 &a,
             ),
         };
@@ -617,7 +617,7 @@ mod tests {
         // must still fire once the phase gate passes.
         v.close_proposal(1);
         assert_eq!(
-            v.reveal(a, 1, BallotChoice::Yes, &test_nonce(31), &test_nonce(46)),
+            v.reveal(a, 1, BallotChoice::Yes, &test_short_nonce(), &test_nonce(46)),
             Err(VotingError::WeakSecrets)
         );
     }
