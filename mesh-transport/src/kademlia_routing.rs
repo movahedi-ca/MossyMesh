@@ -711,7 +711,8 @@ mod tests {
     }
 
     #[test]
-    fn full_bucket_probes_are_rate_limited() {        use std::cell::Cell;
+    fn full_bucket_probes_are_rate_limited() {
+        use std::cell::Cell;
 
         struct CountingProbe<'a> {
             calls: &'a Cell<usize>,
