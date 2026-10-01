@@ -206,11 +206,11 @@ impl WotGraph {
         if self.malicious.contains(&voucher) {
             return Err(WotError::MaliciousInvitee);
         }
-        if self.nodes.contains(&invitee) {
-            return Err(WotError::AlreadyOnboarded);
-        }
         if !self.consumed_consents.insert(consent.nonce) {
             return Err(WotError::ConsentReplayed);
+        }
+        if self.nodes.contains(&invitee) {
+            return Err(WotError::AlreadyOnboarded);
         }
 
         let lock = self.staking.lock(voucher, power_units)?;
@@ -281,6 +281,8 @@ mod tests {
         power: u64,
         nonce_byte: u8,
     ) -> VoucherConsent {
+        // lgtm[rust/hard-coded-cryptographic-value]
+        // Test-only deterministic nonce; each test uses a distinct byte value.
         VoucherConsent::issue(sk, voucher, invitee, power, [nonce_byte; 32])
     }
 
@@ -302,6 +304,8 @@ mod tests {
         // consent. A consent signed by anyone other than the voucher fails.
         let (mut g, _sk, root) = vouching_graph();
         let alice = NodeId::from_label("alice");
+        // lgtm[rust/hard-coded-cryptographic-value]
+        // Test-only fixed key for forging an invalid voucher signature.
         let attacker_sk = SigningKey::from_bytes(&[9u8; 32]);
         let forged = consent(&attacker_sk, root, alice, 3, 2);
         assert_eq!(
@@ -389,6 +393,8 @@ mod tests {
         // bad is malicious; even with a root-signed consent naming bad as
         // voucher, onboarding is refused. Register bad's key first so the
         // failure is MaliciousInvitee, not UnknownVoucher.
+        // lgtm[rust/hard-coded-cryptographic-value]
+        // Test-only fixed key for the malicious-voucher scenario.
         let bad_sk = SigningKey::from_bytes(&[8u8; 32]);
         g.register_voucher_key(bad, bad_sk.verifying_key());
         let c = consent(&bad_sk, bad, victim, 1, 9);
