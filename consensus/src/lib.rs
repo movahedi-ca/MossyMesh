@@ -19,20 +19,17 @@
 //! - [`light_client`] — light client: verify state without the full trie
 //! - [`error`] — [`ConsensusError`]
 //! - [`crdt`] — YATA/RGA document merge (peer agent surface; already present)
-//! - [`erasure`] / [`ring_buffer`] — DA helpers (peer agent surface)
 //! - [`snark`] — constant-size public SNARK types (200-byte radio anchors)
 //! - [`folding`] — Nova-style recursive fold of ledger steps (constant proof size)
 //! - [`verifier`] — swappable folding-verifier trait (mock backend today;
 //!   Nova-SNARK path structured but unwired)
 
 pub mod crdt;
-pub mod erasure;
 pub mod error;
 pub mod folding;
 pub mod ipld_codec;
 pub mod light_client;
 pub mod proof;
-pub mod ring_buffer;
 pub mod snark;
 pub mod trie;
 pub mod verifier;
@@ -49,13 +46,17 @@ pub use snark::{
     MAX_VERIFICATION_PAYLOAD_BYTES, MICROSPARTAN_GATE_COUNT, MICROSPARTAN_PREPROCESS_META_BYTES,
 };
 pub use trie::{bytes_to_nibbles, MerklePatriciaTrie, MptNode, StateMerge, TrieNode};
-pub use verifier::{default_verifier, FoldingVerifier, MockFoldingVerifier, NovaSnarkVerifier};
+pub use verifier::{default_verifier, FoldingVerifier, NovaSnarkVerifier};
+#[cfg(test)]
+pub use verifier::MockFoldingVerifier;
 
 /// 32-byte cryptographic digest / content pointer.
 pub type Hash32 = [u8; 32];
 
-/// DOC 35: Strict 10 MB memory limit for the active ledger on edge devices.
-pub const MAX_LEDGER_SIZE: usize = 10_000_000;
+/// DOC 35: Strict 10 MiB memory limit for the active ledger on edge devices.
+/// Canonical value (issue #174): 10 MiB = 10_485_760 bytes, matching
+/// docs/sla-and-dod.md (SLA-RAM) and sandbox MEM_LIMIT.
+pub const MAX_LEDGER_SIZE: usize = 10_485_760;
 
 /// Initialize the consensus subsystem (daemon boot hook).
 pub fn init_consensus() {
@@ -117,11 +118,20 @@ impl SnarkFolder for AccumulatorSnarkFolder {
             self.acc = fold_snarks(&self.acc, proof)?;
             return Ok(());
         }
-        // Accept replacement only from a pure genesis accumulator.
-        if self.acc.fold_count == 0 && proof.fold_count >= 1 {
-            if proof.claimed_state_root == self.acc.claimed_state_root && proof.fold_count == 0 {
+        // Idempotent fast path: re-folding a genesis (fold_count == 0) proof
+        // that claims our current root is a no-op. This used to be nested
+        // inside the `fold_count >= 1` arm below, where the `== 0` check was
+        // unreachable dead code (issue #188).
+        if proof.fold_count == 0 {
+            if proof.claimed_state_root == self.acc.claimed_state_root {
                 return Ok(());
             }
+            return Err(ConsensusError::SnarkError(
+                "fold: genesis proof claims a different root".into(),
+            ));
+        }
+        // Accept replacement only from a pure genesis accumulator.
+        if self.acc.fold_count == 0 && proof.fold_count >= 1 {
             // Require the new proof to claim a chain that started at our genesis.
             let pi = PublicInput {
                 genesis_state_root: self.genesis,
@@ -270,6 +280,24 @@ mod tests {
         assert_eq!(folder.accumulator().public_bytes().len(), ANCHOR_PROOF_SIZE);
         assert!(folder.verify(&[0x22u8; 32]).unwrap());
         assert!(!folder.verify(&[0xFFu8; 32]).unwrap());
+    }
+
+    #[test]
+    fn accumulator_fold_genesis_is_idempotent() {
+        // Issue #188: re-folding a genesis proof for the same root is a no-op.
+        // The intended fast path used to be unreachable dead code.
+        let genesis = [0x44u8; 32];
+        let mut folder = AccumulatorSnarkFolder::new(genesis);
+        let g = SnarkProof::genesis(genesis);
+        folder.fold(&g).unwrap();
+        folder.fold(&g).unwrap();
+        assert_eq!(folder.accumulator().fold_count, 0);
+        assert_eq!(folder.accumulator().claimed_state_root, genesis);
+
+        // A genesis proof for a different root is rejected, not adopted.
+        let other = SnarkProof::genesis([0x55u8; 32]);
+        assert!(folder.fold(&other).is_err());
+        assert_eq!(folder.accumulator().claimed_state_root, genesis);
     }
 
     #[test]
