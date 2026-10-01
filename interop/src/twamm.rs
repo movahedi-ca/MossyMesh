@@ -286,6 +286,12 @@ impl TwammEngine {
             self.orders[idx].remaining_in.saturating_sub(fill.amount_in);
         self.orders[idx].slices_remaining -= 1;
 
+        // Issue #161: prune settled orders so fully-streamed orders cannot
+        // accumulate in the book forever (memory leak).
+        if self.orders[idx].remaining_in == 0 || self.orders[idx].slices_remaining == 0 {
+            self.orders.remove(idx);
+        }
+
         Ok(fill)
     }
 
@@ -499,9 +505,11 @@ mod tests {
         let mut eng = TwammEngine::new();
         let id = eng.submit_order(OrderSide::Buy, 100, 1, 1_000_000).unwrap();
         eng.stream_slice(&id, 1_000_000).unwrap();
+        // Issue #161: the settled order is pruned, so re-streaming finds
+        // nothing rather than an exhausted order.
         assert_eq!(
             eng.stream_slice(&id, 1_000_000),
-            Err(TwammError::OrderExhausted)
+            Err(TwammError::OrderNotFound)
         );
     }
 
@@ -673,9 +681,41 @@ mod tests {
         let mut eng = TwammEngine::new();
         let id = eng.submit_order(OrderSide::Sell, 50, 1, 1_000_000).unwrap();
         eng.stream_slice(&id, 1_000_000).unwrap();
+        // Issue #161: fully-streamed orders are pruned from the book, so a
+        // second stream finds no order at all.
         assert_eq!(
             eng.stream_slice(&id, 1_000_000),
-            Err(TwammError::OrderExhausted)
+            Err(TwammError::OrderNotFound)
         );
+        assert!(eng.get_order(&id).is_none());
+    }
+
+    /// Issue #161: settled orders are pruned, so the book cannot leak memory
+    /// from fully-streamed orders.
+    #[test]
+    fn fully_streamed_orders_are_pruned() {
+        let mut eng = TwammEngine::new();
+        let id = eng
+            .submit_order(OrderSide::Sell, 1_000_000, 4, 1_000_000)
+            .unwrap();
+        assert_eq!(eng.open_order_count(), 1);
+
+        let mut total_in = 0u64;
+        for _ in 0..4 {
+            let fill = eng.stream_slice(&id, 1_000_000).unwrap();
+            total_in += fill.amount_in;
+        }
+        assert_eq!(total_in, 1_000_000);
+        // Nothing left in the book: no leak.
+        assert_eq!(eng.open_order_count(), 0);
+        assert!(eng.get_order(&id).is_none());
+
+        // Partially streamed orders stay until their last slice.
+        let id2 = eng
+            .submit_order(OrderSide::Buy, 600_000, 3, 1_000_000)
+            .unwrap();
+        eng.stream_slice(&id2, 1_000_000).unwrap();
+        assert!(eng.get_order(&id2).is_some());
+        assert_eq!(eng.open_order_count(), 1);
     }
 }

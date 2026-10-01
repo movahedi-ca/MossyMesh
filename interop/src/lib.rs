@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 
 use liquidity::LiquidityMiner;
 use openapi_gateway::OpenApiGateway;
-use twamm::{parse_order_payload, OrderSide, TwammEngine, MAX_SPREAD_BPS};
+use twamm::{parse_order_payload, OrderSide, TwammEngine, TwammError, MAX_SPREAD_BPS};
 
 /// Process-wide gateway (activated on internet reconnect).
 fn gateway() -> &'static Mutex<OpenApiGateway> {
@@ -464,27 +464,50 @@ fn handle_twamm(req: &AsyncApiRequest) -> Result<String, InteropError> {
             })?;
 
         if let Some(exec) = exec_price {
-            match book.stream_slice(&id, exec) {
-                Ok(fill) => {
-                    return Ok(format!(
-                        "{{\"order_id\":\"{}\",\"amount_in\":{},\"amount_out\":{},\"execution_price\":{},\"spread_bps\":{},\"max_spread_bps\":{},\"side\":\"{}\"}}",
-                        fill.order_id,
-                        fill.amount_in,
-                        fill.amount_out,
-                        fill.execution_price,
-                        fill.spread_bps,
-                        MAX_SPREAD_BPS,
-                        match side {
-                            OrderSide::Buy => "buy",
-                            OrderSide::Sell => "sell",
+            // Issue #161: stream every requested slice, not just the first;
+            // previously the remaining slices were stranded in the book with
+            // no REST path to reach them.
+            let mut streamed = 0u32;
+            let mut total_in = 0u64;
+            let mut total_out = 0u64;
+            let mut max_bps = 0u32;
+            let mut partial = false;
+            loop {
+                match book.stream_slice(&id, exec) {
+                    Ok(fill) => {
+                        streamed += 1;
+                        total_in = total_in.saturating_add(fill.amount_in);
+                        total_out = total_out.saturating_add(fill.amount_out);
+                        max_bps = max_bps.max(fill.spread_bps);
+                    }
+                    // A pruned (fully streamed) order reads back as
+                    // OrderNotFound; either way, there is nothing left.
+                    Err(TwammError::OrderExhausted) | Err(TwammError::OrderNotFound) => break,
+                    Err(e) => {
+                        println!("TWAMM stream error: {e}");
+                        if streamed == 0 {
+                            return Err(InteropError::SpreadCapExceeded);
                         }
-                    ));
-                }
-                Err(e) => {
-                    println!("TWAMM stream error: {e}");
-                    return Err(InteropError::SpreadCapExceeded);
+                        // Later slices see a moved mid; report what filled.
+                        partial = true;
+                        break;
+                    }
                 }
             }
+            return Ok(serde_json::json!({
+                "order_id": id,
+                "side": match side {
+                    OrderSide::Buy => "buy",
+                    OrderSide::Sell => "sell",
+                },
+                "slices_streamed": streamed,
+                "amount_in": total_in,
+                "amount_out": total_out,
+                "max_spread_bps_seen": max_bps,
+                "max_spread_bps": MAX_SPREAD_BPS,
+                "partial": partial,
+            })
+            .to_string());
         }
 
         return Ok(format!(
@@ -1304,5 +1327,37 @@ mod tests {
             assert!(limiter.check(busy, now));
         }
         assert!(!limiter.check(busy, now));
+    }
+
+    /// Issue #161: a REST TWAMM submit with slices > 1 streams every slice,
+    /// and the settled order is pruned from the book.
+    #[test]
+    fn twamm_rest_submit_streams_all_slices() {
+        let resp = handle_rest_call(&AsyncApiRequest {
+            endpoint: "/api/v1/twamm".into(),
+            payload: "side=sell,amount=1000000,slices=4,ref_price=1000000,exec_price=1000000"
+                .into(),
+        })
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&resp).unwrap();
+        assert_eq!(v["slices_streamed"], 4, "response: {resp}");
+        assert_eq!(v["amount_in"], 1_000_000);
+        assert_eq!(v["partial"], false);
+        // Order id from the response no longer exists in the book: pruned.
+        let id = v["order_id"].as_str().unwrap();
+        let book = twamm_book().lock().unwrap();
+        assert!(book.get_order(id).is_none(), "order {id} should be pruned");
+    }
+
+    /// Issue #161: spread failure on the first slice still hard-rejects with
+    /// no partial state (existing 2%-cap behavior preserved).
+    #[test]
+    fn twamm_rest_submit_spread_reject_unchanged() {
+        let err = handle_rest_call(&AsyncApiRequest {
+            endpoint: "/api/v1/twamm".into(),
+            payload: "side=sell,amount=1000000,slices=4,ref_price=1000000,exec_price=1030000"
+                .into(),
+        });
+        assert_eq!(err, Err(InteropError::SpreadCapExceeded));
     }
 }
