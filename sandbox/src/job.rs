@@ -6,8 +6,9 @@
 //!
 //! ## Admit gate
 //! Production workers should call [`admit_and_load`] (or [`crate::admit::admit_job`]
-//! then bind the DID) so guest modules only run after a verified VDF / Job DID
-//! receipt. Legacy [`Job::load`] remains for tests and mesh-transport stubs.
+//! followed by the crate-internal DID bind) so guest modules only run after a
+//! verified VDF / Job DID receipt. Legacy [`Job::load`] remains for tests and
+//! mesh-transport stubs.
 
 use crate::admit::{admit_job, AdmitError, JobDid, VdfReceipt, VdfVerifier};
 use crate::host::{HostError, HostRuntime};
@@ -156,7 +157,14 @@ impl Job {
     }
 
     /// Bind an already-verified Job DID (e.g. transport pre-checked MinRoot).
-    pub fn bind_admitted_did(&mut self, did: JobDid) {
+    ///
+    /// Crate-internal only (issue #181): binding a DID asserts the VDF receipt
+    /// was verified elsewhere in this crate, and the public admit gate must not
+    /// be bypassable from outside it. A repo-wide grep confirms no in-crate or
+    /// cross-crate callers need this public. Use [`Job::admit_and_load`] (or
+    /// [`crate::admit::admit_job`]) for the verified path.
+    #[allow(dead_code)] // reserved for future crate-internal admit wiring
+    pub(crate) fn bind_admitted_did(&mut self, did: JobDid) {
         self.admitted_did = Some(did);
     }
 
@@ -192,8 +200,13 @@ impl Job {
     /// Release all guest allocations so the job's runtime can serve the next
     /// unit of work without leaking the fixed pool (issue #37). Call between
     /// sequential jobs on a reused [`Job`].
+    ///
+    /// Also clears the admitted DID (issue #180): a reused Job must pass the
+    /// admit gate again before [`Job::invoke_admitted`] will run. Admission
+    /// never survives a reset.
     pub fn reset(&mut self) {
         self.runtime.reset();
+        self.admitted_did = None;
     }
 
     pub fn used_memory(&self) -> usize {
@@ -289,5 +302,22 @@ mod tests {
             job.reset();
             assert_eq!(job.used_memory(), 0);
         }
+    }
+
+    #[test]
+    fn reset_clears_admitted_did() {
+        // Issue #180: reset() must not keep the previous job's identity.
+        let stub = DomainSeparatedHashVdfStub::new(8);
+        let receipt = stub.issue(11, 16, 1, b"chess-eval");
+        let mut job = Job::admit_and_load(&receipt, &stub, b"\0asm").unwrap();
+        assert!(job.is_admitted());
+        job.reset();
+        assert!(!job.is_admitted());
+        assert_eq!(job.job_did(), None);
+        // invoke_admitted must refuse until the job is re-admitted.
+        assert_eq!(
+            job.invoke_admitted("get_best_move", &[]).unwrap_err(),
+            JobError::NotAdmitted
+        );
     }
 }
