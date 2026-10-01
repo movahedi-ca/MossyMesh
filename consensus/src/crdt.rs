@@ -140,10 +140,18 @@ pub struct Doc {
     applied_inserts: HashSet<ItemId>,
     /// Applied delete op ids (idempotent).
     applied_deletes: HashSet<ItemId>,
+    /// Delete targets seen before their insert (issue #31). A `Delete`
+    /// integrated ahead of its target `Insert` is held here and applied
+    /// when the insert arrives, so replicas converge regardless of op
+    /// arrival order.
+    pending_deletes: HashSet<ItemId>,
     /// Full causal op log for delta export.
     op_log: Vec<CrdtOp>,
     /// Per-agent highest integrated sequence number.
     vector: BTreeMap<AgentId, Seq>,
+    /// Per-agent highest integrated LWW-map op wall time. Kept separate from
+    /// `vector` because wall ticks and seq ids are independent counters.
+    map_vector: BTreeMap<AgentId, u64>,
     /// Local agent identity.
     agent: AgentId,
     /// Next local sequence number.
@@ -198,6 +206,11 @@ impl Doc {
     /// Version vector: highest seq seen per agent.
     pub fn version_vector(&self) -> &BTreeMap<AgentId, Seq> {
         &self.vector
+    }
+
+    /// Map-op version vector: highest map wall time seen per agent.
+    pub fn map_version_vector(&self) -> &BTreeMap<AgentId, u64> {
+        &self.map_vector
     }
 
     pub fn op_log_len(&self) -> usize {
@@ -328,11 +341,15 @@ impl Doc {
                 parent,
                 content,
             } => {
+                // A delete that arrived before its target insert is held in
+                // `pending_deletes`: the item is born deleted so arrival
+                // order cannot fork replicas (issue #31).
+                let deleted = self.pending_deletes.remove(&id);
                 let item = SeqItem {
                     id,
                     parent,
                     content,
-                    deleted: false,
+                    deleted,
                 };
                 self.items.insert(id, item);
                 self.children.entry(parent).or_default().push(id);
@@ -342,6 +359,10 @@ impl Doc {
             CrdtOp::Delete { target, op_id } => {
                 if let Some(item) = self.items.get_mut(&target) {
                     item.deleted = true;
+                } else {
+                    // Target not inserted yet: hold the delete so a
+                    // later-arriving insert is born deleted (issue #31).
+                    self.pending_deletes.insert(target);
                 }
                 self.applied_deletes.insert(op_id);
                 self.note_vector(op_id);
@@ -357,6 +378,7 @@ impl Doc {
                 if time.wall >= self.next_wall {
                     self.next_wall = time.wall + 1;
                 }
+                self.note_map_time(time);
             }
             CrdtOp::MapDelete { key, time } => {
                 self.map.insert(
@@ -369,10 +391,19 @@ impl Doc {
                 if time.wall >= self.next_wall {
                     self.next_wall = time.wall + 1;
                 }
+                self.note_map_time(time);
             }
         }
 
         self.op_log.push(op);
+    }
+
+    /// Record a map op's wall time in the map version vector.
+    fn note_map_time(&mut self, time: LogicalTime) {
+        let entry = self.map_vector.entry(time.agent).or_insert(0);
+        if time.wall > *entry {
+            *entry = time.wall;
+        }
     }
 
     fn note_vector(&mut self, id: ItemId) {
@@ -393,8 +424,14 @@ impl Doc {
         }
     }
 
-    /// Export ops that the remote has not yet seen (based on version vector).
-    pub fn delta_since(&self, remote_vv: &BTreeMap<AgentId, Seq>) -> Delta {
+    /// Export ops that the remote has not yet seen (based on version vectors).
+    /// Map ops are filtered against the remote's map version vector, so
+    /// already-synced map history is not resent on every sync.
+    pub fn delta_since(
+        &self,
+        remote_vv: &BTreeMap<AgentId, Seq>,
+        remote_map_vv: &BTreeMap<AgentId, u64>,
+    ) -> Delta {
         let mut ops = Vec::new();
         for op in &self.op_log {
             match op {
@@ -410,8 +447,11 @@ impl Doc {
                         ops.push(op.clone());
                     }
                 }
-                CrdtOp::MapSet { .. } | CrdtOp::MapDelete { .. } => {
-                    ops.push(op.clone());
+                CrdtOp::MapSet { time, .. } | CrdtOp::MapDelete { time, .. } => {
+                    let seen = remote_map_vv.get(&time.agent).copied().unwrap_or(0);
+                    if time.wall > seen {
+                        ops.push(op.clone());
+                    }
                 }
             }
         }
@@ -470,6 +510,33 @@ fn map_op_time(op: &CrdtOp) -> LogicalTime {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn delete_before_insert_converges() {
+        // Issue #31: a delete integrated before its target insert must
+        // still take effect. Replicas must agree no matter which op
+        // arrives first.
+        let mut a = Doc::new(1);
+        let ins = a.insert_char(0, 'x');
+        let del = a.delete_char(0).unwrap();
+        assert_eq!(a.text(), "");
+
+        // Causal order: insert then delete.
+        let mut causal = Doc::new(2);
+        causal.integrate(ins.clone());
+        causal.integrate(del.clone());
+
+        // Reversed arrival: delete lands before its target insert.
+        let mut reversed = Doc::new(3);
+        reversed.integrate(del.clone());
+        reversed.integrate(ins.clone());
+
+        assert_eq!(causal.text(), "");
+        assert_eq!(reversed.text(), "");
+        assert_eq!(causal.text(), reversed.text());
+        // The pending tombstone is consumed once the insert arrives.
+        assert!(reversed.pending_deletes.is_empty());
+    }
 
     #[test]
     fn concurrent_divergent_edits_converge() {
@@ -592,5 +659,29 @@ mod tests {
         assert_eq!(d.text(), "Mossy!");
         d.delete_char(5);
         assert_eq!(d.text(), "Mossy");
+    }
+
+    #[test]
+    fn map_ops_not_resent_after_sync() {
+        let mut a = Doc::new(1);
+        a.map_set("k1", b"v1".to_vec());
+        a.map_set("k2", b"v2".to_vec());
+
+        // Fresh remote sees both map ops in the delta.
+        let d1 = a.delta_since(&BTreeMap::new(), &BTreeMap::new());
+        assert_eq!(d1.ops.len(), 2);
+
+        let mut b = Doc::new(2);
+        b.apply_delta(&d1);
+        assert_eq!(b.map_get("k1"), Some(b"v1".as_ref()));
+
+        // After sync, the same delta query is empty: map ops entered the vector.
+        let d2 = a.delta_since(b.version_vector(), b.map_version_vector());
+        assert!(d2.is_empty());
+
+        // A later map op is still exported.
+        a.map_set("k3", b"v3".to_vec());
+        let d3 = a.delta_since(b.version_vector(), b.map_version_vector());
+        assert_eq!(d3.ops.len(), 1);
     }
 }

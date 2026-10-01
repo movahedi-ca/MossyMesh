@@ -346,6 +346,113 @@ pub fn init_ble_mesh() {
     beacon.broadcast_loop();
 }
 
+/// Legacy BLE ATT payload ceiling: some Android devices drop anything larger
+/// than 20 bytes when acting as relays. Fixes #25.
+pub const BLE_LEGACY_MTU: usize = 20;
+
+/// Relay fragment header: message_id (u16 BE) || index (u8) || count (u8).
+pub const BLE_RELAY_HEADER_LEN: usize = 4;
+
+/// Payload bytes per relay fragment, so total on-air size stays within 20 B.
+pub const BLE_RELAY_PAYLOAD_LEN: usize = BLE_LEGACY_MTU - BLE_RELAY_HEADER_LEN;
+
+/// One BLE relay fragment small enough for legacy 20-byte relays.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BleRelayFragment {
+    pub message_id: u16,
+    pub index: u8,
+    pub count: u8,
+    pub payload: Vec<u8>,
+}
+
+impl BleRelayFragment {
+    /// Encode to the exact on-air bytes (always <= 20).
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(BLE_RELAY_HEADER_LEN + self.payload.len());
+        out.extend_from_slice(&self.message_id.to_be_bytes());
+        out.push(self.index);
+        out.push(self.count);
+        out.extend_from_slice(&self.payload);
+        out
+    }
+
+    pub fn decode(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() < BLE_RELAY_HEADER_LEN || bytes.len() > BLE_LEGACY_MTU {
+            return None;
+        }
+        let mut id = [0u8; 2];
+        id.copy_from_slice(&bytes[..2]);
+        Some(Self {
+            message_id: u16::from_be_bytes(id),
+            index: bytes[2],
+            count: bytes[3],
+            payload: bytes[BLE_RELAY_HEADER_LEN..].to_vec(),
+        })
+    }
+}
+
+/// Split a payload into relay fragments, each fitting in 20 bytes on air.
+pub fn fragment_ble_payload(message_id: u16, payload: &[u8]) -> Vec<BleRelayFragment> {
+    if payload.is_empty() {
+        return Vec::new();
+    }
+    let mtu = BLE_RELAY_PAYLOAD_LEN;
+    let count = payload.len().div_ceil(mtu).min(u8::MAX as usize) as u8;
+    (0..count)
+        .map(|index| {
+            let start = (index as usize) * mtu;
+            let end = start.saturating_add(mtu).min(payload.len());
+            BleRelayFragment {
+                message_id,
+                index,
+                count,
+                payload: payload[start..end].to_vec(),
+            }
+        })
+        .collect()
+}
+
+/// Reassembles one BLE relay message from its fragments (any arrival order).
+#[derive(Debug, Default)]
+pub struct BleRelayReassembler {
+    message_id: Option<u16>,
+    count: u8,
+    parts: Vec<Option<Vec<u8>>>,
+}
+
+impl BleRelayReassembler {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Feed one fragment. Returns the full payload once every part arrived.
+    pub fn accept(&mut self, frag: &BleRelayFragment) -> Option<Vec<u8>> {
+        if self.message_id.is_none() {
+            self.message_id = Some(frag.message_id);
+            self.count = frag.count;
+            self.parts = vec![None; frag.count as usize];
+        }
+        if self.message_id != Some(frag.message_id) || frag.count != self.count {
+            return None;
+        }
+        let idx = frag.index as usize;
+        if idx >= self.parts.len() {
+            return None;
+        }
+        self.parts[idx] = Some(frag.payload.clone());
+        if self.parts.iter().all(|p| p.is_some()) {
+            let mut out = Vec::new();
+            for part in self.parts.drain(..).flatten() {
+                out.extend_from_slice(&part);
+            }
+            self.message_id = None;
+            Some(out)
+        } else {
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -422,5 +529,42 @@ mod tests {
         node.hear_peer("strong", 100, -40);
         assert_eq!(node.neighbor_count(), MAX_NEIGHBORS);
         assert!(node.get_neighbor("strong").is_some());
+    }
+
+    #[test]
+    fn relay_fragments_fit_legacy_mtu() {
+        let payload: Vec<u8> = (0..100).map(|i| i as u8).collect();
+        let frags = fragment_ble_payload(0x1234, &payload);
+        assert!(frags.len() > 1);
+        for f in &frags {
+            let wire = f.encode();
+            assert!(
+                wire.len() <= BLE_LEGACY_MTU,
+                "fragment must fit 20-byte relay MTU, got {}",
+                wire.len()
+            );
+            let dec = BleRelayFragment::decode(&wire).unwrap();
+            assert_eq!(dec, *f);
+        }
+    }
+
+    #[test]
+    fn relay_reassembler_accepts_any_order() {
+        let payload: Vec<u8> = (0..64).map(|i| (i * 3) as u8).collect();
+        let mut frags = fragment_ble_payload(0xBEEF, &payload);
+        frags.reverse();
+        let mut reasm = BleRelayReassembler::new();
+        let mut done = None;
+        for f in &frags {
+            if let Some(out) = reasm.accept(f) {
+                done = Some(out);
+            }
+        }
+        assert_eq!(done, Some(payload));
+    }
+
+    #[test]
+    fn empty_payload_produces_no_fragments() {
+        assert!(fragment_ble_payload(1, &[]).is_empty());
     }
 }

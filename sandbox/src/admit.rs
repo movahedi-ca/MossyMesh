@@ -29,6 +29,22 @@ use sha2::{Digest, Sha256};
 /// Production iteration target (≈10 min). **Not** used by unit tests.
 pub const PRODUCTION_ITERATIONS: u64 = 50_000_000;
 
+/// Mobile iteration floor for old / low-end Android devices (issue #39).
+///
+/// Rationale: 50M steps take ≈10 min on reference hardware (≈83k MinRoot
+/// steps/s for this u64 implementation) but >20 min on old phones (<42k
+/// steps/s), which prices honest mobile users out of the admit gate.
+/// 12.5M steps take ≈2.5 min at the reference rate and ≈5 min on the slowest
+/// supported devices, restoring usability.
+///
+/// Anti-Sybil honesty: MinRoot is strictly sequential, so no amount of
+/// parallelism shortens one evaluation; lowering the floor scales the
+/// per-identity cost down linearly (4x) but keeps it sequential. For
+/// high-value gates, pair this policy with stake/collateral requirements
+/// rather than relying on delay alone. Same production modulus as the
+/// reference policy: the field is never weakened.
+pub const MOBILE_ITERATIONS: u64 = 12_500_000;
+
 /// Production MinRoot modulus (prime, ≡ 3 mod 5). Mirror of transport.
 pub const PRODUCTION_MODULUS: u64 = 1_000_000_033;
 
@@ -259,11 +275,12 @@ pub struct MinRootVdfVerifier {
 
 impl Default for MinRootVdfVerifier {
     fn default() -> Self {
-        Self {
-            // Test-safe default: never gate unit tests on PRODUCTION_ITERATIONS.
-            min_steps: DEFAULT_TEST_ITERATIONS,
-            required_modulus: None,
-        }
+        // Secure default: production policy. The old test-grade default
+        // (16 steps, any modulus) silently admitted toy receipts whenever a
+        // daemon was built with `Default::default()`, downgrading the
+        // anti-Sybil gate to a suggestion. Tests must opt in explicitly
+        // via `for_tests`.
+        Self::production()
     }
 }
 
@@ -283,6 +300,16 @@ impl MinRootVdfVerifier {
         }
     }
 
+    /// Mobile policy (issue #39): production modulus with the recalibrated
+    /// [`MOBILE_ITERATIONS`] floor for old Android devices. See the constant
+    /// docs for the calibration rationale and Sybil-cost discussion.
+    pub fn mobile() -> Self {
+        Self {
+            min_steps: MOBILE_ITERATIONS,
+            required_modulus: Some(PRODUCTION_MODULUS),
+        }
+    }
+
     /// Test policy: small iteration floor + test modulus.
     pub fn for_tests(min_steps: u64) -> Self {
         let min_steps = min_steps.clamp(1, MAX_TEST_ITERATIONS);
@@ -293,19 +320,14 @@ impl MinRootVdfVerifier {
     }
 
     /// Resolve receipt `modulus_id` to a concrete field modulus.
+    ///
+    /// Only the two registered moduli are accepted. There is no escape
+    /// hatch for embedding arbitrary small primes: an attacker-controlled
+    /// `modulus_id` must never select a weak field.
     pub fn resolve_modulus(modulus_id: u32) -> Option<u64> {
         match modulus_id {
             MODULUS_ID_TEST_MINROOT => Some(DEFAULT_TEST_MODULUS),
             MODULUS_ID_PRODUCTION_MINROOT => Some(PRODUCTION_MODULUS),
-            // Allow embedding small primes directly when id >= 5 and valid.
-            id if id >= 5 => {
-                let p = u64::from(id);
-                if validate_minroot_modulus(p) {
-                    Some(p)
-                } else {
-                    None
-                }
-            }
             _ => None,
         }
     }
@@ -674,11 +696,45 @@ mod tests {
     }
 
     #[test]
+    fn default_is_production_grade() {
+        // Issue #68: Default must not admit test-grade receipts.
+        let v = MinRootVdfVerifier::default();
+        assert_eq!(v.min_steps, PRODUCTION_ITERATIONS);
+        assert_eq!(v.required_modulus, Some(PRODUCTION_MODULUS));
+        // Unregistered modulus ids are rejected, no small-prime escape hatch.
+        assert_eq!(MinRootVdfVerifier::resolve_modulus(23), None);
+        assert_eq!(MinRootVdfVerifier::resolve_modulus(5), None);
+        assert_eq!(MinRootVdfVerifier::resolve_modulus(u32::MAX), None);
+    }
+
+    #[test]
     fn validate_minroot_modulus_surface() {
         assert!(validate_minroot_modulus(DEFAULT_TEST_MODULUS));
         assert!(validate_minroot_modulus(PRODUCTION_MODULUS));
         assert!(!validate_minroot_modulus(11));
         assert!(!validate_minroot_modulus(9));
+    }
+
+    #[test]
+    fn mobile_policy_is_calibrated_not_weakened() {
+        // Issue #39: the mobile floor sits below production (usable on old
+        // phones) while keeping the production modulus and a sequential
+        // delay. A genuine 12.5M-step receipt is too slow for a unit test,
+        // so this pins the policy shape; below-floor rejection is covered
+        // by minroot_insufficient_steps_uses_test_floor_not_production.
+        let m = MinRootVdfVerifier::mobile();
+        assert_eq!(m.min_steps, MOBILE_ITERATIONS);
+        assert!(MOBILE_ITERATIONS < PRODUCTION_ITERATIONS);
+        assert!(MOBILE_ITERATIONS > MAX_TEST_ITERATIONS);
+        assert_eq!(m.required_modulus, Some(PRODUCTION_MODULUS));
+        // Below-floor receipts are rejected under the mobile policy
+        // (16 steps < 12.5M floor), before any modulus check runs.
+        let t = MinRootVdfVerifier::for_tests(8);
+        let receipt = t.issue_test(5, 16, b"m").unwrap();
+        assert_eq!(
+            admit_job(&receipt, &m).unwrap_err(),
+            AdmitError::InsufficientSteps
+        );
     }
 
     #[test]
