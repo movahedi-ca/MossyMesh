@@ -242,7 +242,10 @@ impl WotGraph {
             return Err(WotError::UnknownInvitee);
         }
 
-        let edge = self.by_invitee.get(&invitee).ok_or(WotError::EdgeNotFound)?;
+        let edge = self
+            .by_invitee
+            .get(&invitee)
+            .ok_or(WotError::EdgeNotFound)?;
         if edge.slashed {
             return Err(WotError::AlreadySlashed);
         }
@@ -468,7 +471,8 @@ mod tests {
         // for a different invitee.
         // Test-only deterministic nonce.
         let reuse = consent(&sk, root, carol, 2, 11);
-        g.onboard(&reuse).expect("nonce from failed onboard must be reusable");
+        g.onboard(&reuse)
+            .expect("nonce from failed onboard must be reusable");
         assert!(g.is_onboarded(&carol));
     }
 
@@ -484,17 +488,13 @@ mod tests {
         let bad_terms = consent(&sk, root, dave, 0, 12);
         assert_eq!(
             g.onboard(&bad_terms),
-            Err(WotError::Staking(
-                crate::staking::StakingError::ZeroPower
-            ))
+            Err(WotError::Staking(crate::staking::StakingError::ZeroPower))
         );
 
         // Same consent again: still the staking error, not ConsentReplayed.
         assert_eq!(
             g.onboard(&bad_terms),
-            Err(WotError::Staking(
-                crate::staking::StakingError::ZeroPower
-            ))
+            Err(WotError::Staking(crate::staking::StakingError::ZeroPower))
         );
         assert!(!g.is_onboarded(&dave));
     }
