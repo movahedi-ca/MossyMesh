@@ -22,6 +22,9 @@ pub enum CreditError {
     UnknownEscrow([u8; 32]),
     /// Wrapped HTLC state-machine error.
     Htlc(HtlcError),
+    /// Balance addition would overflow u64. Fails instead of silently clamping,
+    /// so the conserved-supply accounting invariant stays exact.
+    Overflow,
 }
 
 impl std::fmt::Display for CreditError {
@@ -39,6 +42,7 @@ impl std::fmt::Display for CreditError {
                 write!(f, "unknown escrow id: {}", hex::encode(id))
             }
             CreditError::Htlc(e) => write!(f, "htlc error: {e}"),
+            CreditError::Overflow => write!(f, "credit balance overflow"),
         }
     }
 }
@@ -77,9 +81,11 @@ impl CreditLedger {
     }
 
     /// Credit free balance (e.g. job payout or genesis mint). Creates account if needed.
-    pub fn mint(&mut self, account: impl Into<String>, amount: u64) {
+    /// Returns [`CreditError::Overflow`] instead of silently clamping at u64::MAX.
+    pub fn mint(&mut self, account: impl Into<String>, amount: u64) -> Result<(), CreditError> {
         let acct = self.accounts.entry(account.into()).or_default();
-        acct.free = acct.free.saturating_add(amount);
+        acct.free = acct.free.checked_add(amount).ok_or(CreditError::Overflow)?;
+        Ok(())
     }
 
     /// Free (non-escrowed) balance for an account, or 0 if unknown.
@@ -131,7 +137,7 @@ impl CreditLedger {
         htlc.claim(preimage)?;
         let amount = htlc.amount;
         let receiver = htlc.receiver.clone();
-        self.credit_free(&receiver, amount);
+        self.credit_free(&receiver, amount)?;
         Ok(amount)
     }
 
@@ -148,7 +154,7 @@ impl CreditLedger {
         htlc.refund(current_height)?;
         let amount = htlc.amount;
         let sender = htlc.sender.clone();
-        self.credit_free(&sender, amount);
+        self.credit_free(&sender, amount)?;
         Ok(amount)
     }
 
@@ -171,13 +177,14 @@ impl CreditLedger {
         htlc.vdf_cancel()?;
         let amount = htlc.amount;
         let sender = htlc.sender.clone();
-        self.credit_free(&sender, amount);
+        self.credit_free(&sender, amount)?;
         Ok(amount)
     }
 
-    fn credit_free(&mut self, account: &str, amount: u64) {
+    fn credit_free(&mut self, account: &str, amount: u64) -> Result<(), CreditError> {
         let acct = self.accounts.entry(account.to_string()).or_default();
-        acct.free = acct.free.saturating_add(amount);
+        acct.free = acct.free.checked_add(amount).ok_or(CreditError::Overflow)?;
+        Ok(())
     }
 
     /// Snapshot of escrow state for an id.
@@ -235,8 +242,8 @@ mod tests {
     #[test]
     fn escrow_claim_moves_credits_to_receiver() {
         let mut ledger = CreditLedger::new();
-        ledger.mint("alice", 5_000);
-        ledger.mint("bob", 0);
+        ledger.mint("alice", 5_000).unwrap();
+        ledger.mint("bob", 0).unwrap();
 
         let preimage = b"job-result-proof";
         let params = escrow_params(1, "alice", "bob", 1_200, preimage);
@@ -256,7 +263,7 @@ mod tests {
     #[test]
     fn timeout_refund_returns_credits_to_sender() {
         let mut ledger = CreditLedger::new();
-        ledger.mint("alice", 2_000);
+        ledger.mint("alice", 2_000).unwrap();
         let preimage = b"secret";
         let id = ledger
             .open_escrow(escrow_params(2, "alice", "bob", 500, preimage))
@@ -276,7 +283,7 @@ mod tests {
     #[test]
     fn invalid_preimage_leaves_escrow_funded() {
         let mut ledger = CreditLedger::new();
-        ledger.mint("alice", 1_000);
+        ledger.mint("alice", 1_000).unwrap();
         let preimage = b"correct";
         let id = ledger
             .open_escrow(escrow_params(3, "alice", "bob", 100, preimage))
@@ -294,7 +301,7 @@ mod tests {
     #[test]
     fn vdf_cancel_returns_credits_after_delay() {
         let mut ledger = CreditLedger::new();
-        ledger.mint("alice", 800);
+        ledger.mint("alice", 800).unwrap();
         let preimage = b"vdf-secret";
         let id = ledger
             .open_escrow(escrow_params(4, "alice", "bob", 300, preimage))
@@ -315,7 +322,7 @@ mod tests {
     #[test]
     fn insufficient_balance_rejects_open() {
         let mut ledger = CreditLedger::new();
-        ledger.mint("alice", 50);
+        ledger.mint("alice", 50).unwrap();
         let err = ledger
             .open_escrow(escrow_params(5, "alice", "bob", 100, b"x"))
             .unwrap_err();
@@ -333,8 +340,8 @@ mod tests {
     #[test]
     fn no_double_claim_on_escrow() {
         let mut ledger = CreditLedger::new();
-        ledger.mint("alice", 1_000);
-        ledger.mint("bob", 0);
+        ledger.mint("alice", 1_000).unwrap();
+        ledger.mint("bob", 0).unwrap();
         let preimage = b"unique-job-proof";
         let id = ledger
             .open_escrow(escrow_params(6, "alice", "bob", 400, preimage))
@@ -356,7 +363,7 @@ mod tests {
     #[test]
     fn vdf_cancel_before_delay_rejected() {
         let mut ledger = CreditLedger::new();
-        ledger.mint("alice", 500);
+        ledger.mint("alice", 500).unwrap();
         let id = ledger
             .open_escrow(escrow_params(7, "alice", "bob", 200, b"d"))
             .unwrap();
@@ -385,8 +392,8 @@ mod tests {
     #[test]
     fn invariant_h6_supply_conserved_on_claim() {
         let mut ledger = CreditLedger::new();
-        ledger.mint("alice", 10_000);
-        ledger.mint("bob", 100);
+        ledger.mint("alice", 10_000).unwrap();
+        ledger.mint("bob", 100).unwrap();
         let supply0 = ledger.conserved_supply();
         assert_eq!(supply0, 10_100);
 
@@ -408,7 +415,7 @@ mod tests {
     #[test]
     fn invariant_h6_no_double_spend_after_claim() {
         let mut ledger = CreditLedger::new();
-        ledger.mint("alice", 1_000);
+        ledger.mint("alice", 1_000).unwrap();
         let preimage = b"once-only";
         let id = ledger
             .open_escrow(escrow_params(11, "alice", "bob", 400, preimage))
@@ -426,7 +433,7 @@ mod tests {
     #[test]
     fn invariant_h6_refund_and_vdf_cancel_conserve() {
         let mut ledger = CreditLedger::new();
-        ledger.mint("alice", 5_000);
+        ledger.mint("alice", 5_000).unwrap();
         let supply0 = ledger.conserved_supply();
 
         let id_r = ledger
@@ -456,12 +463,22 @@ mod tests {
     #[test]
     fn invariant_h7_unique_escrow_id() {
         let mut ledger = CreditLedger::new();
-        ledger.mint("alice", 1_000);
+        ledger.mint("alice", 1_000).unwrap();
         let p = escrow_params(14, "alice", "bob", 100, b"dup");
         ledger.open_escrow(p.clone()).unwrap();
         let err = ledger.open_escrow(p).unwrap_err();
         assert!(matches!(err, CreditError::DuplicateEscrow(_)));
         assert_eq!(ledger.free_balance("alice"), 900);
         assert_eq!(ledger.total_escrowed(), 100);
+    }
+
+    /// Overflow fails loudly instead of silently clamping at u64::MAX.
+    #[test]
+    fn mint_overflow_returns_error_not_clamp() {
+        let mut ledger = CreditLedger::new();
+        ledger.mint("alice", u64::MAX).unwrap();
+        assert_eq!(ledger.mint("alice", 1).unwrap_err(), CreditError::Overflow);
+        // Balance unchanged after the failed mint.
+        assert_eq!(ledger.free_balance("alice"), u64::MAX);
     }
 }

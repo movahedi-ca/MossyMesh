@@ -1,4 +1,5 @@
 import { useMeshNetwork, type MeshLinkMode } from "../hooks/useMeshNetwork";
+import { BleRelayToggle } from "./BleRelay";
 
 function labelFor(mode: MeshLinkMode, islandName: string): { text: string; tone: "online" | "island" | "local" } {
   switch (mode) {
@@ -26,6 +27,7 @@ export const NetworkStatus = () => {
           {mesh.dhtReady ? "DHT ready" : "DHT…"}
         </span>
       </div>
+      <BleRelayToggle />
     </div>
   );
 };

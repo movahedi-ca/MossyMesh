@@ -27,6 +27,7 @@
 #![deny(unsafe_code)]
 
 pub mod admit;
+pub mod engine_bundle;
 pub mod host;
 pub mod job;
 pub mod pool;
@@ -43,6 +44,10 @@ pub use admit::{
     HASH_VDF_STUB_DOMAIN, MAX_TEST_ITERATIONS, MODULUS_ID_HASH_STUB, MODULUS_ID_PRODUCTION_MINROOT,
     MODULUS_ID_TEST_MINROOT, PRODUCTION_ITERATIONS, PRODUCTION_MODULUS,
 };
+/// Embedded engine.wasm loader (issue #38); `None` without `bundled-engine`.
+pub use engine_bundle::engine_wasm_bytes;
+#[cfg(feature = "bundled-engine")]
+pub use engine_bundle::ENGINE_WASM_BYTES;
 pub use host::{HostError, HostRuntime, AUX_STACK_SIZE};
 pub use job::{Job, JobError};
 pub use pool::{BlockHandle, FixedBlockPool, PoolError};

@@ -3,16 +3,23 @@
 //! Phase 5: AsyncAPI / OpenAPI gateway, TWAMM orchestration (2% max-spread),
 //! and retroactive AMM liquidity mining for genesis offline nodes.
 
+pub mod api_docs;
 pub mod liquidity;
 pub mod openapi_gateway;
 pub mod twamm;
 
 use axum::{
+    extract::ConnectInfo,
+    http::{header, HeaderMap, StatusCode},
     routing::{get, post},
     Router,
 };
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
+use std::collections::HashMap;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use liquidity::LiquidityMiner;
 use openapi_gateway::OpenApiGateway;
@@ -77,7 +84,6 @@ pub struct AsyncApiRequest {
 }
 
 #[derive(Deserialize)]
-#[allow(dead_code)] // DTO: fields are populated by serde from external JSON; never read in Rust code.
 pub struct GenericPayload {
     #[serde(default)]
     action: String,
@@ -89,27 +95,205 @@ pub struct GenericPayload {
     fen: String,
 }
 
-/// Starts an Axum HTTP server on port 8080 for the frontend.
+/// Starts an Axum HTTP server for the frontend.
+///
+/// Binds loopback by default (override with `MESH_GATEWAY_BIND`); the old
+/// 0.0.0.0 bind exposed an unauthenticated remote surface on shared LANs.
 pub async fn run_http_server() {
     let app = Router::new()
         .route("/api/v1/health", get(health_handler).post(health_handler))
-        .route("/api/v1/submit_job", post(submit_job_handler));
+        .route("/api/v1/submit_job", post(submit_job_handler))
+        .route("/api-docs/openapi.json", get(api_docs::serve_openapi_json))
+        .merge(api_docs::swagger_ui());
 
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await.unwrap();
-    println!("Interop: HTTP Server listening on 0.0.0.0:8080");
-    axum::serve(listener, app).await.unwrap();
+    let bind = std::env::var("MESH_GATEWAY_BIND").unwrap_or_else(|_| "127.0.0.1:8080".into());
+    let listener = tokio::net::TcpListener::bind(&bind).await.unwrap();
+    println!("Interop: HTTP Server listening on {}", bind);
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await
+    .unwrap();
 }
 
 async fn health_handler() -> &'static str {
     "Mesh Island Active"
 }
 
-async fn submit_job_handler(body: String) -> &'static str {
-    println!(
-        "Routing job payload [{}] into Kademlia DHT/Sandbox...",
-        body
-    );
-    "Job Accepted"
+/// Bearer <redacted> for the job API. Read from `MESH_GATEWAY_TOKEN`; when unset,
+/// the loopback-only bind is the access control (local daemon and UI only).
+fn gateway_token() -> Option<String> {
+    std::env::var("MESH_GATEWAY_TOKEN")
+        .ok()
+        .filter(|t| !t.is_empty())
+}
+
+fn check_auth(headers: &HeaderMap) -> bool {
+    let Some(expected) = gateway_token() else {
+        return true;
+    };
+    let Some(value) = headers.get(header::AUTHORIZATION) else {
+        return false;
+    };
+    let Ok(value) = value.to_str() else {
+        return false;
+    };
+    let Some(presented) = value.strip_prefix("Bearer ") else {
+        return false;
+    };
+    presented.len() == expected.len()
+        && presented.bytes().zip(expected.bytes()).all(|(a, b)| a == b)
+}
+
+/// Bounded per-peer rate limiter: 60 requests per 60 seconds per IP.
+/// The table is capped at 1024 peers so a LAN-wide scan cannot grow it
+/// without bound.
+fn rate_limited_peers() -> &'static Mutex<HashMap<IpAddr, Vec<Instant>>> {
+    static RL: OnceLock<Mutex<HashMap<IpAddr, Vec<Instant>>>> = OnceLock::new();
+    RL.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+const RATE_LIMIT: usize = 60;
+const RATE_WINDOW: Duration = Duration::from_secs(60);
+
+fn check_rate_limit(ip: IpAddr) -> bool {
+    let now = Instant::now();
+    let mut table = match rate_limited_peers().lock() {
+        Ok(t) => t,
+        Err(_) => return false,
+    };
+    if table.len() > 1024 && !table.contains_key(&ip) {
+        return false;
+    }
+    let entry = table.entry(ip).or_default();
+    entry.retain(|t| now.duration_since(*t) < RATE_WINDOW);
+    if entry.len() >= RATE_LIMIT {
+        return false;
+    }
+    entry.push(now);
+    true
+}
+
+/// Payload digest for logs: never print raw request bodies (log injection
+/// on a shared LAN, and bodies may carry private job data).
+fn payload_digest(body: &str) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    body.hash(&mut h);
+    h.finish()
+}
+
+async fn submit_job_handler(
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    body: String,
+) -> Result<&'static str, StatusCode> {
+    if !check_auth(&headers) {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    if !check_rate_limit(addr.ip()) {
+        return Err(StatusCode::TOO_MANY_REQUESTS);
+    }
+    match dispatch_job(&body) {
+        Ok(job) => {
+            println!(
+                "Dispatched '{}' job to DHT outbox (route key {:02x}, payload digest {:016x}).",
+                job.action,
+                job.route_key[0],
+                payload_digest(&body)
+            );
+            Ok("Job Accepted")
+        }
+        Err(e) => {
+            println!("Job rejected: {e:?}");
+            Err(StatusCode::BAD_REQUEST)
+        }
+    }
+}
+
+/// A validated job accepted by the gateway, ready for DHT dispatch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MeshJob {
+    pub action: String,
+    pub from: String,
+    pub to: String,
+    pub fen: String,
+    /// Kademlia routing key: sha256(action || 0x00 || from || 0x00 || to || 0x00 || fen).
+    /// The mesh-transport DHT publisher routes the job to the island nodes
+    /// responsible for this key.
+    pub route_key: [u8; 32],
+}
+
+/// Errors when turning an HTTP payload into a dispatchable [`MeshJob`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JobDispatchError {
+    /// Body is not valid JSON for the job schema.
+    InvalidPayload,
+    /// `action` is missing or empty; the router cannot classify the job.
+    MissingAction,
+    /// `move` jobs require a `fen` position.
+    MissingFen,
+}
+
+/// Bounded outbox between the HTTP gateway and the mesh-transport DHT
+/// publisher. The publisher drains it (see [`drain_job_outbox`]) and routes
+/// each job under its `route_key`. Bounded so a flood of HTTP submissions
+/// cannot grow memory without limit on edge nodes.
+fn job_outbox() -> &'static Mutex<std::collections::VecDeque<MeshJob>> {
+    static OUTBOX: OnceLock<Mutex<std::collections::VecDeque<MeshJob>>> = OnceLock::new();
+    OUTBOX.get_or_init(|| Mutex::new(std::collections::VecDeque::new()))
+}
+
+/// Maximum jobs buffered for the DHT publisher.
+pub const JOB_OUTBOX_CAP: usize = 1024;
+
+/// Parse, validate, and route a `/api/v1/submit_job` body (issue #14).
+///
+/// The payload is decoded into the [`GenericPayload`] job struct, validated,
+/// hashed to a Kademlia route key, and queued for the mesh-transport DHT
+/// publisher instead of being printed to the console.
+pub fn dispatch_job(body: &str) -> Result<MeshJob, JobDispatchError> {
+    let payload: GenericPayload =
+        serde_json::from_str(body).map_err(|_| JobDispatchError::InvalidPayload)?;
+    if payload.action.trim().is_empty() {
+        return Err(JobDispatchError::MissingAction);
+    }
+    if payload.action == "move" && payload.fen.trim().is_empty() {
+        return Err(JobDispatchError::MissingFen);
+    }
+
+    let mut key_input = Vec::with_capacity(128);
+    for part in [&payload.action, &payload.from, &payload.to, &payload.fen] {
+        key_input.extend_from_slice(part.as_bytes());
+        key_input.push(0x00);
+    }
+    let route_key: [u8; 32] = Sha256::digest(&key_input).into();
+
+    let job = MeshJob {
+        action: payload.action,
+        from: payload.from,
+        to: payload.to,
+        fen: payload.fen,
+        route_key,
+    };
+
+    if let Ok(mut outbox) = job_outbox().lock() {
+        if outbox.len() >= JOB_OUTBOX_CAP {
+            outbox.pop_front();
+        }
+        outbox.push_back(job.clone());
+    }
+    Ok(job)
+}
+
+/// Drain jobs queued for the mesh-transport DHT publisher.
+pub fn drain_job_outbox() -> Vec<MeshJob> {
+    job_outbox()
+        .lock()
+        .map(|mut outbox| outbox.drain(..).collect())
+        .unwrap_or_default()
 }
 
 /// Simulates routing an incoming HTTP REST request to the offline Mesh network.
@@ -128,10 +312,10 @@ pub fn handle_rest_call(req: &AsyncApiRequest) -> Result<String, InteropError> {
 
     match path {
         "/api/v1/health" => Ok("Mesh Island Active".to_string()),
-        "/api/v1/submit_job" => {
-            println!("Routing job payload [{}] into Kademlia DHT...", req.payload);
-            Ok("Job Accepted".to_string())
-        }
+        "/api/v1/submit_job" => match dispatch_job(&req.payload) {
+            Ok(_) => Ok("Job Accepted".to_string()),
+            Err(_) => Err(InteropError::BadRequest),
+        },
         "/api/v1/twamm" => handle_twamm(req),
         "/api/v1/liquidity" => handle_liquidity(req),
         "/api/v1/gateway" => handle_gateway(req),
@@ -269,6 +453,13 @@ fn handle_liquidity(req: &AsyncApiRequest) -> Result<String, InteropError> {
                     "{{\"node_id\":\"{}\",\"tokens_airdropped\":{},\"status\":\"claimed\"}}",
                     node_id, tokens
                 )),
+                // Idempotent claim (issue #46): a well-formed claim with
+                // nothing left to claim is not a malformed request, so it
+                // must not 400. Report zero tokens instead.
+                Err(liquidity::LiquidityError::NothingToClaim) => Ok(format!(
+                    "{{\"node_id\":\"{}\",\"tokens_airdropped\":0,\"status\":\"nothing_to_claim\"}}",
+                    node_id
+                )),
                 Err(liquidity::LiquidityError::StillOffline) => Err(InteropError::GatewayDormant),
                 Err(_) => Err(InteropError::BadRequest),
             }
@@ -367,17 +558,113 @@ fn handle_gateway(req: &AsyncApiRequest) -> Result<String, InteropError> {
     }
 }
 
-/// Simulates an ongoing WebSocket event loop syncing state to the external internet.
-pub fn handle_websocket(mut connection_alive: bool) {
-    let mut tick = 0;
-    while connection_alive && tick < 3 {
-        println!("WebSocket Sync Tick {}...", tick);
-        tick += 1;
-        // Simulate break
-        if tick == 2 {
-            connection_alive = false;
+/// Handle for one WebSocket peer connection.
+///
+/// Dropping the handle closes the connection. This is the guarantee behind
+/// the fix for #48: no code path can orphan a live connection, because the
+/// connection dies with its handle.
+pub struct WsConnection {
+    id: u64,
+    peer: String,
+    closed: bool,
+}
+
+impl WsConnection {
+    fn new(id: u64, peer: impl Into<String>) -> Self {
+        Self {
+            id,
+            peer: peer.into(),
+            closed: false,
         }
     }
+
+    /// Close the connection immediately. Idempotent.
+    pub fn close(&mut self) {
+        if !self.closed {
+            self.closed = true;
+            println!("WebSocket connection {} ({}) closed.", self.id, self.peer);
+        }
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.closed
+    }
+}
+
+impl Drop for WsConnection {
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+
+/// Registry of live WebSocket connections.
+///
+/// Connections that die abruptly (peer disconnect without a clean close) are
+/// removed here, so they cannot accumulate. Fixes #48.
+#[derive(Default)]
+pub struct WsRegistry {
+    next_id: u64,
+    live: Vec<WsConnection>,
+}
+
+impl WsRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Register a new outbound connection.
+    pub fn register(&mut self, peer: impl Into<String>) -> u64 {
+        let id = self.next_id;
+        self.next_id = self.next_id.wrapping_add(1);
+        self.live.push(WsConnection::new(id, peer));
+        id
+    }
+
+    /// Remove and close a connection by id (abrupt peer disconnect path).
+    /// Returns true if a live connection was found and removed.
+    pub fn abrupt_disconnect(&mut self, id: u64) -> bool {
+        if let Some(pos) = self.live.iter().position(|c| c.id == id) {
+            let mut conn = self.live.remove(pos);
+            conn.close();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Close and drop every live connection.
+    pub fn close_all(&mut self) {
+        while let Some(mut conn) = self.live.pop() {
+            conn.close();
+        }
+    }
+
+    pub fn live_count(&self) -> usize {
+        self.live.len()
+    }
+}
+
+/// Ongoing WebSocket event loop syncing state to the external internet.
+///
+/// Connections are tracked in a [`WsRegistry`] and pruned on disconnect, so an
+/// abrupt peer drop can no longer leak a live connection.
+pub fn handle_websocket(connection_alive: bool) {
+    let mut registry = WsRegistry::new();
+    let id = registry.register("uplink-gateway");
+    let mut tick = 0;
+    let mut alive = connection_alive;
+    while alive && tick < 3 {
+        println!("WebSocket Sync Tick {}...", tick);
+        tick += 1;
+        if tick == 2 {
+            // Simulated abrupt peer disconnect: prune from the registry so the
+            // connection is dropped instead of leaking.
+            registry.abrupt_disconnect(id);
+            alive = false;
+        }
+    }
+    registry.close_all();
+    debug_assert_eq!(registry.live_count(), 0, "connection leaked");
     println!("WebSocket Connection Closed.");
 }
 
@@ -407,7 +694,7 @@ mod tests {
 
         let job = handle_rest_call(&AsyncApiRequest {
             endpoint: "/api/v1/submit_job".into(),
-            payload: r#"{"action":"move"}"#.into(),
+            payload: r#"{"action":"move","fen":"rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"}"#.into(),
         })
         .unwrap();
         assert_eq!(job, "Job Accepted");
@@ -452,11 +739,125 @@ mod tests {
     }
 
     #[test]
+    fn liquidity_claim_is_idempotent_not_bad_request() {
+        // Issue #46: a well-formed claim must never 400 just because there
+        // is nothing (left) to claim.
+        let node = "genesis-claim-idem-1";
+        signal_internet_disconnect();
+        handle_rest_call(&AsyncApiRequest {
+            endpoint: "/api/v1/liquidity".into(),
+            payload: format!("action=register,node_id={node}"),
+        })
+        .unwrap();
+        handle_rest_call(&AsyncApiRequest {
+            endpoint: "/api/v1/liquidity".into(),
+            payload: format!("action=accrue,node_id={node},epochs=2"),
+        })
+        .unwrap();
+
+        signal_internet_reconnect();
+        let first = handle_rest_call(&AsyncApiRequest {
+            endpoint: "/api/v1/liquidity".into(),
+            payload: format!("action=claim,node_id={node}"),
+        })
+        .unwrap();
+        assert!(first.contains("\"status\":\"claimed\""));
+
+        // Second claim: nothing left, but still a valid request (200, not 400).
+        let second = handle_rest_call(&AsyncApiRequest {
+            endpoint: "/api/v1/liquidity".into(),
+            payload: format!("action=claim,node_id={node}"),
+        })
+        .unwrap();
+        assert!(second.contains("\"status\":\"nothing_to_claim\""));
+        assert!(second.contains("\"tokens_airdropped\":0"));
+    }
+
+    #[test]
     fn unknown_route_still_refused() {
         let err = handle_rest_call(&AsyncApiRequest {
             endpoint: "/api/v1/nope".into(),
             payload: String::new(),
         });
         assert_eq!(err, Err(InteropError::ConnectionRefused));
+    }
+
+    #[test]
+    fn dispatch_job_parses_routes_and_queues() {
+        let _ = drain_job_outbox();
+        let job = dispatch_job(
+            r#"{"action":"move","from":"alice","to":"bob","fen":"rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"}"#,
+        )
+        .expect("valid job");
+        assert_eq!(job.action, "move");
+        assert_eq!(job.from, "alice");
+        // Route key is deterministic for the same payload.
+        let again = dispatch_job(
+            r#"{"action":"move","from":"alice","to":"bob","fen":"rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"}"#,
+        )
+        .unwrap();
+        assert_eq!(job.route_key, again.route_key);
+        // Different payload -> different route key.
+        let other = dispatch_job(
+            r#"{"action":"move","from":"alice","to":"carol","fen":"8/8/8/8/8/8/8/8 w - - 0 1"}"#,
+        )
+        .unwrap();
+        assert_ne!(job.route_key, other.route_key);
+        // Queued for the DHT publisher drain (superset check: tests share
+        // the process-wide outbox and run in parallel).
+        let queued = drain_job_outbox();
+        assert!(queued.len() >= 3);
+        let keys: Vec<[u8; 32]> = queued.iter().map(|j| j.route_key).collect();
+        assert!(keys.contains(&job.route_key));
+        assert!(keys.contains(&other.route_key));
+    }
+
+    #[test]
+    fn dispatch_job_rejects_bad_payloads() {
+        assert_eq!(
+            dispatch_job("not json"),
+            Err(JobDispatchError::InvalidPayload)
+        );
+        assert_eq!(
+            dispatch_job(r#"{"action":""}"#),
+            Err(JobDispatchError::MissingAction)
+        );
+        assert_eq!(
+            dispatch_job(r#"{"action":"move"}"#),
+            Err(JobDispatchError::MissingFen)
+        );
+        // Rejected through the REST surface too.
+        let err = handle_rest_call(&AsyncApiRequest {
+            endpoint: "/api/v1/submit_job".into(),
+            payload: "not json".into(),
+        });
+        assert_eq!(err, Err(InteropError::BadRequest));
+    }
+
+    #[test]
+    fn abrupt_disconnect_prunes_connection() {
+        let mut registry = WsRegistry::new();
+        let a = registry.register("peer-a");
+        let _b = registry.register("peer-b");
+        assert_eq!(registry.live_count(), 2);
+        assert!(registry.abrupt_disconnect(a));
+        assert_eq!(registry.live_count(), 1);
+        // Unknown id is a no-op, never panics.
+        assert!(!registry.abrupt_disconnect(9999));
+    }
+
+    #[test]
+    fn close_all_drains_registry() {
+        let mut registry = WsRegistry::new();
+        registry.register("peer-a");
+        registry.register("peer-b");
+        registry.close_all();
+        assert_eq!(registry.live_count(), 0);
+    }
+
+    #[test]
+    fn websocket_sync_loop_leaks_nothing() {
+        handle_websocket(true);
+        handle_websocket(false);
     }
 }

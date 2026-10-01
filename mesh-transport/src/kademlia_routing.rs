@@ -120,7 +120,17 @@ pub struct RoutingTable {
     pub tick: u64,
     /// Max contacts per bucket (k-parameter).
     pub k: usize,
+    /// Per-bucket tick of the last head liveness probe (bucket refresh).
+    bucket_refreshed_at: Vec<u64>,
 }
+
+/// Minimum insert-ticks between liveness probes of the same k-bucket.
+///
+/// Every full-bucket insert used to ping the oldest contact, but a probe is a
+/// radio round trip that drains batteries on mobile nodes. A full bucket is
+/// now probed at most once per cooldown window; newcomers that arrive inside
+/// the window are dropped without probing (issue #24).
+pub const BUCKET_REFRESH_COOLDOWN_TICKS: u64 = 32;
 
 impl RoutingTable {
     pub fn new(local_id: NodeId) -> Self {
@@ -133,6 +143,7 @@ impl RoutingTable {
             buckets: (0..256).map(|_| Vec::with_capacity(k.min(K))).collect(),
             tick: 0,
             k,
+            bucket_refreshed_at: vec![0u64; 256],
         }
     }
 
@@ -158,10 +169,10 @@ impl RoutingTable {
 
         let idx = bucket_for(&self.local_id, &contact.id);
         contact.last_seen = self.next_tick();
-        let bucket = &mut self.buckets[idx];
 
-        if let Some(pos) = bucket.iter().position(|c| c.id == contact.id) {
+        if let Some(pos) = self.buckets[idx].iter().position(|c| c.id == contact.id) {
             // Move to tail (most recently seen).
+            let bucket = &mut self.buckets[idx];
             let mut existing = bucket.remove(pos);
             existing.endpoint = contact.endpoint;
             existing.last_seen = contact.last_seen;
@@ -169,13 +180,23 @@ impl RoutingTable {
             return true;
         }
 
-        if bucket.len() < self.k {
-            bucket.push(contact);
+        if self.buckets[idx].len() < self.k {
+            self.buckets[idx].push(contact);
             return true;
         }
 
-        // Bucket full: ping head (oldest). If dead → evict and append newcomer.
-        // If alive → drop newcomer (replacement-cache omitted in Phase-1).
+        // Bucket full: ping head (oldest) at most once per cooldown window.
+        // A probe is a radio round trip on mobile nodes, so newcomers that
+        // arrive inside the window are dropped without probing (issue #24).
+        // The first probe always fires; the cooldown applies between probes.
+        let now = self.tick;
+        let last_probe = self.bucket_refreshed_at[idx];
+        if last_probe != 0 && now.wrapping_sub(last_probe) < BUCKET_REFRESH_COOLDOWN_TICKS {
+            return false;
+        }
+        self.bucket_refreshed_at[idx] = now;
+
+        let bucket = &mut self.buckets[idx];
         let head_alive = probe.is_alive(&bucket[0]);
         if !head_alive {
             bucket.remove(0);
@@ -653,5 +674,50 @@ mod tests {
         let pos = bucket.iter().position(|c| c.id == id).unwrap();
         assert_eq!(pos, bucket.len() - 1);
         assert_eq!(bucket[pos].endpoint, "v2");
+    }
+
+    #[test]
+    fn full_bucket_probes_are_rate_limited() {
+        use std::cell::Cell;
+
+        struct CountingProbe<'a> {
+            calls: &'a Cell<usize>,
+        }
+        impl LivenessProbe for CountingProbe<'_> {
+            fn is_alive(&self, _contact: &NodeContact) -> bool {
+                self.calls.set(self.calls.get() + 1);
+                true
+            }
+        }
+
+        // k=2 fills the bucket fast; id[0]=0x80 lands every contact in one
+        // bucket against local node 0x00 (same trick as the liveness test).
+        let mut table = RoutingTable::with_k(node_id_from_u8(0), 2);
+        let calls = Cell::new(0usize);
+        let probe = CountingProbe { calls: &calls };
+        let contact = |b: u8| {
+            let mut id = [0u8; 32];
+            id[0] = 0x80;
+            id[1] = b;
+            NodeContact::new(id, "ble")
+        };
+
+        // Fill the bucket: no probes needed.
+        assert!(table.insert_with_probe(contact(1), &probe));
+        assert!(table.insert_with_probe(contact(2), &probe));
+        assert_eq!(calls.get(), 0);
+
+        // First newcomer probes once; rapid followers are dropped silently.
+        assert!(!table.insert_with_probe(contact(3), &probe));
+        assert_eq!(calls.get(), 1);
+        assert!(!table.insert_with_probe(contact(4), &probe));
+        assert_eq!(calls.get(), 1);
+
+        // Inserts keep ticking the clock; once the cooldown window elapses,
+        // probing resumes.
+        for i in 5..5 + BUCKET_REFRESH_COOLDOWN_TICKS as u8 {
+            assert!(!table.insert_with_probe(contact(i), &probe));
+        }
+        assert!(calls.get() >= 2);
     }
 }

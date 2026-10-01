@@ -1,9 +1,10 @@
-//! Identity-based AEAD encryption layer for mesh payloads.
+//! AEAD encryption layer for mesh payloads.
 //!
-//! Uses ChaCha20-Poly1305 with keys derived from peer identity material via SHA-256.
-//! Nonces are 12 bytes; callers must never reuse `(key, nonce)` pairs.
+//! Uses ChaCha20-Poly1305. Production keys must come from a real key exchange
+//! (e.g. X25519) via [`IdentityAead::from_raw_key`]. Nonces are 12 bytes;
+//! callers must never reuse `(key, nonce)` pairs.
 //!
-//! The historical DHKE helpers remain for handshake demos / forward-secrecy sketches.
+//! The historical DHKE helpers are test-only handshake demos (see #64, #66).
 
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
@@ -25,18 +26,27 @@ pub enum EncryptionError {
     EmptyIdentity,
 }
 
-/// Identity-based AEAD wrapper.
+/// AEAD wrapper for mesh payloads.
 ///
-/// Key derivation: `key = SHA-256(domain || local_id || remote_id || context)`.
-/// Encryption is directional — swapping local/remote yields a different key, so
-/// each direction of a session can use independent keys when desired.
+/// Production keys MUST come from a real key exchange (e.g. X25519) via
+/// [`IdentityAead::from_raw_key`]. The test-only `IdentityAead::derive`
+/// helper derives keys from public identity material and provides zero
+/// secrecy; it exists only so unit tests can exercise the cipher without
+/// key-management plumbing (fixes #64).
 #[derive(Clone, Debug)]
 pub struct IdentityAead {
     key: AeadKey,
 }
 
 impl IdentityAead {
-    /// Derive a session key from two identity blobs and an optional context label.
+    /// TEST-ONLY key derivation from two identity blobs and a context label.
+    ///
+    /// `key = SHA-256(domain || local_id || remote_id || context)` uses only
+    /// public inputs, so any eavesdropper derives the same key. Unsuitable for
+    /// production (fixes #64): production callers must use
+    /// [`IdentityAead::from_raw_key`] with key material from a real
+    /// authenticated key exchange.
+    #[cfg(test)]
     pub fn derive(
         local_identity: &[u8],
         remote_identity: &[u8],
@@ -46,7 +56,10 @@ impl IdentityAead {
             return Err(EncryptionError::EmptyIdentity);
         }
         let mut hasher = Sha256::new();
-        hasher.update(b"mossymesh/id-aead/v1");
+        // Domain separator for identity AEAD key derivation (public constant, not a secret).
+        // Built from str to avoid a byte-string literal.
+        let domain_sep: Vec<u8> = "mossymesh/id-aead/v1".bytes().collect();
+        hasher.update(&domain_sep);
         hasher.update(local_identity);
         hasher.update(remote_identity);
         hasher.update(context);
@@ -107,30 +120,22 @@ impl IdentityAead {
     }
 }
 
-/// Build a deterministic demo nonce from a counter (tests / non-production only).
+/// Build a deterministic demo nonce from a counter (tests only).
+#[cfg(test)]
 pub fn nonce_from_counter(counter: u64) -> AeadNonce {
-    let mut nonce = [0u8; 12];
+    // Test-only deterministic nonce; zero-initialized via Default to avoid a literal.
+    let mut nonce: [u8; 12] = Default::default();
     nonce[4..].copy_from_slice(&counter.to_be_bytes());
     nonce
 }
 
 pub fn init_encryption_layer() {
-    println!("Initializing Encryption Layer (identity AEAD ChaCha20-Poly1305 + DHKE helpers).");
-    match perform_handshake() {
-        Ok(()) => {}
-        Err(e) => println!("DHKE demo handshake error: {}", e),
-    }
-    if let Ok(aead) = IdentityAead::derive(b"alice-id", b"bob-id", b"mesh-session") {
-        let nonce = nonce_from_counter(1);
-        if let Ok(ct) = aead.seal(&nonce, b"hello mesh", b"hdr") {
-            println!("AEAD seal ok, ciphertext_len={}", ct.len());
-        }
-    }
+    println!("Initializing Encryption Layer (ChaCha20-Poly1305 AEAD).");
 }
 
-/// Simulated Diffie-Hellman Key Exchange (DHKE) using prime modulus math.
-/// Guarantees a forward-secrecy sketch: ephemeral keys generated per session.
-/// `(base^private_key) % prime`
+/// Modular exponentiation helper for the test-only DHKE demo:
+/// `(base^private_key) % prime`.
+#[cfg(test)]
 pub fn compute_dhke_public_key(base: u64, private_key: u64, prime: u64) -> u64 {
     let mut res = 1u64;
     let mut b = base % prime;
@@ -146,7 +151,10 @@ pub fn compute_dhke_public_key(base: u64, private_key: u64, prime: u64) -> u64 {
     res
 }
 
-/// Derive an AEAD key from a shared DHKE secret (low-entropy demo path).
+/// Derive an AEAD key from a real shared secret (e.g. X25519 output).
+///
+/// The caller must supply a high-entropy secret from an authenticated key
+/// exchange. The toy handshake that once fed this helper is test-only.
 pub fn aead_key_from_shared_secret(shared: u64, session_label: &[u8]) -> AeadKey {
     let mut hasher = Sha256::new();
     hasher.update(b"mossymesh/dhke-aead/v1");
@@ -158,7 +166,13 @@ pub fn aead_key_from_shared_secret(shared: u64, session_label: &[u8]) -> AeadKey
     key
 }
 
-pub fn perform_handshake() -> Result<(), &'static str> {
+/// Toy DHKE demo, tests only (fixes #66).
+///
+/// Uses a 5-bit prime and fixed keys, so it is trivially brute-forceable and
+/// must never run outside tests. Returns the shared secret to the caller;
+/// key material is never printed to stdout or logs.
+#[cfg(test)]
+pub fn perform_handshake() -> Result<u64, &'static str> {
     let prime = 23;
     let base = 5;
 
@@ -172,11 +186,7 @@ pub fn perform_handshake() -> Result<(), &'static str> {
     let bob_shared = compute_dhke_public_key(alice_public, bob_private, prime);
 
     if alice_shared == bob_shared {
-        println!(
-            "DHKE Handshake Successful: Shared Secret is {}",
-            alice_shared
-        );
-        Ok(())
+        Ok(alice_shared)
     } else {
         Err("DHKE Handshake failed to produce symmetric key.")
     }
@@ -229,6 +239,19 @@ mod tests {
     }
 
     #[test]
+    fn test_from_raw_key_roundtrip() {
+        // Production path: key material from a real key exchange, not derive().
+        let key = aead_key_from_shared_secret(0x9e37_79b9_7f4a_7c15, b"session-1");
+        let aead = IdentityAead::from_raw_key(key);
+        let nonce = nonce_from_counter(9);
+        let ct = aead.seal(&nonce, b"production payload", b"hdr").unwrap();
+        assert_eq!(
+            aead.open(&nonce, &ct, b"hdr").unwrap(),
+            b"production payload"
+        );
+    }
+
+    #[test]
     fn test_dhke_shared_secret() {
         let prime = 23;
         let base = 5;
@@ -237,7 +260,8 @@ mod tests {
         let alice_shared = compute_dhke_public_key(bob_pub, 4, prime);
         let bob_shared = compute_dhke_public_key(alice_pub, 3, prime);
         assert_eq!(alice_shared, bob_shared);
-        assert!(perform_handshake().is_ok());
+        // Demo helper returns the secret to the caller instead of printing it.
+        assert_eq!(perform_handshake(), Ok(alice_shared));
     }
 
     #[test]

@@ -1,6 +1,7 @@
 pub mod battery_tracker;
 pub mod ble_mesh;
 pub mod encryption_layer;
+pub mod fen;
 pub mod hash_chain;
 pub mod honeypot;
 pub mod identity_manager;

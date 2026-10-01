@@ -16,33 +16,40 @@
 //! - [`trie`] — insert/get, root hash, size budget, legacy `TrieNode`
 //! - [`proof`] — Merkle inclusion proofs + verification
 //! - [`ipld_codec`] — CBOR encode/decode and tagged hashing
+//! - [`light_client`] — light client: verify state without the full trie
 //! - [`error`] — [`ConsensusError`]
 //! - [`crdt`] — YATA/RGA document merge (peer agent surface; already present)
 //! - [`erasure`] / [`ring_buffer`] — DA helpers (peer agent surface)
 //! - [`snark`] — constant-size public SNARK types (200-byte radio anchors)
 //! - [`folding`] — Nova-style recursive fold of ledger steps (constant proof size)
+//! - [`verifier`] — swappable folding-verifier trait (mock backend today;
+//!   Nova-SNARK path structured but unwired)
 
 pub mod crdt;
 pub mod erasure;
 pub mod error;
 pub mod folding;
 pub mod ipld_codec;
+pub mod light_client;
 pub mod proof;
 pub mod ring_buffer;
 pub mod snark;
 pub mod trie;
+pub mod verifier;
 
 pub use error::ConsensusError;
 pub use folding::{
     fold_proofs, fold_sequence, fold_snarks, verify_folded_proof, verify_preprocessing,
 };
 pub use ipld_codec::{decode_cbor, empty_root, encode_cbor, CryptoPointer};
+pub use light_client::LightClient;
 pub use proof::{verify_proof, verify_proof_bool, MerkleProof, ProofStep, ProofTerminal};
 pub use snark::{
     MicroSpartanPreprocessing, PublicInput, SnarkProof, StepInstance, ANCHOR_PROOF_SIZE,
     MAX_VERIFICATION_PAYLOAD_BYTES, MICROSPARTAN_GATE_COUNT, MICROSPARTAN_PREPROCESS_META_BYTES,
 };
 pub use trie::{bytes_to_nibbles, MerklePatriciaTrie, MptNode, StateMerge, TrieNode};
+pub use verifier::{default_verifier, FoldingVerifier, MockFoldingVerifier, NovaSnarkVerifier};
 
 /// 32-byte cryptographic digest / content pointer.
 pub type Hash32 = [u8; 32];

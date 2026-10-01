@@ -310,6 +310,95 @@ mod tests {
         assert!(mnps > 0.0);
     }
 
+    #[test]
+    fn castling_moves_king_and_rook() {
+        // Issue #41: shakmaty 0.27.2 handles Move::Castle via play_unchecked;
+        // the reported "rook not moved" bug does not reproduce in this
+        // wrapper. This regression test plays all four castles through
+        // EngineState::make_move and asserts BOTH the king and rook final
+        // squares, plus full restoration on unmake.
+        // (fen, king from, king to, rook from, rook to)
+        let cases = [
+            (
+                "r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1",
+                Square::E1,
+                Square::G1,
+                Square::H1,
+                Square::F1,
+            ),
+            (
+                "r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1",
+                Square::E1,
+                Square::C1,
+                Square::A1,
+                Square::D1,
+            ),
+            (
+                "r3k2r/8/8/8/8/8/8/R3K2R b KQkq - 0 1",
+                Square::E8,
+                Square::G8,
+                Square::H8,
+                Square::F8,
+            ),
+            (
+                "r3k2r/8/8/8/8/8/8/R3K2R b KQkq - 0 1",
+                Square::E8,
+                Square::C8,
+                Square::A8,
+                Square::D8,
+            ),
+        ];
+        for (fen, from, king_to, rook_from, rook_to) in cases {
+            let mut engine = EngineState::from_fen(fen).unwrap();
+            // NB: shakmaty's Move::to() returns the ROOK square for castling
+            // (Chess960 convention), so match the Castle variant by king
+            // AND rook squares: both kingside and queenside share the king
+            // origin, and find() would otherwise always return kingside.
+            let mv = engine
+                .get_moves()
+                .into_iter()
+                .find(|m| {
+                    matches!(m, Move::Castle { king, rook } if *king == from && *rook == rook_from)
+                })
+                .unwrap_or_else(|| panic!("castle not legal: {from:?}->{king_to:?} in {fen}"));
+            assert!(
+                matches!(mv, Move::Castle { .. }),
+                "expected Castle, got {mv:?}"
+            );
+            engine.make_move(&mv).unwrap();
+            let mover = engine.turn().other();
+            assert_eq!(
+                engine.piece_at(king_to),
+                Some((PieceType::King, mover)),
+                "king on {king_to:?}"
+            );
+            assert_eq!(
+                engine.piece_at(rook_to),
+                Some((PieceType::Rook, mover)),
+                "rook on {rook_to:?}"
+            );
+            assert!(
+                engine.piece_at(from).is_none(),
+                "king origin {from:?} empty"
+            );
+            assert!(
+                engine.piece_at(rook_from).is_none(),
+                "rook origin {rook_from:?} empty"
+            );
+            engine.unmake_move().unwrap();
+            assert_eq!(
+                engine.piece_at(from),
+                Some((PieceType::King, engine.turn())),
+                "king restored"
+            );
+            assert_eq!(
+                engine.piece_at(rook_from),
+                Some((PieceType::Rook, engine.turn())),
+                "rook restored"
+            );
+        }
+    }
+
     fn moves_matching(engine: &EngineState, from: Square, to: Square) -> Move {
         engine
             .get_moves()
