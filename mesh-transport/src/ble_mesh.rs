@@ -2,8 +2,39 @@
 //!
 //! Simulation-capable control plane for ultra-low-power proximity links.
 //! Peers exchange compact LSAs; each node maintains a TTL-pruned neighbor table.
+//!
+//! ## LSA authenticity (fixes #205)
+//!
+//! Every [`LinkStateAdvertisement`] is signed with the origin node's ed25519
+//! key, and verification happens **before** any neighbor-table or
+//! sequence-tracker state is touched. The origin id is **self-certifying**: it
+//! is the lowercase hex encoding of the origin's 32-byte ed25519 verifying
+//! key, so the receiver needs no key registry and there is no key-distribution
+//! step for an attacker to subvert. Forging or ratcheting another node's LSA
+//! (bumping `sequence`, rewriting `neighbors`, back-dating `generated_at_ms`)
+//! requires that node's private key.
+//!
+//! Trust assumption, stated plainly: identity == key. A peer presenting a
+//! valid signature under origin id `X` *is* the holder of `X`'s private key.
+//! Minting a *new* identity (Sybil) is still possible and is out of scope
+//! here; Sybil-cost machinery lives in `vdf_sybil.rs`. BLE beacons
+//! ([`BleBeacon`]) remain unsigned discovery hints; only LSAs carry trusted
+//! link-state.
+//!
+//! Signed payload (everything the receiver trusts), big-endian:
+//! ```text
+//! u16 len || origin_id bytes || u32 sequence || u8 battery_level ||
+//! u64 generated_at_ms || u64 ttl_ms || u16 neighbor_count ||
+//! per neighbor: u16 len || id bytes || u32 cost
+//! ```
+//! Wire encoding = signed payload || 64-byte ed25519 signature. Signed LSAs
+//! are larger than the legacy 20-byte relay MTU; use [`fragment_ble_payload`]
+//! to move them across legacy relays.
 
 use std::collections::BTreeMap;
+
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use sha2::{Digest, Sha256};
 
 /// Default LSA TTL in simulated milliseconds.
 pub const DEFAULT_LSA_TTL_MS: u64 = 30_000;
@@ -32,6 +63,11 @@ impl BleBeacon {
 }
 
 /// Link-state advertisement flooded over BLE mesh.
+///
+/// `origin_id` is the lowercase hex of the origin's ed25519 verifying key
+/// (self-certifying identity, see module docs). `signature` is the origin's
+/// ed25519 signature over [`Self::signed_payload_bytes`]; it covers every
+/// field the receiver trusts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LinkStateAdvertisement {
     pub origin_id: String,
@@ -42,6 +78,7 @@ pub struct LinkStateAdvertisement {
     /// Simulated wall-clock when this LSA was generated (ms).
     pub generated_at_ms: u64,
     pub ttl_ms: u64,
+    pub signature: [u8; 64],
 }
 
 impl LinkStateAdvertisement {
@@ -59,6 +96,8 @@ impl LinkStateAdvertisement {
             neighbors,
             generated_at_ms,
             ttl_ms: DEFAULT_LSA_TTL_MS,
+            // Unsigned until `sign` is called (e.g. via `BleMeshNode::create_lsa`).
+            signature: [0u8; 64],
         }
     }
 
@@ -66,8 +105,9 @@ impl LinkStateAdvertisement {
         now_ms.saturating_sub(self.generated_at_ms) > self.ttl_ms
     }
 
-    /// Deterministic binary encoding for sim/tests (length-prefixed UTF-8 ids).
-    pub fn encode(&self) -> Vec<u8> {
+    /// Canonical bytes covered by the signature: every trusted field,
+    /// big-endian, length-prefixed UTF-8 ids (see module docs for layout).
+    pub fn signed_payload_bytes(&self) -> Vec<u8> {
         let mut out = Vec::new();
         encode_str(&mut out, &self.origin_id);
         out.extend_from_slice(&self.sequence.to_be_bytes());
@@ -79,6 +119,39 @@ impl LinkStateAdvertisement {
             encode_str(&mut out, id);
             out.extend_from_slice(&cost.to_be_bytes());
         }
+        out
+    }
+
+    /// Sign this LSA in place with the origin's key.
+    pub fn sign(&mut self, signing_key: &SigningKey) {
+        let sig: Signature = signing_key.sign(&self.signed_payload_bytes());
+        self.signature = sig.to_bytes();
+    }
+
+    /// The origin's verifying key, decoded from the self-certifying origin id.
+    pub fn origin_verifying_key(&self) -> Option<VerifyingKey> {
+        let raw = hex_decode_32(&self.origin_id)?;
+        VerifyingKey::from_bytes(&raw).ok()
+    }
+
+    /// True iff the signature is valid under the key named by `origin_id`.
+    /// Pure cryptography: no table or sequence state is consulted.
+    pub fn verify(&self) -> bool {
+        let Some(key) = self.origin_verifying_key() else {
+            return false;
+        };
+        let Ok(sig_bytes) = <[u8; 64]>::try_from(&self.signature[..]) else {
+            return false;
+        };
+        let sig = Signature::from_bytes(&sig_bytes);
+        key.verify(&self.signed_payload_bytes(), &sig).is_ok()
+    }
+
+    /// Deterministic binary encoding for sim/tests: signed payload followed
+    /// by the 64-byte signature.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = self.signed_payload_bytes();
+        out.extend_from_slice(&self.signature);
         out
     }
 
@@ -108,6 +181,13 @@ impl LinkStateAdvertisement {
             i += 4;
             neighbors.push((id, cost));
         }
+        // Exactly one 64-byte signature must follow; truncated or padded
+        // wire bytes are rejected.
+        if bytes.len() - i != 64 {
+            return None;
+        }
+        let mut signature = [0u8; 64];
+        signature.copy_from_slice(&bytes[i..i + 64]);
         Some(Self {
             origin_id,
             sequence,
@@ -115,8 +195,41 @@ impl LinkStateAdvertisement {
             neighbors,
             generated_at_ms,
             ttl_ms,
+            signature,
         })
     }
+}
+
+/// Lowercase hex of a 32-byte key (self-certifying node ids).
+fn hex_encode_32(bytes: &[u8; 32]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut s = String::with_capacity(64);
+    for b in bytes {
+        s.push(HEX[(b >> 4) as usize] as char);
+        s.push(HEX[(b & 0x0f) as usize] as char);
+    }
+    s
+}
+
+fn hex_val(c: u8) -> Option<u8> {
+    match c {
+        b'0'..=b'9' => Some(c - b'0'),
+        b'a'..=b'f' => Some(c - b'a' + 10),
+        _ => None,
+    }
+}
+
+/// Decode a 64-char lowercase hex node id back to 32 key bytes.
+fn hex_decode_32(s: &str) -> Option<[u8; 32]> {
+    let b = s.as_bytes();
+    if b.len() != 64 {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for (i, chunk) in b.chunks(2).enumerate() {
+        out[i] = (hex_val(chunk[0])? << 4) | hex_val(chunk[1])?;
+    }
+    Some(out)
 }
 
 fn encode_str(out: &mut Vec<u8>, s: &str) {
@@ -160,9 +273,16 @@ impl NeighborEntry {
 }
 
 /// Local BLE mesh control-plane state.
-#[derive(Debug, Clone)]
+///
+/// The node owns an ed25519 signing key; `node_id` is the lowercase hex of
+/// the corresponding verifying key (self-certifying identity). LSAs this
+/// node emits are always signed; LSAs it ingests are verified before any
+/// table state changes.
+#[derive(Clone)]
 pub struct BleMeshNode {
     pub node_id: String,
+    /// LSA signing key (secret; redacted in `Debug`).
+    signing_key: SigningKey,
     pub battery_level: u8,
     pub seq: u32,
     pub now_ms: u64,
@@ -173,10 +293,27 @@ pub struct BleMeshNode {
     seen_seq: BTreeMap<String, u32>,
 }
 
+impl std::fmt::Debug for BleMeshNode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BleMeshNode")
+            .field("node_id", &self.node_id)
+            .field("signing_key", &"[REDACTED]")
+            .field("battery_level", &self.battery_level)
+            .field("seq", &self.seq)
+            .field("now_ms", &self.now_ms)
+            .field("neighbor_ttl_ms", &self.neighbor_ttl_ms)
+            .field("neighbors", &self.neighbors)
+            .field("seen_seq", &self.seen_seq)
+            .finish()
+    }
+}
+
 impl BleMeshNode {
-    pub fn new(node_id: impl Into<String>, battery_level: u8) -> Self {
+    fn from_signing_key(signing_key: SigningKey, battery_level: u8) -> Self {
+        let node_id = hex_encode_32(signing_key.verifying_key().as_bytes());
         Self {
-            node_id: node_id.into(),
+            node_id,
+            signing_key,
             battery_level,
             seq: 0,
             now_ms: 0,
@@ -184,6 +321,24 @@ impl BleMeshNode {
             neighbors: BTreeMap::new(),
             seen_seq: BTreeMap::new(),
         }
+    }
+
+    /// Fresh random identity (production path).
+    pub fn generate(battery_level: u8) -> Self {
+        let mut bytes = [0u8; 32];
+        getrandom::getrandom(&mut bytes).expect("RNG failure generating BLE node key");
+        Self::from_signing_key(SigningKey::from_bytes(&bytes), battery_level)
+    }
+
+    /// Deterministic identity from a seed (tests and simulations).
+    pub fn from_seed(seed: &[u8], battery_level: u8) -> Self {
+        let mut hasher = Sha256::new();
+        hasher.update(b"mossymesh/ble-mesh/lsa-key/v1");
+        hasher.update(seed);
+        let digest = hasher.finalize();
+        let mut bytes = [0u8; 32];
+        bytes.copy_from_slice(&digest);
+        Self::from_signing_key(SigningKey::from_bytes(&bytes), battery_level)
     }
 
     pub fn advance_time(&mut self, delta_ms: u64) {
@@ -261,7 +416,7 @@ impl BleMeshNode {
         self.neighbors.insert(entry.node_id.clone(), entry);
     }
 
-    /// Build the next outbound LSA for this node.
+    /// Build the next outbound LSA for this node, signed with the node's key.
     pub fn create_lsa(&mut self) -> LinkStateAdvertisement {
         self.seq = self.seq.wrapping_add(1);
         let neighbors: Vec<(String, u32)> = self
@@ -269,21 +424,31 @@ impl BleMeshNode {
             .values()
             .map(|n| (n.node_id.clone(), n.cost))
             .collect();
-        LinkStateAdvertisement::new(
+        let mut lsa = LinkStateAdvertisement::new(
             self.node_id.clone(),
             self.seq,
             self.battery_level,
             neighbors,
             self.now_ms,
-        )
+        );
+        lsa.sign(&self.signing_key);
+        lsa
     }
 
     /// Process an inbound LSA. Returns true if the table was updated / should re-flood.
+    ///
+    /// The signature is verified **before** any sequence-tracker or neighbor
+    /// state is updated: a forged LSA cannot poison `seen_seq`, ratchet the
+    /// sequence window, or plant a neighbor entry. Rejection order: self,
+    /// expired, bad signature, stale sequence.
     pub fn process_lsa(&mut self, lsa: &LinkStateAdvertisement) -> bool {
         if lsa.origin_id == self.node_id {
             return false;
         }
         if lsa.is_expired(self.now_ms) {
+            return false;
+        }
+        if !lsa.verify() {
             return false;
         }
         if let Some(&seen) = self.seen_seq.get(&lsa.origin_id) {
@@ -323,15 +488,17 @@ impl BleMeshNode {
 
 pub fn init_ble_mesh() {
     println!("Initializing BLE Mesh routing for ultra-close offline proximity.");
-    let mut node = BleMeshNode::new("NodeA_BLE_MAC", 88);
+    let mut node = BleMeshNode::generate(88);
     node.hear_peer("NodeB_BLE_MAC", 70, -55);
     node.hear_peer("NodeC_BLE_MAC", 40, -80);
     let lsa = node.create_lsa();
     println!(
-        "BLE LSA seq={} neighbors={} encoded={}B",
+        "BLE LSA id={}.. seq={} neighbors={} encoded={}B signed={}",
+        &node.node_id[..16],
         lsa.sequence,
         lsa.neighbors.len(),
-        lsa.encode().len()
+        lsa.encode().len(),
+        lsa.verify(),
     );
     let beacon = BleBeacon {
         node_id: node.node_id.clone(),
@@ -451,23 +618,243 @@ impl BleRelayReassembler {
 mod tests {
     use super::*;
 
+    fn node_a() -> BleMeshNode {
+        BleMeshNode::from_seed(b"test-vector-node-a", 80)
+    }
+
+    fn node_b() -> BleMeshNode {
+        BleMeshNode::from_seed(b"test-vector-node-b", 60)
+    }
+
     #[test]
-    fn lsa_encode_decode_roundtrip() {
-        let lsa = LinkStateAdvertisement::new(
-            "peer-alpha",
-            7,
-            90,
-            vec![("peer-beta".into(), 3), ("peer-gamma".into(), 5)],
-            12_345,
-        );
+    fn lsa_sign_verify_roundtrip() {
+        let mut node = node_a();
+        let lsa = node.create_lsa();
+        assert!(lsa.verify(), "freshly signed LSA must verify");
         let bytes = lsa.encode();
         let decoded = LinkStateAdvertisement::decode(&bytes).unwrap();
+        assert_eq!(lsa, decoded);
+        assert!(decoded.verify(), "decoded LSA must still verify");
+    }
+
+    #[test]
+    fn lsa_encode_decode_roundtrip() {
+        let mut node = node_a();
+        node.hear_peer("peer-beta", 70, -55);
+        let lsa = node.create_lsa();
+        let decoded = LinkStateAdvertisement::decode(&lsa.encode()).unwrap();
         assert_eq!(lsa, decoded);
     }
 
     #[test]
+    fn lsa_decode_rejects_truncated_or_padded_wire() {
+        let mut node = node_a();
+        let bytes = node.create_lsa().encode();
+        assert!(LinkStateAdvertisement::decode(&bytes[..bytes.len() - 1]).is_none());
+        let mut padded = bytes.clone();
+        padded.push(0x00);
+        assert!(LinkStateAdvertisement::decode(&padded).is_none());
+        assert!(LinkStateAdvertisement::decode(&[]).is_none());
+    }
+
+    /// Every trusted field is covered by the signature: flipping any one of
+    /// them (or the signature itself) must fail verification.
+    #[test]
+    fn lsa_signature_rejects_tampered_fields() {
+        let mut node = node_b();
+        node.hear_peer("peer-gamma", 40, -80);
+        let base = node.create_lsa();
+        assert!(base.verify());
+
+        let mut tampered = base.clone();
+        tampered.sequence = tampered.sequence.wrapping_add(1);
+        assert!(!tampered.verify(), "bumped sequence must not verify");
+
+        let mut tampered = base.clone();
+        tampered.battery_level ^= 0xff;
+        assert!(!tampered.verify(), "battery must be covered");
+
+        let mut tampered = base.clone();
+        tampered.generated_at_ms = tampered.generated_at_ms.wrapping_add(1);
+        assert!(!tampered.verify(), "timestamp must be covered");
+
+        let mut tampered = base.clone();
+        tampered.ttl_ms = tampered.ttl_ms.wrapping_add(1);
+        assert!(!tampered.verify(), "ttl must be covered");
+
+        let mut tampered = base.clone();
+        tampered.neighbors.push(("evil-peer".into(), 1));
+        assert!(!tampered.verify(), "added neighbor must not verify");
+
+        let mut tampered = base.clone();
+        tampered.neighbors[0].1 = tampered.neighbors[0].1.wrapping_add(1);
+        assert!(!tampered.verify(), "neighbor cost must be covered");
+
+        let mut tampered = base.clone();
+        tampered.neighbors.clear();
+        assert!(!tampered.verify(), "removed neighbors must not verify");
+
+        // Flip the last hex digit of the self-certifying origin id.
+        let mut tampered = base.clone();
+        let mut id = tampered.origin_id.clone().into_bytes();
+        let last = id.len() - 1;
+        id[last] = if id[last] == b'0' { b'1' } else { b'0' };
+        tampered.origin_id = String::from_utf8(id).unwrap();
+        assert!(!tampered.verify(), "origin id swap must not verify");
+
+        let mut tampered = base.clone();
+        tampered.signature[0] ^= 0x01;
+        assert!(!tampered.verify(), "flipped signature byte must not verify");
+
+        let mut tampered = base.clone();
+        tampered.signature = [0u8; 64];
+        assert!(!tampered.verify(), "zeroed signature must not verify");
+    }
+
+    /// A signature made by a *different* key does not authenticate as the
+    /// claimed origin: the classic cross-key forgery.
+    #[test]
+    fn lsa_wrong_key_signature_rejected() {
+        let a = node_a();
+        let b = node_b();
+        let mut forged = LinkStateAdvertisement::new(b.node_id.clone(), 42, 60, vec![], 0);
+        forged.sign(&a.signing_key); // attacker signs victim's origin id with own key
+        assert!(!forged.verify());
+
+        let mut receiver = node_a();
+        assert!(!receiver.process_lsa(&forged));
+        assert!(receiver.get_neighbor(&b.node_id).is_none());
+    }
+
+    /// The core #205 attack: attacker bumps the sequence number on a forged
+    /// LSA for a victim origin. Without the victim's key it must be rejected,
+    /// and it must not touch any receiver state.
+    #[test]
+    fn ingest_rejects_forged_ratchet_sequence() {
+        let mut victim = node_b();
+        let mut receiver = node_a();
+
+        // Attacker crafts an LSA claiming the victim's origin id with a huge
+        // sequence number but no valid signature.
+        let forged = LinkStateAdvertisement::new(victim.node_id.clone(), 9999, 100, vec![], 0);
+        assert!(!forged.verify());
+        assert!(!receiver.process_lsa(&forged));
+        // Verify-before-state: the forgery poisoned nothing.
+        assert!(receiver.get_neighbor(&victim.node_id).is_none());
+
+        // Attacker replays a *valid* signature from the victim's old LSA
+        // under a bumped sequence number: the signature covers the sequence,
+        // so it must still fail.
+        let old = victim.create_lsa(); // seq 1, validly signed
+        let mut ratchet = old.clone();
+        ratchet.sequence = 5000;
+        assert!(!ratchet.verify());
+        assert!(!receiver.process_lsa(&ratchet));
+        assert!(receiver.get_neighbor(&victim.node_id).is_none());
+
+        // The real victim LSA is still accepted afterwards.
+        let legit = victim.create_lsa(); // seq 2
+        assert!(receiver.process_lsa(&legit));
+        assert_eq!(receiver.get_neighbor(&victim.node_id).unwrap().last_seq, 2);
+    }
+
+    /// Captured valid LSA, neighbors rewritten, old signature kept: rejected.
+    #[test]
+    fn ingest_rejects_replayed_lsa_with_modified_neighbors() {
+        let mut victim = node_b();
+        let mut receiver = node_a();
+        victim.hear_peer("real-neighbor", 50, -60);
+        let captured = victim.create_lsa();
+
+        let mut modified = captured.clone();
+        modified.neighbors = vec![("attacker-node".into(), 1)];
+        assert!(!modified.verify());
+        assert!(!receiver.process_lsa(&modified));
+        assert!(receiver.get_neighbor(&victim.node_id).is_none());
+
+        // Untouched capture is accepted.
+        assert!(receiver.process_lsa(&captured));
+    }
+
+    /// Malformed origin ids (not a 32-byte key) are rejected at ingest.
+    #[test]
+    fn ingest_rejects_malformed_origin_id() {
+        let mut receiver = node_a();
+        let mut lsa = LinkStateAdvertisement::new("not-a-key", 1, 60, vec![], 0);
+        // Even signed by a real key, the origin id does not name that key.
+        lsa.sign(&receiver.signing_key);
+        assert!(!lsa.verify());
+        assert!(!receiver.process_lsa(&lsa));
+    }
+
+    #[test]
+    fn ingest_accepts_legitimate_advance_rejects_replay() {
+        let mut origin = node_b();
+        let mut receiver = node_a();
+
+        let lsa1 = origin.create_lsa();
+        assert!(receiver.process_lsa(&lsa1));
+        assert!(receiver.get_neighbor(&origin.node_id).is_some());
+
+        // Exact replay of seq 1: rejected.
+        assert!(!receiver.process_lsa(&lsa1));
+
+        let lsa2 = origin.create_lsa();
+        assert!(receiver.process_lsa(&lsa2));
+        assert_eq!(receiver.get_neighbor(&origin.node_id).unwrap().last_seq, 2);
+        assert_eq!(
+            receiver
+                .get_neighbor(&origin.node_id)
+                .unwrap()
+                .battery_level,
+            60
+        );
+
+        // Stale sequence after advance: rejected.
+        assert!(!receiver.process_lsa(&lsa1));
+    }
+
+    /// Two honest nodes exchange signed LSAs; both neighbor tables update.
+    #[test]
+    fn two_honest_nodes_exchange_lsas() {
+        let mut a = node_a();
+        let mut b = node_b();
+        a.hear_peer("direct-of-a", 70, -55);
+
+        let lsa_b = b.create_lsa();
+        let lsa_a = a.create_lsa();
+
+        assert!(a.process_lsa(&lsa_b));
+        assert!(b.process_lsa(&lsa_a));
+
+        let nb = a.get_neighbor(&b.node_id).expect("A should learn B");
+        assert_eq!(nb.last_seq, 1);
+        assert_eq!(nb.battery_level, 60);
+        let na = b.get_neighbor(&a.node_id).expect("B should learn A");
+        assert_eq!(na.last_seq, 1);
+        assert_eq!(na.battery_level, 80);
+        // A's own direct-hearing entry is untouched by B's LSA.
+        assert!(a.get_neighbor("direct-of-a").is_some());
+    }
+
+    #[test]
+    fn self_lsa_is_ignored() {
+        let mut node = node_a();
+        let lsa = node.create_lsa();
+        assert!(!node.process_lsa(&lsa));
+    }
+
+    #[test]
+    fn node_id_is_self_certifying_key_hex() {
+        let node = node_b();
+        assert_eq!(node.node_id.len(), 64);
+        let key = node.signing_key.verifying_key();
+        assert_eq!(hex_encode_32(key.as_bytes()), node.node_id);
+    }
+
+    #[test]
     fn neighbor_table_hears_and_prunes() {
-        let mut node = BleMeshNode::new("A", 80);
+        let mut node = node_a();
         node.hear_peer("B", 50, -50);
         assert_eq!(node.neighbor_count(), 1);
         node.neighbor_ttl_ms = 1000;
@@ -476,24 +863,8 @@ mod tests {
     }
 
     #[test]
-    fn process_lsa_updates_and_rejects_old_seq() {
-        let mut node = BleMeshNode::new("A", 80);
-        let lsa1 = LinkStateAdvertisement::new("B", 1, 60, vec![], 0);
-        assert!(node.process_lsa(&lsa1));
-        assert!(node.get_neighbor("B").is_some());
-
-        let lsa_old = LinkStateAdvertisement::new("B", 1, 99, vec![], 10);
-        assert!(!node.process_lsa(&lsa_old));
-
-        let lsa2 = LinkStateAdvertisement::new("B", 2, 55, vec![("C".into(), 2)], 20);
-        assert!(node.process_lsa(&lsa2));
-        assert_eq!(node.get_neighbor("B").unwrap().last_seq, 2);
-        assert_eq!(node.get_neighbor("B").unwrap().battery_level, 55);
-    }
-
-    #[test]
     fn create_lsa_includes_direct_neighbors() {
-        let mut node = BleMeshNode::new("A", 88);
+        let mut node = node_a();
         node.hear_peer("B", 70, -55);
         node.hear_peer("C", 40, -90);
         let lsa = node.create_lsa();
@@ -502,6 +873,7 @@ mod tests {
         // Deterministic BTree order
         assert_eq!(lsa.neighbors[0].0, "B");
         assert_eq!(lsa.neighbors[1].0, "C");
+        assert!(lsa.verify());
     }
 
     #[test]
@@ -513,7 +885,7 @@ mod tests {
 
     #[test]
     fn max_neighbors_eviction() {
-        let mut node = BleMeshNode::new("A", 80);
+        let mut node = node_a();
         for i in 0..MAX_NEIGHBORS {
             // Weak peers
             node.hear_peer(&format!("n{i:02}"), 10, -95);

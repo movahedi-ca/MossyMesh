@@ -12,6 +12,9 @@ sha2 = "0.10"
 chacha20poly1305 = "0.10"
 zeroize = { version = "1.8", features = ["derive"] }
 getrandom = "0.2"
+# Real signatures for BLE link-state advertisements (issue #205).
+# Precedent: consensus/ and governance/ already use ed25519-dalek 2.x.
+ed25519-dalek = "2.2"
 
 # Path deps for the mesh-daemon binary (mesh-transport/src/main.rs).
 consensus = { path = "../consensus" }
