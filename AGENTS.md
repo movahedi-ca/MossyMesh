@@ -60,7 +60,7 @@ Change control: any crypto-stack or memory-layout change must be proven not to v
 5. **Shakmaty Engine** — bitboards, wasm32-wasip1, ~836 Mnps, Syzygy mmap strategy.
 6. **Merkle-Patricia Trie** — incremental trie, DAG-CBOR, active ledger ≤ 10 MB.
 7. **ZK-SNARK Folding** — Nova-style constant-size verification proofs.
-8. **VDF Cryptographer** — MinRoot sequential VDF (~10 min) for Ephemeral Job DIDs.
+8. **VDF Cryptographer** — Wesolowski VDF (~10 min delay, fast verification) for Ephemeral Job DIDs.
 9. **CRDT Specialist** — yrs/YATA binary deltas; deterministic island merge.
 10. **HTLC Developer** — escrowed credits + VDF-delayed cancellation.
 11. **TWAMM Architect** — uplink OpenAPI bridge; TWAMM max-spread ≤ 2%.

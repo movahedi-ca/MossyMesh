@@ -20,6 +20,7 @@ bundled-engine = []
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 sha2 = "0.10"
+num-bigint = "0.4"
 
 # Declares the build-time cfg from the bundled-engine story so
 # `unexpected_cfgs` stays quiet with or without the asset-probing build

@@ -53,7 +53,7 @@ Crypto or memory allocation changes require written proof (doc or test) that SLA
 
 ## Phase 2 — Sandbox
 
-**Focus:** WAMR/WASI, fixed-block pools, MinRoot VDF job DIDs.
+**Focus:** WAMR/WASI, fixed-block pools, Wesolowski VDF job DIDs.
 
 ### Deliverables
 
@@ -67,7 +67,7 @@ Crypto or memory allocation changes require written proof (doc or test) that SLA
 | ID | Pass condition |
 | --- | --- |
 | P2-DoD-1 | Guest heap ≤ 10 MiB; over-alloc → `Err`, not UB. |
-| P2-DoD-2 | Job DID requires successful MinRoot VDF verify. |
+| P2-DoD-2 | Job DID requires successful Wesolowski VDF verify (fast verify). |
 | P2-DoD-3 | OOM and missing-export codes stable across nodes. |
 | P2-DoD-4 | Sandbox + VDF unit tests green; integration execute path returns stub bytes. |
 

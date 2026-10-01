@@ -7,7 +7,7 @@
 //! This crate only adds thin glue; product logic lives in peer crates.
 //!
 //! The job pipeline is a **real offline cross-crate path** (not host-only stubs):
-//! interop accept → test MinRoot VDF admit → sandbox invoke → engine startpos/eval
+//! interop accept → test Wesolowski VDF admit → sandbox invoke → engine startpos/eval
 //! → consensus ledger insert + Merkle proof verify.
 
 /// SMK-01 style bootstrap: crate inits must remain panic-free.
@@ -45,13 +45,13 @@ pub struct JobPipelineResult {
 ///
 /// ```text
 /// interop::handle_rest_call(/api/v1/submit_job)
-///   → sandbox::MinRootVdfVerifier::for_tests + Job::admit_and_load
+///   → sandbox::WesolowskiVdfVerifier::for_tests + Job::admit_and_load
 ///   → Job::invoke_admitted("get_best_move")
 ///   → engine::EngineState startpos eval + legal moves
 ///   → consensus::MerklePatriciaTrie insert + prove + verify_proof
 /// ```
 ///
-/// Uses test MinRoot (small iteration count), never production 50M steps.
+/// Uses test Wesolowski VDF (small iteration count), never production 50M steps.
 pub fn job_pipeline(module_bytes: Vec<u8>) -> Result<JobPipelineResult, String> {
     // 1) Interop gateway accepts the job (REST surface).
     let req = interop::AsyncApiRequest {
@@ -65,8 +65,8 @@ pub fn job_pipeline(module_bytes: Vec<u8>) -> Result<JobPipelineResult, String> 
         return Err("interop empty accept body".to_string());
     }
 
-    // 2) Sandbox admit gate with **test** MinRoot VDF (fast, offline).
-    let verifier = sandbox::MinRootVdfVerifier::for_tests(8);
+    // 2) Sandbox admit gate with **test** Wesolowski VDF (fast, offline).
+    let verifier = sandbox::WesolowskiVdfVerifier::for_tests(8);
     let receipt = verifier
         .issue_test(11, 16, b"integration-job-startpos")
         .map_err(|e| format!("vdf issue: {}", e.as_str()))?;
@@ -176,13 +176,13 @@ pub fn consensus_insert_and_prove(key: &[u8], value: Vec<u8>) -> Result<([u8; 32
     Ok((root, ok))
 }
 
-/// Cross-crate glue: sandbox admit with test MinRoot VDF, then admitted invoke.
+/// Cross-crate glue: sandbox admit with test Wesolowski VDF, then admitted invoke.
 pub fn sandbox_admit_invoke(
     export: &str,
     args: &[u8],
     module_bytes: Vec<u8>,
 ) -> Result<(sandbox::JobDid, Vec<u8>), String> {
-    let verifier = sandbox::MinRootVdfVerifier::for_tests(8);
+    let verifier = sandbox::WesolowskiVdfVerifier::for_tests(8);
     let receipt = verifier
         .issue_test(42, 16, b"sandbox-admit-smoke")
         .map_err(|e| format!("vdf issue: {}", e.as_str()))?;
@@ -459,7 +459,7 @@ mod tests {
     }
 
     // --- SMK-06 ---
-    /// SMK-06: real job pipeline — interop → MinRoot admit → sandbox → engine → consensus.
+    /// SMK-06: real job pipeline — interop → Wesolowski admit → sandbox → engine → consensus.
     #[test]
     fn smoke_job_pipeline() {
         let result = job_pipeline(vec![0x00, 0x61, 0x73, 0x6d]).expect("pipeline");
@@ -479,7 +479,7 @@ mod tests {
         assert_eq!(out, result.sandbox_output);
     }
 
-    /// SMK-06 companion: sandbox admit with test MinRoot is required for trusted invoke.
+    /// SMK-06 companion: sandbox admit with test Wesolowski is required for trusted invoke.
     #[test]
     fn smoke_sandbox_vdf_admit() {
         let (did, out) =
@@ -496,9 +496,10 @@ mod tests {
         );
 
         // Tampered receipt never loads.
-        let v = sandbox::MinRootVdfVerifier::for_tests(8);
+        let v = sandbox::WesolowskiVdfVerifier::for_tests(8);
         let mut bad = v.issue_test(1, 16, b"x").expect("issue");
-        bad.final_x = bad.final_x.wrapping_add(1);
+        let last = bad.final_x.len() - 1;
+        bad.final_x[last] ^= 0x01;
         let err = sandbox::Job::admit_and_load(&bad, &v, b"\0asm").unwrap_err();
         assert!(matches!(
             err,

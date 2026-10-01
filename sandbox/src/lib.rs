@@ -10,7 +10,8 @@
 //!   size is configurable per job.
 //! - **Job admit gate** ([`admit`]): require a verified [`admit::VdfReceipt`] /
 //!   [`admit::JobDid`] before trusted invoke ([`job::Job::admit_and_load`],
-//!   [`job::Job::invoke_admitted`]). Full MinRoot is owned by transport; the
+//!   [`job::Job::invoke_admitted`]). The Wesolowski VDF arithmetic is
+//!   duplicated here from transport (a dependency would be circular); the
 //!   sandbox ships a domain-separated hash PoW **stub** for local tests.
 //! - **Symmetric Static INT8** helpers ([`quant`]) prepare tensor payloads for edge AI.
 //! - **Job API** ([`job::Job`]): load module bytes → invoke exports → deterministic
@@ -38,11 +39,10 @@ pub mod wamr;
 
 // Re-exports for a compact public surface.
 pub use admit::{
-    admit_job, admit_job_required, validate_minroot_modulus, AdmitError,
-    DomainSeparatedHashVdfStub, JobDid, MinRootVdfVerifier, VdfReceipt, VdfVerifier,
-    DEFAULT_TEST_ITERATIONS, DEFAULT_TEST_MODULUS, HASH_VDF_STUB_DEFAULT_MIN_STEPS,
-    HASH_VDF_STUB_DOMAIN, MAX_TEST_ITERATIONS, MODULUS_ID_HASH_STUB, MODULUS_ID_PRODUCTION_MINROOT,
-    MODULUS_ID_TEST_MINROOT, PRODUCTION_ITERATIONS, PRODUCTION_MODULUS,
+    admit_job, admit_job_required, AdmitError, DomainSeparatedHashVdfStub, JobDid, VdfReceipt,
+    VdfVerifier, WesolowskiVdfVerifier, DEFAULT_TEST_ITERATIONS, HASH_VDF_DOMAIN,
+    HASH_VDF_STUB_DEFAULT_MIN_STEPS, MAX_TEST_ITERATIONS, MOBILE_ITERATIONS, MODULUS_ID_HASH_STUB,
+    MODULUS_ID_WESOLOWSKI_RSA2048, PRODUCTION_ITERATIONS, VDF_MODULUS_BYTES,
 };
 /// Embedded engine.wasm bytes (issue #38); consumed by
 /// [`HostRuntime::load_engine`](host::HostRuntime::load_engine).
@@ -195,7 +195,6 @@ fn job_error_static(e: &JobError) -> &'static str {
         JobError::Admit(AdmitError::InvalidModulus) => {
             "Admit denied: VDF modulus / parameter set invalid."
         }
-        JobError::Admit(AdmitError::Rejected(_)) => "Admit denied: VDF receipt rejected.",
         JobError::Runtime(_) => "Host Error: runtime fault.",
     }
 }

@@ -78,8 +78,8 @@ pub fn verify_preimage(preimage: &[u8], payment_hash: &[u8; 32]) -> bool {
 
 /// Mock sequential VDF used for delayed cancellation.
 ///
-/// Production would swap this for MinRoot (`x → x^{1/5} mod p`). Tests use a
-/// cheap modular step so delay can be advanced without wall-clock waits.
+/// Production would swap this for the Wesolowski VDF (`mesh-transport::vdf_sybil`).
+/// Tests use a cheap modular step so delay can be advanced without wall-clock waits.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MockVdf {
     /// Seed / starting value for the chain.

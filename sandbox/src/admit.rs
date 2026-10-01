@@ -1,154 +1,177 @@
-//! Job admit gate: Ephemeral Job DID + VDF receipt verification.
+//! Ephemeral Job DID admission: VDF-backed anti-spam gate for the sandbox admit path.
 //!
-//! # Contract (docs/interface-contracts.md)
-//! Creating / admitting a job requires a verifiable VDF burn bound to a
-//! 32-byte Ephemeral Job DID. Transport owns production MinRoot
-//! (`mesh-transport::vdf_sybil`); this crate owns the **sandbox admit hook**
-//! so guest work never starts without a receipt check.
+//! # Background
 //!
-//! # Stub vs production MinRoot
-//! [`DomainSeparatedHashVdfStub`] is a **clearly labeled** sequential,
-//! domain-separated hash proof-of-work used for unit tests and local admit
-//! wiring. It is **not** MinRoot and must not be treated as Sybil-hard in
-//! production.
+//! A job enters the sandbox with a [`VdfReceipt`]: a self-certifying receipt
+//! binding a 64-bit seed to a VDF output after `steps` sequential squarings.
+//! [`admit_job`] verifies the receipt against the configured [`VdfVerifier`}
+//! and returns the deterministic Ephemeral Job DID. Admission is "verify
+//! cheaply, burn work once": minting costs the prover `steps` sequential
+//! squarings, verification costs milliseconds.
 //!
-//! [`MinRootVdfVerifier`] duplicates the transport MinRoot sequential map and
-//! SHA-256 DID mint **without** depending on `mesh-transport` (avoids circular
-//! deps). Production nodes should use it (or a transport pre-check) via
-//! [`VdfVerifier`].
+//! # VDF construction (Wesolowski over RSA-2048)
 //!
-//! # Stable error codes
-//! [`AdmitError::code`] returns a stable `SCREAMING_SNAKE` token suitable for
-//! mesh logs and cross-language diagnostics (`MISSING_VDF`, `INVALID_VDF`, …).
+//! The receipt math mirrors `mesh-transport::vdf_sybil` exactly: the sandbox
+//! cannot depend on mesh-transport (that would be a circular dependency), so
+//! the Wesolowski arithmetic is duplicated here and the duplication is pinned
+//! by a cross-crate consistency test in `mesh-transport` (transport-issued
+//! proofs admit through this verifier and sandbox-issued receipts verify in
+//! transport). Byte-exact spec shared by both crates:
+//!
+//! - Domain: `b"mossymesh.vdf.wesolowski.v1"`.
+//! - `hash_to_group(input, t)`: 8x SHA-256(`domain || 0x01 || input_be8 ||
+//!   t_be8 || counter_be4`), 2048 bits, reduced to `[2, N-1]`.
+//! - Fiat-Shamir: SHA-256(`domain || 0x02 || x_be256 || y_be256 || t_be8 ||
+//!   counter_be4`); first 16 bytes with bits 127 and 0 set, incremented until
+//!   a 128-bit prime (trial division below 1000, then 12 Miller-Rabin rounds
+//!   with fixed prime bases).
+//! - Verify: `pi^l * x^(2^t mod l) = y (mod N)`; no loop over `t`.
+//! - DID: `SHA-256(y_be256 || job_meta)`.
+//!
+//! The group modulus is the RSA-2048 challenge integer (617-digit RSA Labs
+//! semiprime). The trust assumption: factoring it stays infeasible. Anyone
+//! who learns the factors evaluates the VDF in `O(log t)`, collapsing the
+//! Sybil gate. See `mesh-transport::vdf_sybil` for the full rationale.
+//!
+//! # Test vs production parameters
+//!
+//! | Constant | Value | Use |
+//! | --- | --- | --- |
+//! | [`PRODUCTION_ITERATIONS`] | 50_000_000 | delay target |
+//! | [`MOBILE_ITERATIONS`] | 25_000_000 | battery-constrained provers |
+//! | [`DEFAULT_TEST_ITERATIONS`] | 16 | unit / integration tests only |
+//! | [`MAX_TEST_ITERATIONS`] | 10_000 | hard cap for `for_tests` verifier |
+//!
+//! Policy knobs on [`WesolowskiVdfVerifier`]:
+//! - `min_steps`: reject receipts below this many steps (Sybil floor).
+//! - `required_modulus_id`: when `Some`, only receipts minted under that
+//!   registered group are admitted.
 
-use serde::{Deserialize, Serialize};
+use num_bigint::BigUint;
 use sha2::{Digest, Sha256};
+use std::sync::OnceLock;
 
-// --- modulus / iteration constants (mirrored from mesh-transport::vdf_sybil) ---
-
-/// Production iteration target (≈10 min). **Not** used by unit tests.
+/// Documented production iteration count (see module-level parameter table).
+/// Tests must use [`DEFAULT_TEST_ITERATIONS`] instead.
 pub const PRODUCTION_ITERATIONS: u64 = 50_000_000;
 
-/// Mobile iteration floor for old / low-end Android devices (issue #39).
-///
-/// Rationale: 50M steps take ≈10 min on reference hardware (≈83k MinRoot
-/// steps/s for this u64 implementation) but >20 min on old phones (<42k
-/// steps/s), which prices honest mobile users out of the admit gate.
-/// 12.5M steps take ≈2.5 min at the reference rate and ≈5 min on the slowest
-/// supported devices, restoring usability.
-///
-/// Anti-Sybil honesty: MinRoot is strictly sequential, so no amount of
-/// parallelism shortens one evaluation; lowering the floor scales the
-/// per-identity cost down linearly (4x) but keeps it sequential. For
-/// high-value gates, pair this policy with stake/collateral requirements
-/// rather than relying on delay alone. Same production modulus as the
-/// reference policy: the field is never weakened.
-pub const MOBILE_ITERATIONS: u64 = 12_500_000;
+/// Reduced iteration count for battery-constrained provers.
+pub const MOBILE_ITERATIONS: u64 = 25_000_000;
 
-/// Production MinRoot modulus (prime, ≡ 3 mod 5). Mirror of transport.
-pub const PRODUCTION_MODULUS: u64 = 1_000_000_033;
-
-/// Default test iterations (orders of magnitude below production).
+/// Test-friendly default iteration count (orders of magnitude below production).
 pub const DEFAULT_TEST_ITERATIONS: u64 = 16;
 
-/// Default test modulus (prime 103 ≡ 3 mod 5).
-pub const DEFAULT_TEST_MODULUS: u64 = 103;
-
-/// Hard cap for test iteration requests.
+/// Hard upper bound for test iteration counts so runaway requests never enter
+/// the test path.
 pub const MAX_TEST_ITERATIONS: u64 = 10_000;
 
-/// `modulus_id` tag for the sandbox hash stub (not MinRoot).
-pub const MODULUS_ID_HASH_STUB: u32 = 0;
-/// `modulus_id` → [`DEFAULT_TEST_MODULUS`] MinRoot field.
-pub const MODULUS_ID_TEST_MINROOT: u32 = 1;
-/// `modulus_id` → [`PRODUCTION_MODULUS`] MinRoot field.
-pub const MODULUS_ID_PRODUCTION_MINROOT: u32 = 2;
+/// Byte length of group elements (2048-bit modulus).
+pub const VDF_MODULUS_BYTES: usize = 256;
 
-/// 32-byte Ephemeral Job DID (VDF-gated job identity).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// Registered group id for the RSA-2048 challenge modulus (the only
+/// production group). Must equal `mesh-transport`'s
+/// `MODULUS_ID_RSA2048_CHALLENGE`; the cross-crate consistency test pins this.
+pub const MODULUS_ID_WESOLOWSKI_RSA2048: u32 = 1;
+
+/// Domain separation shared with `mesh-transport::vdf_sybil`.
+const VDF_DOMAIN: &[u8] = b"mossymesh.vdf.wesolowski.v1";
+
+/// RSA-2048 challenge modulus, hex, split into 64-char chunks to avoid a
+/// single giant string literal.
+const VDF_MODULUS_HEX: &str = concat!(
+    "c7970ceedcc3b0754490201a7aa613cd73911081c790f5f1a8726f463550bb5b",
+    "7ff0db8e1ea1189ec72f93d1650011bd721aeeacc2acde32a04107f0648c2813",
+    "a31f5b0b7765ff8b44b4b6ffc93384b646eb09c7cf5e8592d40ea33c80039f35",
+    "b4f14a04b51f7bfd781be4d1673164ba8eb991c2c4d730bbbe35f592bdef524a",
+    "f7e8daefd26c66fc02c479af89d64d373f442709439de66ceb955f3ea37d5159",
+    "f6135809f85334b5cb1813addc80cd05609f10ac6a95ad65872c909525bdad32",
+    "bc729592642920f24c61dc5b3c3b7923e56b16a4d9d373d8721f24a3fc0f1b31",
+    "31f55615172866bccc30f95054c824e733a5eb6817f7bc16399d48c6361cc7e5",
+);
+
+static VDF_MODULUS: OnceLock<BigUint> = OnceLock::new();
+
+fn vdf_modulus() -> BigUint {
+    VDF_MODULUS
+        .get_or_init(|| {
+            BigUint::parse_bytes(VDF_MODULUS_HEX.as_bytes(), 16)
+                .expect("VDF_MODULUS_HEX must be valid hex")
+        })
+        .clone()
+}
+
+/// Ephemeral Job DID: `SHA-256(VDF_output_bytes || job_meta)`, 32 bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct JobDid(pub [u8; 32]);
 
 impl JobDid {
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
-
-    pub fn from_bytes(bytes: [u8; 32]) -> Self {
-        Self(bytes)
+    pub fn to_hex(&self) -> String {
+        self.0.iter().map(|b| format!("{b:02x}")).collect()
     }
 }
 
-impl core::fmt::Display for JobDid {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        for b in &self.0 {
-            write!(f, "{b:02x}")?;
-        }
-        Ok(())
-    }
-}
-
-/// Portable VDF receipt attached to a job admit request.
+/// Self-certifying VDF receipt presented to the admit gate.
 ///
-/// Field layout mirrors the logical `VdfProof` in interface-contracts.md
-/// (`start_x`, `steps`, `final_x`, `modulus_id`) plus the bound Job DID and
-/// job metadata used when minting the DID.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// `final_x` and `proof` are fixed [`VDF_MODULUS_BYTES`]-byte big-endian group
+/// elements (Wesolowski `y` and `pi`). `job_did` is the deterministic DID the
+/// receipt claims; admission recomputes and compares it.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VdfReceipt {
-    /// MinRoot / stub start state.
+    /// 64-bit VDF input seed.
     pub start_x: u64,
-    /// Sequential steps claimed (production ≈ 10 min wall-clock).
+    /// Claimed sequential squaring count.
     pub steps: u64,
-    /// Claimed final VDF state.
-    pub final_x: u64,
-    /// Parameter / curve id (stub / MinRoot registry tag).
+    /// Claimed VDF output `y` (256-byte big-endian).
+    pub final_x: Vec<u8>,
+    /// Wesolowski proof `pi` (256-byte big-endian).
+    pub proof: Vec<u8>,
+    /// Registered group id (must be [`MODULUS_ID_WESOLOWSKI_RSA2048`] when a
+    /// verifier pins it).
     pub modulus_id: u32,
-    /// Job metadata bound into DID mint.
+    /// Opaque job metadata bound into the DID.
     pub job_meta: Vec<u8>,
-    /// Claimed Ephemeral Job DID for this receipt.
+    /// Claimed Ephemeral Job DID.
     pub job_did: JobDid,
 }
 
-/// Errors from the sandbox job admit gate.
-///
-/// Variant set and [`Self::code`] tokens are part of the mesh error contract —
-/// do not rename codes without a coordinated protocol bump.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Reasons the admit gate rejects a receipt. Stable for logs / diagnostics.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum AdmitError {
     /// No VDF receipt was supplied (admit requires a proof).
     MissingVdf,
-    /// Receipt failed sequential VDF / stub verification.
+    /// Proof / equation failed, or a proof/output encoding was not a canonical
+    /// group element. Rejects in milliseconds; never scales with `steps`.
     InvalidVdf,
     /// Claimed Job DID does not match mint from `(final_x, job_meta)`.
     DidMismatch,
-    /// Step count below the verifier's minimum delay.
+    /// Claimed iteration count below the verifier's `min_steps`.
     InsufficientSteps,
-    /// Modulus / parameter set rejected by the verifier.
+    /// Group id not registered (unknown / weak group).
     InvalidModulus,
-    /// Receipt rejected by a custom verifier policy.
-    Rejected(String),
 }
 
 impl AdmitError {
-    /// Stable machine-readable error code (mesh logs / RPC).
-    pub fn code(&self) -> &'static str {
+    /// Stable machine-readable error code.
+    pub fn code(self) -> &'static str {
         match self {
             AdmitError::MissingVdf => "MISSING_VDF",
             AdmitError::InvalidVdf => "INVALID_VDF",
             AdmitError::DidMismatch => "DID_MISMATCH",
             AdmitError::InsufficientSteps => "INSUFFICIENT_STEPS",
             AdmitError::InvalidModulus => "INVALID_MODULUS",
-            AdmitError::Rejected(_) => "REJECTED",
         }
     }
 
-    pub fn as_str(&self) -> &str {
+    pub fn as_str(self) -> &'static str {
         match self {
-            AdmitError::MissingVdf => "Admit denied: missing VDF proof / receipt.",
-            AdmitError::InvalidVdf => "Admit denied: VDF receipt verification failed.",
-            AdmitError::DidMismatch => "Admit denied: Job DID does not match VDF receipt.",
-            AdmitError::InsufficientSteps => "Admit denied: VDF steps below minimum delay.",
-            AdmitError::InvalidModulus => "Admit denied: VDF modulus / parameter set invalid.",
-            AdmitError::Rejected(s) => s.as_str(),
+            AdmitError::MissingVdf => "admit rejected: missing VDF proof / receipt",
+            AdmitError::InvalidVdf => "admit rejected: invalid VDF proof or output",
+            AdmitError::DidMismatch => "admit rejected: Job DID does not match VDF receipt",
+            AdmitError::InsufficientSteps => "admit rejected: insufficient VDF steps",
+            AdmitError::InvalidModulus => "admit rejected: unregistered VDF group",
         }
     }
 }
@@ -161,299 +184,93 @@ impl core::fmt::Display for AdmitError {
 
 impl std::error::Error for AdmitError {}
 
-/// Pluggable VDF receipt checker used by the admit gate.
-///
-/// Production: [`MinRootVdfVerifier`] (or transport pre-check). Tests: use
-/// [`DomainSeparatedHashVdfStub`].
-pub trait VdfVerifier {
-    /// Return `Ok(())` when `receipt` proves the claimed sequential delay and
-    /// binds `receipt.job_did` to `(final_x, job_meta)`.
-    fn verify_receipt(&self, receipt: &VdfReceipt) -> Result<(), AdmitError>;
+fn pad_to_256(v: &BigUint) -> Vec<u8> {
+    let mut bytes = v.to_bytes_be();
+    if bytes.len() < VDF_MODULUS_BYTES {
+        let mut padded = vec![0u8; VDF_MODULUS_BYTES - bytes.len()];
+        padded.append(&mut bytes);
+        return padded;
+    }
+    bytes
 }
 
-/// Domain tag for the sandbox-local sequential hash PoW stub.
-///
-/// **NOT MinRoot.** Distinct domain prevents accidental cross-protocol reuse.
-pub const HASH_VDF_STUB_DOMAIN: &[u8] = b"mossymesh.sandbox.vdf.stub.v1";
-
-/// Default minimum sequential steps accepted by the hash stub in tests.
-pub const HASH_VDF_STUB_DEFAULT_MIN_STEPS: u64 = 8;
-
-/// **STUB ONLY** — sequential domain-separated hash proof-of-work.
-///
-/// Each step mixes the previous state with the step index and modulus id via
-/// a fixed SplitMix64-style round keyed by [`HASH_VDF_STUB_DOMAIN`]. This is
-/// intentionally simple, deterministic, and **not** a production VDF.
-///
-/// Full MinRoot (~10 min sequential delay) lives in `mesh-transport::vdf_sybil`
-/// and is mirrored by [`MinRootVdfVerifier`].
-#[derive(Clone, Debug)]
-pub struct DomainSeparatedHashVdfStub {
-    /// Reject receipts with fewer sequential steps than this floor.
-    pub min_steps: u64,
-}
-
-impl Default for DomainSeparatedHashVdfStub {
-    fn default() -> Self {
-        Self {
-            min_steps: HASH_VDF_STUB_DEFAULT_MIN_STEPS,
-        }
-    }
-}
-
-impl DomainSeparatedHashVdfStub {
-    pub fn new(min_steps: u64) -> Self {
-        Self { min_steps }
-    }
-
-    /// Evaluate the stub sequential map for `steps` iterations.
-    pub fn evaluate(start_x: u64, steps: u64, modulus_id: u32) -> u64 {
-        let mut state = start_x;
-        // Fold domain bytes once into the initial state so verification is
-        // domain-separated from other hash uses on the mesh.
-        state = mix64(state ^ domain_seed(), 0, modulus_id);
-        for i in 1..=steps {
-            state = mix64(state, i, modulus_id);
-        }
-        state
-    }
-
-    /// Mint a Job DID the same way the stub verifier expects:
-    /// `DID = H_domain(final_x_be || job_meta)`.
-    pub fn mint_job_did(final_x: u64, job_meta: &[u8]) -> JobDid {
-        mint_job_did_from_output(final_x, job_meta)
-    }
-
-    /// Build an honest receipt for tests / local admit wiring.
-    pub fn issue(&self, start_x: u64, steps: u64, modulus_id: u32, job_meta: &[u8]) -> VdfReceipt {
-        let final_x = Self::evaluate(start_x, steps, modulus_id);
-        let job_did = Self::mint_job_did(final_x, job_meta);
-        VdfReceipt {
-            start_x,
-            steps,
-            final_x,
-            modulus_id,
-            job_meta: job_meta.to_vec(),
-            job_did,
-        }
-    }
-}
-
-impl VdfVerifier for DomainSeparatedHashVdfStub {
-    fn verify_receipt(&self, receipt: &VdfReceipt) -> Result<(), AdmitError> {
-        if receipt.steps < self.min_steps {
-            return Err(AdmitError::InsufficientSteps);
-        }
-        let expected = Self::evaluate(receipt.start_x, receipt.steps, receipt.modulus_id);
-        if expected != receipt.final_x {
-            return Err(AdmitError::InvalidVdf);
-        }
-        let did = Self::mint_job_did(receipt.final_x, &receipt.job_meta);
-        if did != receipt.job_did {
-            return Err(AdmitError::DidMismatch);
-        }
-        Ok(())
-    }
-}
-
-// --- MinRoot verifier (duplicated check; no mesh-transport dependency) --------
-
-/// Production-oriented MinRoot sequential verifier for the sandbox admit path.
-///
-/// Mirrors `mesh-transport::vdf_sybil` evaluate/verify + SHA-256 Job DID mint
-/// without importing that crate (workspace layering / no circular deps).
-#[derive(Clone, Debug)]
-pub struct MinRootVdfVerifier {
-    /// Reject receipts with fewer sequential steps than this floor.
-    ///
-    /// Tests: [`DEFAULT_TEST_ITERATIONS`] or lower. Production policy should
-    /// require [`PRODUCTION_ITERATIONS`] (or a calibrated minimum).
-    pub min_steps: u64,
-    /// When set, only this modulus is accepted (after resolving `modulus_id`).
-    pub required_modulus: Option<u64>,
-}
-
-impl Default for MinRootVdfVerifier {
-    fn default() -> Self {
-        // Secure default: production policy. The old test-grade default
-        // (16 steps, any modulus) silently admitted toy receipts whenever a
-        // daemon was built with `Default::default()`, downgrading the
-        // anti-Sybil gate to a suggestion. Tests must opt in explicitly
-        // via `for_tests`.
-        Self::production()
-    }
-}
-
-impl MinRootVdfVerifier {
-    pub fn new(min_steps: u64) -> Self {
-        Self {
-            min_steps,
-            required_modulus: None,
-        }
-    }
-
-    /// Production policy: require production iteration floor + production modulus.
-    pub fn production() -> Self {
-        Self {
-            min_steps: PRODUCTION_ITERATIONS,
-            required_modulus: Some(PRODUCTION_MODULUS),
-        }
-    }
-
-    /// Mobile policy (issue #39): production modulus with the recalibrated
-    /// [`MOBILE_ITERATIONS`] floor for old Android devices. See the constant
-    /// docs for the calibration rationale and Sybil-cost discussion.
-    pub fn mobile() -> Self {
-        Self {
-            min_steps: MOBILE_ITERATIONS,
-            required_modulus: Some(PRODUCTION_MODULUS),
-        }
-    }
-
-    /// Test policy: small iteration floor + test modulus.
-    pub fn for_tests(min_steps: u64) -> Self {
-        let min_steps = min_steps.clamp(1, MAX_TEST_ITERATIONS);
-        Self {
-            min_steps,
-            required_modulus: Some(DEFAULT_TEST_MODULUS),
-        }
-    }
-
-    /// Resolve receipt `modulus_id` to a concrete field modulus.
-    ///
-    /// Only the two registered moduli are accepted. There is no escape
-    /// hatch for embedding arbitrary small primes: an attacker-controlled
-    /// `modulus_id` must never select a weak field.
-    pub fn resolve_modulus(modulus_id: u32) -> Option<u64> {
-        match modulus_id {
-            MODULUS_ID_TEST_MINROOT => Some(DEFAULT_TEST_MODULUS),
-            MODULUS_ID_PRODUCTION_MINROOT => Some(PRODUCTION_MODULUS),
-            _ => None,
-        }
-    }
-
-    /// Evaluate MinRoot sequential map (same step as transport).
-    pub fn evaluate(start_x: u64, steps: u64, modulus: u64) -> Option<u64> {
-        if steps == 0 || !validate_minroot_modulus(modulus) {
-            return None;
-        }
-        let mut current = start_x;
-        for i in 1..=steps {
-            current = compute_minroot_step(current, i, modulus)?;
-        }
-        Some(current)
-    }
-
-    /// SHA-256 Job DID mint (matches transport `mint_ephemeral_job_did`).
-    pub fn mint_job_did(final_x: u64, job_meta: &[u8]) -> JobDid {
+fn hash_to_group(input: u64, iterations: u64, n: &BigUint) -> BigUint {
+    let mut bytes = Vec::with_capacity(VDF_MODULUS_BYTES);
+    for counter in 0..8u32 {
         let mut hasher = Sha256::new();
-        hasher.update(final_x.to_be_bytes());
-        hasher.update(job_meta);
+        hasher.update(VDF_DOMAIN);
+        hasher.update([0x01]);
+        hasher.update(input.to_be_bytes());
+        hasher.update(iterations.to_be_bytes());
+        hasher.update(counter.to_be_bytes());
+        bytes.extend_from_slice(&hasher.finalize());
+    }
+    let v = BigUint::from_bytes_be(&bytes);
+    let two = BigUint::from(2u32);
+    (v % (n - &two)) + two
+}
+
+fn fiat_shamir_prime(x_be: &[u8], y_be: &[u8], iterations: u64) -> BigUint {
+    let mut counter = 0u32;
+    loop {
+        let mut hasher = Sha256::new();
+        hasher.update(VDF_DOMAIN);
+        hasher.update([0x02]);
+        hasher.update(x_be);
+        hasher.update(y_be);
+        hasher.update(iterations.to_be_bytes());
+        hasher.update(counter.to_be_bytes());
         let digest = hasher.finalize();
-        let mut out = [0u8; 32];
-        out.copy_from_slice(&digest);
-        JobDid(out)
-    }
-
-    /// Build an honest MinRoot receipt for tests (test modulus id).
-    pub fn issue_test(
-        &self,
-        start_x: u64,
-        steps: u64,
-        job_meta: &[u8],
-    ) -> Result<VdfReceipt, AdmitError> {
-        let steps = steps.clamp(1, MAX_TEST_ITERATIONS);
-        let modulus = DEFAULT_TEST_MODULUS;
-        let final_x = Self::evaluate(start_x, steps, modulus).ok_or(AdmitError::InvalidModulus)?;
-        let job_did = Self::mint_job_did(final_x, job_meta);
-        Ok(VdfReceipt {
-            start_x,
-            steps,
-            final_x,
-            modulus_id: MODULUS_ID_TEST_MINROOT,
-            job_meta: job_meta.to_vec(),
-            job_did,
-        })
+        let mut candidate = BigUint::from_bytes_be(&digest[..16]);
+        candidate.set_bit(127, true);
+        candidate.set_bit(0, true);
+        if is_probable_prime(&candidate) {
+            return candidate;
+        }
+        counter = counter.wrapping_add(1);
     }
 }
 
-impl VdfVerifier for MinRootVdfVerifier {
-    fn verify_receipt(&self, receipt: &VdfReceipt) -> Result<(), AdmitError> {
-        if receipt.steps == 0 {
-            return Err(AdmitError::InvalidVdf);
-        }
-        if receipt.steps < self.min_steps {
-            return Err(AdmitError::InsufficientSteps);
-        }
-        let modulus =
-            Self::resolve_modulus(receipt.modulus_id).ok_or(AdmitError::InvalidModulus)?;
-        if !validate_minroot_modulus(modulus) {
-            return Err(AdmitError::InvalidModulus);
-        }
-        if let Some(req) = self.required_modulus {
-            if modulus != req {
-                return Err(AdmitError::InvalidModulus);
-            }
-        }
-        let expected = Self::evaluate(receipt.start_x, receipt.steps, modulus)
-            .ok_or(AdmitError::InvalidVdf)?;
-        if expected != receipt.final_x {
-            return Err(AdmitError::InvalidVdf);
-        }
-        let did = Self::mint_job_did(receipt.final_x, &receipt.job_meta);
-        if did != receipt.job_did {
-            return Err(AdmitError::DidMismatch);
-        }
-        Ok(())
-    }
-}
+const SMALL_PRIMES: &[u64] = &[
+    3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71, 73, 79, 83, 89, 97,
+    101, 103, 107, 109, 113, 127, 131, 137, 139, 149, 151, 157, 163, 167, 173, 179, 181, 191, 193,
+    197, 199, 211, 223, 227, 229, 233, 239, 241, 251, 257, 263, 269, 271, 277, 281, 283, 293, 307,
+    311, 313, 317, 331, 337, 347, 349, 353, 359, 367, 373, 379, 383, 389, 397, 401, 409, 419, 421,
+    431, 433, 439, 443, 449, 457, 461, 463, 467, 479, 487, 491, 499, 503, 509, 521, 523, 541, 547,
+    557, 563, 569, 571, 577, 587, 593, 599, 601, 607, 613, 617, 619, 631, 641, 643, 647, 653, 659,
+    661, 673, 677, 683, 691, 701, 709, 719, 727, 733, 739, 743, 751, 757, 761, 769, 773, 787, 797,
+    809, 811, 821, 823, 827, 829, 839, 853, 857, 859, 863, 877, 881, 883, 887, 907, 911, 919, 929,
+    937, 941, 947, 953, 967, 971, 977, 983, 991, 997,
+];
 
-/// Strong MinRoot modulus checks (mirror of transport `validate_modulus`).
-pub fn validate_minroot_modulus(p: u64) -> bool {
-    if p <= 5 || p.is_multiple_of(2) {
-        return false;
-    }
-    if p % 5 == 1 {
-        return false;
-    }
-    let num = 2u128 * p as u128 - 1;
-    if !num.is_multiple_of(5) {
-        return false;
-    }
-    is_prime_u64(p)
-}
+const MR_BASES: &[u64] = &[2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37];
 
-fn is_prime_u64(n: u64) -> bool {
-    if n < 2 {
-        return false;
-    }
-    const SMALL: &[u64] = &[2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37];
-    for &p in SMALL {
-        if n == p {
-            return true;
-        }
-        if n.is_multiple_of(p) {
+fn is_probable_prime(n: &BigUint) -> bool {
+    for &p in SMALL_PRIMES {
+        if n % p == BigUint::from(0u32) {
             return false;
         }
     }
-    let mut d = n - 1;
+    let one = BigUint::from(1u32);
+    let mut d = n - &one;
     let mut s = 0u32;
-    while d.is_multiple_of(2) {
-        d /= 2;
+    while !d.bit(0) {
+        d >>= 1;
         s += 1;
     }
-    const WITNESSES: &[u64] = &[2, 3, 5, 7, 11, 13, 23];
-    'witness: for &a in WITNESSES {
-        if a % n == 0 {
+    let n_minus_1 = n - &one;
+    'witness: for &a in MR_BASES {
+        let a = BigUint::from(a);
+        if a >= *n {
             continue;
         }
-        let mut x = mod_exp(a, d, n);
-        if x == 1 || x == n - 1 {
+        let mut x = a.modpow(&d, n);
+        if x == one || x == n_minus_1 {
             continue 'witness;
         }
         for _ in 1..s {
-            x = ((x as u128 * x as u128) % n as u128) as u64;
-            if x == n - 1 {
+            x = (&x * &x) % n;
+            if x == n_minus_1 {
                 continue 'witness;
             }
         }
@@ -462,281 +279,437 @@ fn is_prime_u64(n: u64) -> bool {
     true
 }
 
-fn fifth_root_exponent(p: u64) -> Option<u64> {
-    if p < 5 || p % 5 == 1 {
+/// Evaluate the Wesolowski VDF: `(y, pi)` for seed `input` and delay `steps`.
+/// Returns `None` for zero steps.
+fn evaluate_wesolowski(input: u64, steps: u64, n: &BigUint) -> Option<(Vec<u8>, Vec<u8>)> {
+    if steps == 0 {
         return None;
     }
-    let num = 2u128 * p as u128 - 1;
-    if num.is_multiple_of(5) {
-        return Some((num / 5) as u64);
+    let x = hash_to_group(input, steps, n);
+    let mut y = x.clone();
+    for _ in 0..steps {
+        y = (&y * &y) % n;
     }
-    None
-}
-
-fn mod_exp(mut base: u64, mut exp: u64, modulus: u64) -> u64 {
-    if modulus <= 1 {
-        return 0;
-    }
-    let mut result: u64 = 1;
-    base %= modulus;
-    while exp > 0 {
-        if exp & 1 == 1 {
-            result = ((result as u128 * base as u128) % modulus as u128) as u64;
+    let y_be = pad_to_256(&y);
+    let ell = fiat_shamir_prime(&pad_to_256(&x), &y_be, steps);
+    let mut pi = BigUint::from(1u32);
+    let mut r = BigUint::from(1u32);
+    for _ in 0..steps {
+        let two_r = &r + &r;
+        pi = (&pi * &pi) % n;
+        if two_r >= ell {
+            pi = (&pi * &x) % n;
         }
-        exp >>= 1;
-        base = ((base as u128 * base as u128) % modulus as u128) as u64;
+        r = two_r % &ell;
     }
-    result
+    Some((y_be, pad_to_256(&pi)))
 }
 
-fn compute_minroot_step(x: u64, i: u64, p: u64) -> Option<u64> {
-    let d = fifth_root_exponent(p)?;
-    if p <= 1 {
-        return None;
+/// Policy interface for the admit gate.
+pub trait VdfVerifier {
+    /// Minimum accepted sequential step count.
+    fn min_steps(&self) -> u64;
+    /// Required registered group id, or `None` to accept any registered group.
+    fn required_modulus_id(&self) -> Option<u32>;
+    /// Verify a receipt's VDF proof (fast verification; cost independent of `steps`).
+    fn verify_receipt(&self, receipt: &VdfReceipt) -> Result<(), AdmitError>;
+    /// Deterministic Ephemeral Job DID: `SHA-256(final_x || job_meta)`.
+    fn mint_job_did(final_x: &[u8], job_meta: &[u8]) -> JobDid {
+        let mut hasher = Sha256::new();
+        hasher.update(final_x);
+        hasher.update(job_meta);
+        let digest = hasher.finalize();
+        let mut out = [0u8; 32];
+        out.copy_from_slice(&digest);
+        JobDid(out)
     }
-    let base = (x as u128 + i as u128) % p as u128;
-    Some(mod_exp(base as u64, d, p))
 }
 
-/// Admit a job when the attached VDF receipt verifies under `verifier`.
-///
-/// On success returns the receipt's [`JobDid`] (identity under which the guest
-/// may load / run). Callers should bind that DID to the subsequent [`crate::Job`].
-pub fn admit_job(receipt: &VdfReceipt, verifier: &impl VdfVerifier) -> Result<JobDid, AdmitError> {
+/// Policy for the production Wesolowski VDF admission.
+#[derive(Clone, Debug)]
+pub struct WesolowskiVdfVerifier {
+    /// Minimum accepted step count.
+    pub min_steps: u64,
+    /// Required group id when `Some` ([`MODULUS_ID_WESOLOWSKI_RSA2048`]).
+    pub required_modulus_id: Option<u32>,
+}
+
+impl WesolowskiVdfVerifier {
+    pub fn new(min_steps: u64, required_modulus_id: Option<u32>) -> Self {
+        Self {
+            min_steps,
+            required_modulus_id,
+        }
+    }
+
+    /// Production policy: full delay, RSA-2048 group pinned.
+    pub fn production() -> Self {
+        Self::new(PRODUCTION_ITERATIONS, Some(MODULUS_ID_WESOLOWSKI_RSA2048))
+    }
+
+    /// Battery-constrained policy.
+    pub fn mobile() -> Self {
+        Self::new(MOBILE_ITERATIONS, Some(MODULUS_ID_WESOLOWSKI_RSA2048))
+    }
+
+    /// Test policy: small delays, RSA-2048 group pinned, minimum steps
+    /// configurable (clamped to `1..=MAX_TEST_ITERATIONS`).
+    pub fn for_tests(min_steps: u64) -> Self {
+        Self::new(
+            min_steps.clamp(1, MAX_TEST_ITERATIONS),
+            Some(MODULUS_ID_WESOLOWSKI_RSA2048),
+        )
+    }
+
+    /// Mint a test receipt with a real Wesolowski evaluation (small delays only).
+    pub fn issue_test(
+        &self,
+        start_x: u64,
+        steps: u64,
+        job_meta: &[u8],
+    ) -> Result<VdfReceipt, AdmitError> {
+        let (final_x, proof) =
+            evaluate_wesolowski(start_x, steps, &vdf_modulus()).ok_or(AdmitError::InvalidVdf)?;
+        Ok(VdfReceipt {
+            start_x,
+            steps,
+            job_did: Self::mint_job_did(&final_x, job_meta),
+            final_x,
+            proof,
+            modulus_id: MODULUS_ID_WESOLOWSKI_RSA2048,
+            job_meta: job_meta.to_vec(),
+        })
+    }
+}
+
+impl VdfVerifier for WesolowskiVdfVerifier {
+    fn min_steps(&self) -> u64 {
+        self.min_steps
+    }
+
+    fn required_modulus_id(&self) -> Option<u32> {
+        self.required_modulus_id
+    }
+
+    fn verify_receipt(&self, receipt: &VdfReceipt) -> Result<(), AdmitError> {
+        // Policy checks first: all cheap integer comparisons.
+        if receipt.steps < self.min_steps {
+            return Err(AdmitError::InsufficientSteps);
+        }
+        if let Some(required) = self.required_modulus_id {
+            if receipt.modulus_id != required {
+                return Err(AdmitError::InvalidModulus);
+            }
+        } else if receipt.modulus_id != MODULUS_ID_WESOLOWSKI_RSA2048 {
+            // No pin: still only registered groups are admitted.
+            return Err(AdmitError::InvalidModulus);
+        }
+        if receipt.steps == 0 {
+            return Err(AdmitError::InvalidVdf);
+        }
+        let n = vdf_modulus();
+        // Encodings must be canonical group elements before any arithmetic.
+        if receipt.final_x.len() != VDF_MODULUS_BYTES || receipt.proof.len() != VDF_MODULUS_BYTES {
+            return Err(AdmitError::InvalidVdf);
+        }
+        let y = BigUint::from_bytes_be(&receipt.final_x);
+        let pi = BigUint::from_bytes_be(&receipt.proof);
+        let one = BigUint::from(1u32);
+        if y < one || y >= n || pi < one || pi >= n {
+            return Err(AdmitError::InvalidVdf);
+        }
+        // Fast verification: pi^l * x^(2^steps mod l) = y (mod N).
+        let x = hash_to_group(receipt.start_x, receipt.steps, &n);
+        let ell = fiat_shamir_prime(&pad_to_256(&x), &receipt.final_x, receipt.steps);
+        let r = BigUint::from(2u32).modpow(&BigUint::from(receipt.steps), &ell);
+        let lhs = (pi.modpow(&ell, &n) * x.modpow(&r, &n)) % &n;
+        if lhs != y {
+            return Err(AdmitError::InvalidVdf);
+        }
+        Ok(())
+    }
+}
+
+/// Default production admission verifier: full VDF delay, RSA-2048 group pinned.
+impl Default for WesolowskiVdfVerifier {
+    fn default() -> Self {
+        Self::production()
+    }
+}
+
+/// Admit a job receipt under the given verifier, returning its Ephemeral Job
+/// DID. Rejects when the proof is invalid, the steps are below policy, the
+/// group is not registered, or the claimed DID does not match the recomputed one.
+pub fn admit_job<V: VdfVerifier>(receipt: &VdfReceipt, verifier: &V) -> Result<JobDid, AdmitError> {
     verifier.verify_receipt(receipt)?;
-    Ok(receipt.job_did)
+    let did = V::mint_job_did(&receipt.final_x, &receipt.job_meta);
+    if did != receipt.job_did {
+        return Err(AdmitError::DidMismatch);
+    }
+    Ok(did)
 }
 
 /// Admit only when a receipt is present; `None` → [`AdmitError::MissingVdf`].
 ///
 /// Use this at RPC / worker boundaries that accept optional attachments so
 /// missing proofs cannot skip the gate.
-pub fn admit_job_required(
+pub fn admit_job_required<V: VdfVerifier>(
     receipt: Option<&VdfReceipt>,
-    verifier: &impl VdfVerifier,
+    verifier: &V,
 ) -> Result<JobDid, AdmitError> {
     let receipt = receipt.ok_or(AdmitError::MissingVdf)?;
     admit_job(receipt, verifier)
 }
 
-// --- internal hashing helpers for the stub path (no extra crate deps) --------
+// ---------------------------------------------------------------------------
+// Hash-stub verifier (tests only)
+// ---------------------------------------------------------------------------
 
-fn domain_seed() -> u64 {
-    // Fixed 64-bit fold of HASH_VDF_STUB_DOMAIN for domain separation.
-    let mut h = 0xcbf2_9ce4_8422_2325u64; // FNV-1a offset basis
-    for &b in HASH_VDF_STUB_DOMAIN {
-        h ^= b as u64;
-        h = h.wrapping_mul(0x100_0000_01b3);
+/// Domain separation for the hash stub.
+pub const HASH_VDF_DOMAIN: &[u8] = b"mossymesh.vdf.hashstub.v1";
+/// Registered group id for the stub verifier (not a real VDF group).
+pub const MODULUS_ID_HASH_STUB: u32 = 0xFFFF_FF01;
+/// Test-friendly default minimum steps for the stub.
+pub const HASH_VDF_STUB_DEFAULT_MIN_STEPS: u64 = 1;
+
+/// Non-VDF stub verifier for admit-path tests that must not burn sequential
+/// work. Evaluates `SHA-256(DOMAIN || start_x || steps || modulus_id)` as a
+/// stand-in group element. Never use for Sybil resistance.
+#[derive(Clone, Debug)]
+pub struct DomainSeparatedHashVdfStub {
+    /// Minimum accepted step count.
+    pub min_steps: u64,
+}
+
+impl DomainSeparatedHashVdfStub {
+    pub fn new(min_steps: u64) -> Self {
+        Self { min_steps }
     }
-    h
-}
 
-/// SplitMix64-style mix; deterministic across platforms.
-fn mix64(state: u64, step: u64, modulus_id: u32) -> u64 {
-    let mut z = state
-        .wrapping_add(0x9E37_79B9_7F4A_7C15)
-        .wrapping_add(step)
-        .wrapping_add(u64::from(modulus_id));
-    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-    z ^ (z >> 31)
-}
+    /// Stub stand-in for the group element (32 bytes, big-endian).
+    pub fn evaluate(start_x: u64, steps: u64, modulus_id: u32) -> u64 {
+        let mut hasher = Sha256::new();
+        hasher.update(HASH_VDF_DOMAIN);
+        hasher.update(start_x.to_be_bytes());
+        hasher.update(steps.to_be_bytes());
+        hasher.update(modulus_id.to_be_bytes());
+        let digest = hasher.finalize();
+        let mut bytes = [0u8; 8];
+        bytes.copy_from_slice(&digest[..8]);
+        u64::from_be_bytes(bytes)
+    }
 
-/// Expand `(final_x, job_meta)` into a 32-byte Job DID via domain-separated mixing.
-fn mint_job_did_from_output(final_x: u64, job_meta: &[u8]) -> JobDid {
-    let mut out = [0u8; 32];
-    // Four 64-bit lanes, each seeded differently, absorb meta bytes.
-    let seeds = [
-        final_x,
-        final_x ^ domain_seed(),
-        final_x.wrapping_mul(0x9E37_79B9_7F4A_7C15),
-        !final_x,
-    ];
-    for (lane, seed) in seeds.iter().enumerate() {
-        let mut state = mix64(*seed, lane as u64, 0);
-        for (i, &b) in job_meta.iter().enumerate() {
-            state = mix64(state ^ (b as u64), (i as u64).wrapping_add(1), lane as u32);
+    /// Build an honest receipt for tests / local admit wiring.
+    pub fn issue(&self, start_x: u64, steps: u64, modulus_id: u32, job_meta: &[u8]) -> VdfReceipt {
+        let final_x = Self::evaluate(start_x, steps, modulus_id);
+        let final_bytes = final_x.to_be_bytes().to_vec();
+        VdfReceipt {
+            start_x,
+            steps,
+            final_x: final_bytes.clone(),
+            proof: Vec::new(),
+            modulus_id,
+            job_meta: job_meta.to_vec(),
+            job_did: Self::mint_job_did(&final_bytes, job_meta),
         }
-        // Absorb length to avoid simple suffix collisions.
-        state = mix64(state, job_meta.len() as u64, 0xffff_ffff);
-        out[lane * 8..(lane + 1) * 8].copy_from_slice(&state.to_be_bytes());
     }
-    JobDid(out)
+}
+
+impl Default for DomainSeparatedHashVdfStub {
+    fn default() -> Self {
+        Self::new(HASH_VDF_STUB_DEFAULT_MIN_STEPS)
+    }
+}
+
+impl VdfVerifier for DomainSeparatedHashVdfStub {
+    fn min_steps(&self) -> u64 {
+        self.min_steps
+    }
+
+    fn required_modulus_id(&self) -> Option<u32> {
+        // Test-only stub: the modulus id is folded into the hash, not pinned.
+        None
+    }
+
+    fn verify_receipt(&self, receipt: &VdfReceipt) -> Result<(), AdmitError> {
+        if receipt.steps < self.min_steps {
+            return Err(AdmitError::InsufficientSteps);
+        }
+        let final_x = u64::from_be_bytes(
+            receipt
+                .final_x
+                .as_slice()
+                .try_into()
+                .map_err(|_| AdmitError::InvalidVdf)?,
+        );
+        let expected = Self::evaluate(receipt.start_x, receipt.steps, receipt.modulus_id);
+        if expected != final_x {
+            return Err(AdmitError::InvalidVdf);
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Instant;
+
+    fn test_verifier() -> WesolowskiVdfVerifier {
+        WesolowskiVdfVerifier::for_tests(4)
+    }
 
     #[test]
-    fn honest_receipt_admits() {
-        let stub = DomainSeparatedHashVdfStub::new(8);
-        let receipt = stub.issue(42, 16, 1, b"job-meta-A");
-        let did = admit_job(&receipt, &stub).expect("honest receipt must admit");
+    fn wesolowski_honest_receipt_admits() {
+        let v = test_verifier();
+        let meta = b"job-42";
+        let receipt = v.issue_test(11, 8, meta).expect("issue test receipt");
+        assert_eq!(receipt.modulus_id, MODULUS_ID_WESOLOWSKI_RSA2048);
+        assert_eq!(receipt.final_x.len(), VDF_MODULUS_BYTES);
+        assert_eq!(receipt.proof.len(), VDF_MODULUS_BYTES);
+        let did = admit_job(&receipt, &v).expect("admit honest receipt");
         assert_eq!(did, receipt.job_did);
-    }
-
-    #[test]
-    fn tampered_final_x_rejected() {
-        let stub = DomainSeparatedHashVdfStub::default();
-        let mut receipt = stub.issue(7, 12, 2, b"meta");
-        receipt.final_x = receipt.final_x.wrapping_add(1);
         assert_eq!(
-            admit_job(&receipt, &stub).unwrap_err(),
-            AdmitError::InvalidVdf
+            did,
+            WesolowskiVdfVerifier::mint_job_did(&receipt.final_x, meta)
         );
-        assert_eq!(AdmitError::InvalidVdf.code(), "INVALID_VDF");
     }
 
     #[test]
-    fn did_mismatch_rejected() {
-        let stub = DomainSeparatedHashVdfStub::default();
-        let mut receipt = stub.issue(1, 10, 0, b"meta");
-        receipt.job_did.0[0] ^= 0xff;
-        assert_eq!(
-            admit_job(&receipt, &stub).unwrap_err(),
-            AdmitError::DidMismatch
+    fn wesolowski_tampered_output_rejected() {
+        let v = test_verifier();
+        let mut receipt = v.issue_test(11, 8, b"job-42").expect("issue");
+        let last = receipt.final_x.len() - 1;
+        receipt.final_x[last] ^= 0x01;
+        assert_eq!(admit_job(&receipt, &v).unwrap_err(), AdmitError::InvalidVdf);
+    }
+
+    #[test]
+    fn wesolowski_mutated_proof_rejected() {
+        let v = test_verifier();
+        let mut receipt = v.issue_test(11, 8, b"job-42").expect("issue");
+        let last = receipt.proof.len() - 1;
+        receipt.proof[last] ^= 0x01;
+        assert_eq!(admit_job(&receipt, &v).unwrap_err(), AdmitError::InvalidVdf);
+    }
+
+    #[test]
+    fn wesolowski_malformed_encoding_rejected() {
+        let v = test_verifier();
+        let mut receipt = v.issue_test(11, 8, b"job-42").expect("issue");
+        receipt.proof = vec![0u8; 32];
+        assert_eq!(admit_job(&receipt, &v).unwrap_err(), AdmitError::InvalidVdf);
+        let mut receipt = v.issue_test(11, 8, b"job-42").expect("issue");
+        receipt.final_x = vec![0xffu8; VDF_MODULUS_BYTES];
+        assert_eq!(admit_job(&receipt, &v).unwrap_err(), AdmitError::InvalidVdf);
+    }
+
+    #[test]
+    fn wesolowski_garbage_rejected_in_fraction_of_eval_time() {
+        // Issue #199: garbage receipts must be cheap to reject; rejection
+        // cost must not scale with the claimed step count.
+        let v = WesolowskiVdfVerifier::for_tests(8);
+        let meta = b"job-garbage";
+        let start = Instant::now();
+        let _honest = v.issue_test(7, 4_000, meta).expect("issue");
+        let eval_time = start.elapsed();
+
+        // Deterministic garbage: decodes below N but fails the equation.
+        let final_x = vec![0x5au8; VDF_MODULUS_BYTES];
+        let receipt = VdfReceipt {
+            start_x: 7,
+            steps: 4_000,
+            final_x: final_x.clone(),
+            proof: vec![0xa5u8; VDF_MODULUS_BYTES],
+            modulus_id: MODULUS_ID_WESOLOWSKI_RSA2048,
+            job_meta: meta.to_vec(),
+            job_did: WesolowskiVdfVerifier::mint_job_did(&final_x, meta),
+        };
+        let start = Instant::now();
+        let err = admit_job(&receipt, &v).unwrap_err();
+        let reject_time = start.elapsed();
+        assert_eq!(err, AdmitError::InvalidVdf);
+        assert!(
+            reject_time * 4 < eval_time,
+            "garbage rejection ({reject_time:?}) must be a fraction of eval ({eval_time:?})"
         );
-        assert_eq!(AdmitError::DidMismatch.code(), "DID_MISMATCH");
     }
 
     #[test]
-    fn insufficient_steps_rejected() {
-        let stub = DomainSeparatedHashVdfStub::new(32);
-        let receipt = stub.issue(9, 8, 0, b"meta"); // steps < min
-        assert_eq!(
-            admit_job(&receipt, &stub).unwrap_err(),
-            AdmitError::InsufficientSteps
-        );
-        assert_eq!(AdmitError::InsufficientSteps.code(), "INSUFFICIENT_STEPS");
-    }
-
-    #[test]
-    fn missing_vdf_rejected_with_stable_code() {
-        let stub = DomainSeparatedHashVdfStub::default();
-        let err = admit_job_required(None, &stub).unwrap_err();
-        assert_eq!(err, AdmitError::MissingVdf);
-        assert_eq!(err.code(), "MISSING_VDF");
-    }
-
-    #[test]
-    fn admit_job_required_accepts_present_receipt() {
-        let stub = DomainSeparatedHashVdfStub::new(8);
-        let receipt = stub.issue(3, 16, 0, b"present");
-        let did = admit_job_required(Some(&receipt), &stub).unwrap();
-        assert_eq!(did, receipt.job_did);
-    }
-
-    #[test]
-    fn did_binds_meta_and_output() {
-        let a = DomainSeparatedHashVdfStub::mint_job_did(100, b"A");
-        let b = DomainSeparatedHashVdfStub::mint_job_did(100, b"B");
-        let c = DomainSeparatedHashVdfStub::mint_job_did(101, b"A");
-        assert_ne!(a, b);
-        assert_ne!(a, c);
-    }
-
-    #[test]
-    fn evaluate_is_deterministic() {
-        let x = DomainSeparatedHashVdfStub::evaluate(5, 20, 3);
-        let y = DomainSeparatedHashVdfStub::evaluate(5, 20, 3);
-        assert_eq!(x, y);
-        // Different steps → different output (with overwhelming probability /
-        // for this mix; check against shorter prefix chain).
-        let shorter = DomainSeparatedHashVdfStub::evaluate(5, 19, 3);
-        assert_ne!(x, shorter);
-    }
-
-    #[test]
-    fn minroot_honest_receipt_admits() {
-        let v = MinRootVdfVerifier::for_tests(8);
-        let receipt = v.issue_test(42, 16, b"minroot-job").unwrap();
-        let did = admit_job(&receipt, &v).expect("minroot receipt must admit");
-        assert_eq!(did, receipt.job_did);
-        assert_eq!(receipt.modulus_id, MODULUS_ID_TEST_MINROOT);
-    }
-
-    #[test]
-    fn minroot_tampered_output_rejected() {
-        let v = MinRootVdfVerifier::for_tests(4);
-        let mut receipt = v.issue_test(7, 8, b"m").unwrap();
-        receipt.final_x = receipt.final_x.wrapping_add(1);
-        assert_eq!(admit_job(&receipt, &v).unwrap_err().code(), "INVALID_VDF");
-    }
-
-    #[test]
-    fn minroot_invalid_modulus_id_rejected() {
-        let v = MinRootVdfVerifier::for_tests(4);
-        let mut receipt = v.issue_test(1, 8, b"m").unwrap();
-        receipt.modulus_id = MODULUS_ID_HASH_STUB; // stub id, not MinRoot
+    fn wesolowski_invalid_group_rejected() {
+        let v = test_verifier();
+        let mut receipt = v.issue_test(11, 8, b"job-42").expect("issue");
+        receipt.modulus_id = 0xDEAD_BEEF;
         assert_eq!(
             admit_job(&receipt, &v).unwrap_err(),
             AdmitError::InvalidModulus
         );
-        assert_eq!(AdmitError::InvalidModulus.code(), "INVALID_MODULUS");
     }
 
     #[test]
-    fn minroot_insufficient_steps_uses_test_floor_not_production() {
-        let v = MinRootVdfVerifier::for_tests(32);
-        let receipt = v.issue_test(9, 8, b"meta").unwrap(); // steps < min
+    fn wesolowski_insufficient_steps_rejected() {
+        let v = WesolowskiVdfVerifier::for_tests(64);
+        let receipt = WesolowskiVdfVerifier::for_tests(4)
+            .issue_test(11, 16, b"job-42")
+            .expect("issue");
         assert_eq!(
             admit_job(&receipt, &v).unwrap_err(),
             AdmitError::InsufficientSteps
         );
-        // Production floor must remain documented and separated.
-        assert_eq!(PRODUCTION_ITERATIONS, 50_000_000);
-        const {
-            assert!(DEFAULT_TEST_ITERATIONS < PRODUCTION_ITERATIONS);
-            assert!(MAX_TEST_ITERATIONS < PRODUCTION_ITERATIONS);
-        }
-        let prod_policy = MinRootVdfVerifier::production();
-        assert_eq!(prod_policy.min_steps, PRODUCTION_ITERATIONS);
-        assert_eq!(prod_policy.required_modulus, Some(PRODUCTION_MODULUS));
+    }
+
+    #[test]
+    fn wesolowski_zero_steps_rejected() {
+        // for_tests clamps min_steps to >= 1, so a zero-step receipt is
+        // rejected at the policy floor before any arithmetic.
+        let v = WesolowskiVdfVerifier::for_tests(0);
+        assert_eq!(v.min_steps(), 1);
+        let receipt = VdfReceipt {
+            start_x: 1,
+            steps: 0,
+            final_x: vec![1u8; VDF_MODULUS_BYTES],
+            proof: vec![1u8; VDF_MODULUS_BYTES],
+            modulus_id: MODULUS_ID_WESOLOWSKI_RSA2048,
+            job_meta: b"job".to_vec(),
+            job_did: JobDid([0u8; 32]),
+        };
+        assert_eq!(
+            admit_job(&receipt, &v).unwrap_err(),
+            AdmitError::InsufficientSteps
+        );
+    }
+
+    #[test]
+    fn wesolowski_did_mismatch_rejected() {
+        let v = test_verifier();
+        let mut receipt = v.issue_test(11, 8, b"job-42").expect("issue");
+        receipt.job_did = JobDid([9u8; 32]);
+        assert_eq!(
+            admit_job(&receipt, &v).unwrap_err(),
+            AdmitError::DidMismatch
+        );
     }
 
     #[test]
     fn default_is_production_grade() {
-        // Issue #68: Default must not admit test-grade receipts.
-        let v = MinRootVdfVerifier::default();
-        assert_eq!(v.min_steps, PRODUCTION_ITERATIONS);
-        assert_eq!(v.required_modulus, Some(PRODUCTION_MODULUS));
-        // Unregistered modulus ids are rejected, no small-prime escape hatch.
-        assert_eq!(MinRootVdfVerifier::resolve_modulus(23), None);
-        assert_eq!(MinRootVdfVerifier::resolve_modulus(5), None);
-        assert_eq!(MinRootVdfVerifier::resolve_modulus(u32::MAX), None);
-    }
-
-    #[test]
-    fn validate_minroot_modulus_surface() {
-        assert!(validate_minroot_modulus(DEFAULT_TEST_MODULUS));
-        assert!(validate_minroot_modulus(PRODUCTION_MODULUS));
-        assert!(!validate_minroot_modulus(11));
-        assert!(!validate_minroot_modulus(9));
-    }
-
-    #[test]
-    fn mobile_policy_is_calibrated_not_weakened() {
-        // Issue #39: the mobile floor sits below production (usable on old
-        // phones) while keeping the production modulus and a sequential
-        // delay. A genuine 12.5M-step receipt is too slow for a unit test,
-        // so this pins the policy shape; below-floor rejection is covered
-        // by minroot_insufficient_steps_uses_test_floor_not_production.
-        let m = MinRootVdfVerifier::mobile();
-        assert_eq!(m.min_steps, MOBILE_ITERATIONS);
+        let v = WesolowskiVdfVerifier::default();
+        assert_eq!(v.min_steps(), PRODUCTION_ITERATIONS);
+        assert_eq!(v.required_modulus_id(), Some(MODULUS_ID_WESOLOWSKI_RSA2048));
+        assert_eq!(PRODUCTION_ITERATIONS, 50_000_000);
+        assert_eq!(MOBILE_ITERATIONS, 25_000_000);
         const {
+            assert!(DEFAULT_TEST_ITERATIONS < MAX_TEST_ITERATIONS);
+            assert!(MAX_TEST_ITERATIONS < PRODUCTION_ITERATIONS);
             assert!(MOBILE_ITERATIONS < PRODUCTION_ITERATIONS);
-            assert!(MOBILE_ITERATIONS > MAX_TEST_ITERATIONS);
         }
-        assert_eq!(m.required_modulus, Some(PRODUCTION_MODULUS));
-        // Below-floor receipts are rejected under the mobile policy
-        // (16 steps < 12.5M floor), before any modulus check runs.
-        let t = MinRootVdfVerifier::for_tests(8);
-        let receipt = t.issue_test(5, 16, b"m").unwrap();
-        assert_eq!(
-            admit_job(&receipt, &m).unwrap_err(),
-            AdmitError::InsufficientSteps
-        );
+    }
+
+    #[test]
+    fn production_modulus_is_rsa2048_challenge() {
+        let n = vdf_modulus();
+        assert_eq!(n.bits(), 2048);
+        let dec_expected = "25195908475657893494027183240048398571429282126204032027777137836043662020707595556264018525880784406918290641249515082189298559149176184502808489120072844992687392807287776735971418347270261896375014971824691165077613379859095700097330459748808428401797429100642458691817195118746121515172654632282216869987549182422433637259085141865462043576798423387184774447920739934236584823824281198163815010674810451660377306056201619676256133844143603833904414952634432190114657544454178424020924616515723350778707749817125772467962926386356373289912154831438167899885040445364023527381951378636564391212010397122822120720357";
+        assert_eq!(n.to_str_radix(10), dec_expected);
     }
 
     #[test]
@@ -746,6 +719,96 @@ mod tests {
         assert_eq!(AdmitError::DidMismatch.code(), "DID_MISMATCH");
         assert_eq!(AdmitError::InsufficientSteps.code(), "INSUFFICIENT_STEPS");
         assert_eq!(AdmitError::InvalidModulus.code(), "INVALID_MODULUS");
-        assert_eq!(AdmitError::Rejected("x".into()).code(), "REJECTED");
+        assert_eq!(
+            AdmitError::MissingVdf.as_str(),
+            "admit rejected: missing VDF proof / receipt"
+        );
+        assert_eq!(
+            AdmitError::InvalidVdf.as_str(),
+            "admit rejected: invalid VDF proof or output"
+        );
+        assert_eq!(
+            AdmitError::DidMismatch.as_str(),
+            "admit rejected: Job DID does not match VDF receipt"
+        );
+        assert_eq!(
+            AdmitError::InsufficientSteps.as_str(),
+            "admit rejected: insufficient VDF steps"
+        );
+        assert_eq!(
+            AdmitError::InvalidModulus.as_str(),
+            "admit rejected: unregistered VDF group"
+        );
+        assert!(format!("{}", AdmitError::InvalidVdf).contains("invalid VDF"));
+    }
+
+    #[test]
+    fn hash_stub_evaluate_is_deterministic() {
+        let a = DomainSeparatedHashVdfStub::evaluate(7, 42, MODULUS_ID_HASH_STUB);
+        let b = DomainSeparatedHashVdfStub::evaluate(7, 42, MODULUS_ID_HASH_STUB);
+        assert_eq!(a, b);
+        assert_ne!(
+            a,
+            DomainSeparatedHashVdfStub::evaluate(8, 42, MODULUS_ID_HASH_STUB)
+        );
+        assert_ne!(
+            a,
+            DomainSeparatedHashVdfStub::evaluate(7, 43, MODULUS_ID_HASH_STUB)
+        );
+    }
+
+    #[test]
+    fn hash_stub_defaults_are_safe_for_tests() {
+        let stub = DomainSeparatedHashVdfStub::default();
+        assert_eq!(stub.min_steps(), HASH_VDF_STUB_DEFAULT_MIN_STEPS);
+        assert_eq!(stub.required_modulus_id(), None);
+        assert_eq!(HASH_VDF_STUB_DEFAULT_MIN_STEPS, 1);
+    }
+
+    #[test]
+    fn hash_stub_issue_accepts_matching_receipt_and_rejects_tamper() {
+        let stub = DomainSeparatedHashVdfStub::new(5);
+        let meta = b"stub-job";
+        let receipt = stub.issue(123, 9, MODULUS_ID_HASH_STUB, meta);
+        assert_eq!(receipt.final_x.len(), 8);
+        let did = admit_job(&receipt, &stub).expect("stub receipt admits");
+        assert_eq!(did, receipt.job_did);
+
+        // Tampered final_x.
+        let mut bad = receipt.clone();
+        bad.final_x[7] ^= 0x01;
+        assert_eq!(admit_job(&bad, &stub).unwrap_err(), AdmitError::InvalidVdf);
+
+        // DID mismatch.
+        let mut bad_did = receipt.clone();
+        bad_did.job_did = JobDid([7u8; 32]);
+        assert_eq!(
+            admit_job(&bad_did, &stub).unwrap_err(),
+            AdmitError::DidMismatch
+        );
+    }
+
+    #[test]
+    fn hash_stub_enforces_min_steps() {
+        let stub = DomainSeparatedHashVdfStub::new(100);
+        let receipt = stub.issue(1, 5, MODULUS_ID_HASH_STUB, b"m");
+        assert_eq!(
+            admit_job(&receipt, &stub).unwrap_err(),
+            AdmitError::InsufficientSteps
+        );
+        let lenient = DomainSeparatedHashVdfStub::new(1);
+        admit_job(&receipt, &lenient).expect("meets min steps");
+    }
+
+    #[test]
+    fn admit_job_required_rejects_missing_receipt() {
+        let v = test_verifier();
+        let err = admit_job_required(None, &v).unwrap_err();
+        assert_eq!(err, AdmitError::MissingVdf);
+        assert_eq!(err.code(), "MISSING_VDF");
+
+        let receipt = v.issue_test(3, 6, b"req").expect("issue");
+        let did = admit_job_required(Some(&receipt), &v).expect("admit");
+        assert_eq!(did, receipt.job_did);
     }
 }
