@@ -474,6 +474,7 @@ version = "0.1.0"
 dependencies = [
  "bincode",
  "blake3",
+ "ed25519-dalek",
  "reed-solomon-erasure",
  "serde",
  "serde_cbor",
