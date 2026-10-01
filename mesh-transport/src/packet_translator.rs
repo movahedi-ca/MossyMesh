@@ -145,17 +145,29 @@ impl LoRaFragment {
 pub enum TranslateError {
     UnroutableIp(String),
     EmptyPayload,
-    FragmentTooLarge { len: usize, max: usize },
+    FragmentTooLarge {
+        len: usize,
+        max: usize,
+    },
     TruncatedHeader,
     TruncatedPayload,
     BadMagic,
     UnsupportedVersion(u8),
-    InvalidFragmentIndex { index: u16, count: u16 },
-    IncompleteReassembly { have: usize, need: usize },
+    InvalidFragmentIndex {
+        index: u16,
+        count: u16,
+    },
+    IncompleteReassembly {
+        have: usize,
+        need: usize,
+    },
     CrcMismatch,
     InconsistentMessage,
     /// Fragment header claims more fragments than [`MAX_REASSEMBLY_FRAGMENTS`].
-    FragmentCountTooLarge { count: u16, max: u16 },
+    FragmentCountTooLarge {
+        count: u16,
+        max: u16,
+    },
     Mac(String),
 }
 
