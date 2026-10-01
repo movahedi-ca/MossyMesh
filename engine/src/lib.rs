@@ -354,11 +354,14 @@ mod tests {
             let mut engine = EngineState::from_fen(fen).unwrap();
             // NB: shakmaty's Move::to() returns the ROOK square for castling
             // (Chess960 convention), so match the Castle variant by king
-            // square instead of filtering on to() == king destination.
+            // AND rook squares: both kingside and queenside share the king
+            // origin, and find() would otherwise always return kingside.
             let mv = engine
                 .get_moves()
                 .into_iter()
-                .find(|m| matches!(m, Move::Castle { king, .. } if *king == from))
+                .find(|m| {
+                    matches!(m, Move::Castle { king, rook } if *king == from && *rook == rook_from)
+                })
                 .unwrap_or_else(|| panic!("castle not legal: {from:?}->{king_to:?} in {fen}"));
             assert!(matches!(mv, Move::Castle { .. }), "expected Castle, got {mv:?}");
             engine.make_move(&mv).unwrap();
