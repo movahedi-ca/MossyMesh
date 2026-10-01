@@ -823,6 +823,7 @@ mod tests {
         let child = MptNode::Leaf {
             path: vec![],
             value: b"v".to_vec(),
+            cached: OnceLock::new(),
         };
         let err = insert_extension(vec![16], child, &[1], b"w".to_vec()).unwrap_err();
         assert!(matches!(err, ConsensusError::InvalidInput(_)));
