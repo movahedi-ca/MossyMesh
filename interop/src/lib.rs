@@ -103,6 +103,11 @@ pub async fn run_http_server() {
     let app = Router::new()
         .route("/api/v1/health", get(health_handler).post(health_handler))
         .route("/api/v1/submit_job", post(submit_job_handler))
+        // Issue #159: the OpenAPI spec documents these endpoints, so they
+        // must be reachable over HTTP, not only through handle_rest_call.
+        .route("/api/v1/liquidity", post(rest_shim_handler))
+        .route("/api/v1/twamm", post(rest_shim_handler))
+        .route("/api/v1/gateway", post(rest_shim_handler))
         .route("/api-docs/openapi.json", get(api_docs::serve_openapi_json))
         .merge(api_docs::swagger_ui());
 
@@ -115,6 +120,41 @@ pub async fn run_http_server() {
     )
     .await
     .unwrap();
+}
+
+/// Map an [`InteropError`] from the REST shim to an HTTP status.
+fn map_interop_error(e: InteropError) -> StatusCode {
+    match e {
+        InteropError::BadRequest => StatusCode::BAD_REQUEST,
+        InteropError::ConnectionRefused => StatusCode::NOT_FOUND,
+        InteropError::Timeout => StatusCode::GATEWAY_TIMEOUT,
+        InteropError::SpreadCapExceeded => StatusCode::UNPROCESSABLE_ENTITY,
+        InteropError::GatewayDormant => StatusCode::SERVICE_UNAVAILABLE,
+    }
+}
+
+/// Axum handler exposing the `/api/v1/{liquidity,twamm,gateway}` endpoints
+/// over HTTP via the [`handle_rest_call`] shim (issue #159).
+///
+/// Same auth and rate-limit gates as `submit_job`; the path selects the shim
+/// endpoint and the body is the shim payload.
+async fn rest_shim_handler(
+    uri: axum::http::Uri,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    body: String,
+) -> Result<String, StatusCode> {
+    if !check_auth(&headers) {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    if !check_rate_limit(addr.ip()) {
+        return Err(StatusCode::TOO_MANY_REQUESTS);
+    }
+    handle_rest_call(&AsyncApiRequest {
+        endpoint: uri.path().to_string(),
+        payload: body,
+    })
+    .map_err(map_interop_error)
 }
 
 async fn health_handler() -> &'static str {
@@ -1025,5 +1065,58 @@ mod tests {
         assert_eq!(sm.step(true), WsStep::Tick);
         assert_eq!(sm.consecutive_failures, 0);
         assert_eq!(sm.step(false), WsStep::Retry(Duration::from_secs(1)));
+    }
+
+    /// Issue #159: the shim endpoints are reachable through the HTTP handler
+    /// with the same auth/rate-limit gates as submit_job.
+    ///
+    /// Single test (not split): both phases touch the process-global
+    /// MESH_GATEWAY_TOKEN, and parallel tests must not race on it.
+    #[tokio::test]
+    async fn rest_shim_handler_serves_endpoints_and_enforces_auth() {
+        async fn call(path: &str, body: &str, headers: HeaderMap) -> Result<String, StatusCode> {
+            let uri: axum::http::Uri = path.parse().unwrap();
+            let addr: SocketAddr = "127.0.0.1:55991".parse().unwrap();
+            rest_shim_handler(uri, ConnectInfo(addr), headers, body.into()).await
+        }
+
+        // Phase 1: no token configured, the documented endpoints serve.
+        let liq = call("/api/v1/liquidity", "status", HeaderMap::new())
+            .await
+            .unwrap();
+        assert!(liq.contains("internet_reconnected"), "got: {liq}");
+
+        let tw = call("/api/v1/twamm", "status", HeaderMap::new())
+            .await
+            .unwrap();
+        assert!(tw.contains("max_spread_bps"), "got: {tw}");
+
+        let gw = call("/api/v1/gateway", "status", HeaderMap::new())
+            .await
+            .unwrap();
+        assert!(gw.contains("active"), "got: {gw}");
+
+        // Unknown paths 404 via the shim mapping.
+        let err = call("/api/v1/nope", "", HeaderMap::new())
+            .await
+            .unwrap_err();
+        assert_eq!(err, StatusCode::NOT_FOUND);
+
+        // Phase 2: with a token configured, auth is enforced.
+        std::env::set_var("MESH_GATEWAY_TOKEN", "test-token-159");
+        let err = call("/api/v1/liquidity", "status", HeaderMap::new())
+            .await
+            .unwrap_err();
+        assert_eq!(err, StatusCode::UNAUTHORIZED);
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            "Bearer test-token-159".parse().unwrap(),
+        );
+        let ok = call("/api/v1/liquidity", "status", headers).await;
+        assert!(ok.is_ok(), "authed call should pass: {ok:?}");
+
+        std::env::remove_var("MESH_GATEWAY_TOKEN");
     }
 }
