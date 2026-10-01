@@ -11,7 +11,7 @@
 //! to the same state after exchanging op logs (commutative merge).
 
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 /// Stable identifier for a mesh agent / island replica.
 pub type AgentId = u64;
@@ -127,6 +127,14 @@ struct LwwValue {
     time: LogicalTime,
 }
 
+/// Max deletes held for not-yet-seen insert targets (issue #195). A delete
+/// whose target insert never arrives (lost packet, or a malicious island
+/// spraying `Delete { target: random }` ops) would otherwise accumulate in
+/// `pending_deletes` forever. Past the cap, the smallest `ItemId` is evicted
+/// first: deterministic across replicas (unlike `HashSet` iteration order),
+/// and each entry is one small id, so the set stays far under the 10 MB cap.
+pub const MAX_PENDING_DELETES: usize = 10_000;
+
 /// Document CRDT: RGA sequence + LWW map, with full op log for deltas.
 #[derive(Clone, Debug, Default)]
 pub struct Doc {
@@ -144,7 +152,7 @@ pub struct Doc {
     /// integrated ahead of its target `Insert` is held here and applied
     /// when the insert arrives, so replicas converge regardless of op
     /// arrival order.
-    pending_deletes: HashSet<ItemId>,
+    pending_deletes: BTreeSet<ItemId>,
     /// Full causal op log for delta export.
     op_log: Vec<CrdtOp>,
     /// Per-agent highest integrated sequence number.
@@ -360,7 +368,12 @@ impl Doc {
                 } else {
                     // Target not inserted yet: hold the delete so a
                     // later-arriving insert is born deleted (issue #31).
+                    // Bounded (issue #195): evict the smallest ItemId first
+                    // when over the cap, deterministically.
                     self.pending_deletes.insert(target);
+                    while self.pending_deletes.len() > MAX_PENDING_DELETES {
+                        self.pending_deletes.pop_first();
+                    }
                 }
                 self.applied_deletes.insert(op_id);
                 self.note_vector(op_id);
@@ -502,6 +515,36 @@ fn map_op_time(op: &CrdtOp) -> LogicalTime {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pending_deletes_is_bounded_with_deterministic_eviction() {
+        // Issue #195: deletes for never-arriving targets (lost packets, or a
+        // malicious island spraying `Delete { target: random }`) must not grow
+        // `pending_deletes` without bound. Past the cap the smallest ItemId is
+        // evicted first; BTreeSet order makes this deterministic across replicas.
+        let mut d = Doc::new(1);
+        let n = MAX_PENDING_DELETES + 500;
+        for i in 0..n {
+            d.integrate(CrdtOp::Delete {
+                target: ItemId::new(2, i as u64),
+                op_id: ItemId::new(1, 100_000 + i as u64),
+            });
+        }
+        assert_eq!(d.pending_deletes.len(), MAX_PENDING_DELETES);
+        // Smallest-first eviction: the survivors are the largest ids.
+        let min_survivor = d.pending_deletes.iter().next().unwrap();
+        assert_eq!(*min_survivor, ItemId::new(2, 500));
+        // Hold-for-late-insert still works within the cap: a late insert for
+        // a retained target is born deleted (issue #31 behavior preserved).
+        let late = ItemId::new(2, n as u64 - 1);
+        d.integrate(CrdtOp::Insert {
+            id: late,
+            parent: None,
+            content: 'z',
+        });
+        assert!(d.items.get(&late).unwrap().deleted);
+        assert_eq!(d.text(), "");
+    }
 
     #[test]
     fn delete_before_insert_converges() {
