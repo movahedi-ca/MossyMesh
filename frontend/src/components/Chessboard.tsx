@@ -2,6 +2,7 @@ import { useCallback, useMemo, useState } from "react";
 import { Chess, type Square, type Move } from "chess.js";
 import { playMoveSound, playCheckmateSound } from "../lib/sound";
 import { formatEval, useEngineEval } from "../lib/engineEval";
+import { getStrings, initialLang, type AppLang, type AppStrings } from "../i18n";
 import "./Chessboard.css";
 
 const FILES = ["a", "b", "c", "d", "e", "f", "g", "h"] as const;
@@ -16,28 +17,30 @@ function squareName(file: number, rank: number): Square {
   return `${FILES[file]}${rank}` as Square;
 }
 
-function describeStatus(game: Chess): string {
+function describeStatus(game: Chess, t: AppStrings["chess"]): string {
   if (game.isCheckmate()) {
-    return game.turn() === "w" ? "Checkmate — Black wins" : "Checkmate — White wins";
+    return game.turn() === "w" ? t.checkmateBlackWins : t.checkmateWhiteWins;
   }
-  if (game.isStalemate()) return "Stalemate — draw";
-  if (game.isThreefoldRepetition()) return "Draw — threefold repetition";
-  if (game.isInsufficientMaterial()) return "Draw — insufficient material";
-  if (game.isDraw()) return "Draw";
+  if (game.isStalemate()) return t.stalemate;
+  if (game.isThreefoldRepetition()) return t.threefold;
+  if (game.isInsufficientMaterial()) return t.insufficientMaterial;
+  if (game.isDraw()) return t.draw;
   if (game.isCheck()) {
-    return game.turn() === "w" ? "White in check" : "Black in check";
+    return game.turn() === "w" ? t.whiteInCheck : t.blackInCheck;
   }
-  return game.turn() === "w" ? "White to move" : "Black to move";
+  return game.turn() === "w" ? t.whiteToMove : t.blackToMove;
 }
 
 export const Chessboard = () => {
+  const [lang] = useState<AppLang>(initialLang);
+  const t = getStrings(lang);
   const [game, setGame] = useState(() => new Chess());
   const [selected, setSelected] = useState<Square | null>(null);
   const [legalTargets, setLegalTargets] = useState<Square[]>([]);
   const [lastMove, setLastMove] = useState<{ from: Square; to: Square } | null>(null);
   const [history, setHistory] = useState<Move[]>([]);
-  const [status, setStatus] = useState("White to move · offline engine ready");
-  const [meshNote, setMeshNote] = useState("Moves stay on-device until a mesh peer is found.");
+  const [status, setStatus] = useState(t.chess.whiteToMoveReady);
+  const [meshNote, setMeshNote] = useState(t.chess.noteLocalOnly);
   const [mode, setMode] = useState<"offline" | "lora">("offline");
 
   const board = useMemo(() => game.board(), [game]);
@@ -53,26 +56,24 @@ export const Chessboard = () => {
     async (from: Square, to: Square) => {
       if (!navigator.onLine || mode === "offline") {
         setMeshNote(
-          mode === "lora"
-            ? "Offline: move queued for LoRa / local DHT relay"
-            : "Offline: move applied locally (no internet required)",
+          mode === "lora" ? t.chess.noteQueuedLora : t.chess.noteAppliedLocal,
         );
         return;
       }
-      setMeshNote("Submitting move to mesh…");
+      setMeshNote(t.chess.noteSubmitting);
       try {
         const response = await fetch("/api/v1/submit_job", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ action: "move", from, to, fen }),
         });
-        if (response.ok) setMeshNote("Move confirmed by swarm");
-        else setMeshNote("Swarm rejected ack — kept local state");
+        if (response.ok) setMeshNote(t.chess.noteConfirmed);
+        else setMeshNote(t.chess.noteRejected);
       } catch {
-        setMeshNote("Mesh unreachable — kept local (DHT island mode)");
+        setMeshNote(t.chess.noteUnreachable);
       }
     },
-    [fen, mode],
+    [fen, mode, t],
   );
 
   const applyMove = useCallback(
@@ -85,20 +86,20 @@ export const Chessboard = () => {
         result = null;
       }
       if (!result) {
-        setStatus("Illegal move");
+        setStatus(t.chess.illegalMove);
         clearSelection();
         return;
       }
       setGame(next);
       setHistory(next.history({ verbose: true }));
       setLastMove({ from, to });
-      setStatus(describeStatus(next));
+      setStatus(describeStatus(next, t.chess));
       clearSelection();
       if (next.isCheckmate()) playCheckmateSound();
       else playMoveSound();
       void publishMove(from, to);
     },
-    [game, clearSelection, publishMove],
+    [game, clearSelection, publishMove, t],
   );
 
   const onSquareClick = useCallback(
@@ -131,8 +132,8 @@ export const Chessboard = () => {
     setHistory([]);
     setLastMove(null);
     clearSelection();
-    setStatus("White to move · offline engine ready");
-    setMeshNote("New game — local FEN store reset");
+    setStatus(t.chess.whiteToMoveReady);
+    setMeshNote(t.chess.noteNewGame);
   };
 
   const undoMove = () => {
@@ -143,9 +144,9 @@ export const Chessboard = () => {
     setHistory(hist);
     const prev = hist[hist.length - 1];
     setLastMove(prev ? { from: prev.from, to: prev.to } : null);
-    setStatus(describeStatus(next));
+    setStatus(describeStatus(next, t.chess));
     clearSelection();
-    setMeshNote("Undid last move (local only)");
+    setMeshNote(t.chess.noteUndone);
   };
 
   const formatHistory = () => {
@@ -166,11 +167,11 @@ export const Chessboard = () => {
           {status}
           <span
             className="engine-eval"
-            title={engineEval.source === "daemon" ? "Score from the mesh engine sandbox" : "Local on-device evaluation"}
-            aria-label={`Engine evaluation ${engineEval.score === null ? "loading" : formatEval(engineEval.score)} pawns`}
+            title={engineEval.source === "daemon" ? t.chess.evalDaemonTitle : t.chess.evalLocalTitle}
+            aria-label={t.chess.evalAria(engineEval.score === null ? t.chess.evalLoading : formatEval(engineEval.score))}
             style={{ marginLeft: 8, opacity: 0.85, fontVariantNumeric: "tabular-nums" }}
           >
-            {engineEval.score === null ? "…" : `Eval ${formatEval(engineEval.score)}`}
+            {engineEval.score === null ? "…" : t.chess.evalText(formatEval(engineEval.score))}
           </span>
         </div>
         <div className="mesh-note">{meshNote}</div>
@@ -214,10 +215,10 @@ export const Chessboard = () => {
         )}
       </div>
       <div className="chess-history" aria-live="polite">
-        <div className="history-label">Move history</div>
+        <div className="history-label">{t.chess.moveHistory}</div>
         <div className="history-scroll">
           {history.length === 0 ? (
-            <span className="history-empty">No moves yet — play offline</span>
+            <span className="history-empty">{t.chess.noMoves}</span>
           ) : (
             formatHistory().map((line) => (
               <span key={line} className="history-entry">{line}</span>
@@ -227,15 +228,15 @@ export const Chessboard = () => {
       </div>
       <div className="chessboard-controls">
         <button type="button" className={`mesh-btn ${mode === "offline" ? "primary" : "secondary"}`}
-          onClick={() => { setMode("offline"); setMeshNote("Play offline — pure local chess engine"); }}>
-          Play offline
+          onClick={() => { setMode("offline"); setMeshNote(t.chess.notePlayOffline); }}>
+          {t.chess.playOffline}
         </button>
         <button type="button" className={`mesh-btn ${mode === "lora" ? "primary" : "secondary"}`}
-          onClick={() => { setMode("lora"); setMeshNote("Seeking peer via LoRa / mesh island…"); }}>
-          Seek peer via LoRa
+          onClick={() => { setMode("lora"); setMeshNote(t.chess.noteSeeking); }}>
+          {t.chess.seekPeer}
         </button>
-        <button type="button" className="mesh-btn secondary" onClick={undoMove} disabled={history.length === 0}>Undo</button>
-        <button type="button" className="mesh-btn secondary" onClick={resetGame}>New game</button>
+        <button type="button" className="mesh-btn secondary" onClick={undoMove} disabled={history.length === 0}>{t.chess.undo}</button>
+        <button type="button" className="mesh-btn secondary" onClick={resetGame}>{t.chess.newGame}</button>
       </div>
     </div>
   );

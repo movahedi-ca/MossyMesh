@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { useDaemonHealth } from "../lib/daemonHealth";
+import { getStrings, initialLang, type AppLang } from "../i18n";
 
 /**
  * Toast shown when the local mesh daemon becomes unreachable (#19, #204).
@@ -12,6 +13,8 @@ import { useDaemonHealth } from "../lib/daemonHealth";
  * this makes the disconnect visible so failures are not silent.
  */
 export const DaemonToast = () => {
+  const [lang] = useState<AppLang>(initialLang);
+  const t = getStrings(lang);
   const health = useDaemonHealth();
   const [dismissed, setDismissed] = useState(false);
 
@@ -24,14 +27,11 @@ export const DaemonToast = () => {
   return (
     <div className="daemon-toast" role="alert" aria-live="assertive">
       <span className="status-dot daemon-toast-dot" aria-hidden="true" />
-      <span>
-        Local daemon unreachable. Island mode active: chess and mesh
-        continue on-device.
-      </span>
+      <span>{t.daemonToast.message}</span>
       <button
         type="button"
         className="daemon-toast-close"
-        aria-label="Dismiss notification"
+        aria-label={t.daemonToast.dismiss}
         onClick={() => setDismissed(true)}
       >
         ✕

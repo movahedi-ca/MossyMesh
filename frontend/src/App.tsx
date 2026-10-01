@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import "./App.css";
 import { NetworkVisualizer } from "./components/NetworkVisualizer";
 import { Chessboard } from "./components/Chessboard";
@@ -5,40 +6,43 @@ import { NetworkStatus } from "./components/NetworkStatus";
 import { DaemonToast } from "./components/DaemonToast";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { MeshProvider, useOnlineStatus } from "./hooks/useMeshNetwork";
+import { getStrings, initialLang, type AppLang } from "./i18n";
 
-const OfflineFallback = () => (
+const OfflineFallback = ({ lang }: { lang: AppLang }) => (
   <div className="offline-notice" role="status">
-    You are currently offline. Local mesh functions and chess remain available on this island.
+    {getStrings(lang).app.offlineNotice}
   </div>
 );
 
-const NotFound = () => (
+const NotFound = ({ lang }: { lang: AppLang }) => (
   <div className="not-found" role="alert">
-    Error 404: The requested Captive Portal page was not found on this node.
+    {getStrings(lang).app.notFound}
   </div>
 );
 
 function PortalBody() {
   const path = window.location.pathname;
   const online = useOnlineStatus();
+  const [lang] = useState<AppLang>(initialLang);
+  const t = getStrings(lang);
+
+  useEffect(() => {
+    document.documentElement.lang = lang;
+  }, [lang]);
 
   return (
     <div className="app-shell">
       <div className="glass-panel">
         <NetworkStatus />
-        {path === "/404" && <NotFound />}
-        {!online && <OfflineFallback />}
+        {path === "/404" && <NotFound lang={lang} />}
+        {!online && <OfflineFallback lang={lang} />}
         <div className="status-badge portal-badge">
           <span className="status-dot" />
-          CAPTIVE PORTAL ACTIVE
+          {t.app.badge}
         </div>
         <h1>MessyMash</h1>
-        <p className="subtitle">Offline-First Decentralized Chess Grid</p>
-        <p className="portal-copy">
-          Welcome to the offline Captive Portal. You are connected to an isolated mesh island.
-          No internet is required. Game state lives on-device; peers sync via Kademlia DHT and LoRa
-          when available.
-        </p>
+        <p className="subtitle">{t.app.subtitle}</p>
+        <p className="portal-copy">{t.app.portalCopy}</p>
         <Chessboard />
         <div className="visualizer-section">
           <NetworkVisualizer />
