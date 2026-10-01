@@ -44,7 +44,9 @@ pub use admit::{
     HASH_VDF_STUB_DOMAIN, MAX_TEST_ITERATIONS, MODULUS_ID_HASH_STUB, MODULUS_ID_PRODUCTION_MINROOT,
     MODULUS_ID_TEST_MINROOT, PRODUCTION_ITERATIONS, PRODUCTION_MODULUS,
 };
-/// Embedded engine.wasm loader (issue #38); `None` without `bundled-engine`.
+/// Embedded engine.wasm bytes (issue #38); consumed by
+/// [`HostRuntime::load_engine`](host::HostRuntime::load_engine).
+/// `None` without `bundled-engine`.
 pub use engine_bundle::engine_wasm_bytes;
 #[cfg(feature = "bundled-engine")]
 pub use engine_bundle::ENGINE_WASM_BYTES;

@@ -30,13 +30,9 @@ pub const ENGINE_WASM_BYTES: &[u8] = &[];
 /// Engine WASM bytes for the sandbox loader, or `None` when no bundle is
 /// embedded (feature off, or asset missing at compile time).
 ///
-/// Intended consumer (issue #171): the daemon cold-start path. The daemon
-/// should call this first and feed the bytes to [`crate::host::HostRuntime`]
-/// (or the native WAMR backend once linked), falling back to reading
-/// `sandbox/assets/engine.wasm` from disk when this returns `None`. That
-/// call site lives in the daemon boot file owned by another batch, so until
-/// it is wired there this function is exercised only by its own unit test;
-/// the signature and compile gating are kept stable for that consumer.
+/// Consumer (issue #171): [`crate::host::HostRuntime::load_engine`] calls
+/// this first and feeds the bytes to the runtime, falling back to reading
+/// `sandbox/assets/engine.wasm` from disk when this returns `None`.
 pub fn engine_wasm_bytes() -> Option<&'static [u8]> {
     #[cfg(all(feature = "bundled-engine", mossymesh_engine_wasm_bundled))]
     {

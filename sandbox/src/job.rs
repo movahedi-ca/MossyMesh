@@ -57,6 +57,9 @@ impl From<HostError> for JobError {
             HostError::ExportNotFound => JobError::ExportNotFound,
             HostError::InvalidModule => JobError::InvalidModule,
             HostError::AuxStackOverflow => JobError::AuxStackOverflow,
+            HostError::EngineNotFound => {
+                JobError::Runtime(HostError::EngineNotFound.as_str().to_string())
+            }
             HostError::Pool(e) => JobError::Runtime(e.as_str().to_string()),
         }
     }
