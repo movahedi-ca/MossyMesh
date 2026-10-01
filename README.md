@@ -29,7 +29,7 @@
 | Project Phase | Focus & Deliverables | Definition of Done (DoD) & Acceptance Criteria |
 | :--- | :--- | :--- |
 | **Phase 1: Transport** | Offline Wi-Fi domains, Captive Portal redirection, and reticulum-rs daemon builds. | A smartphone test packet successfully translates to a LoRa transmission and routes to an offline node using Kademlia DHT pathfinding. |
-| **Phase 2: Sandbox** | Integration of minroot-vdf-rs and WAMR environment deployment. | The sandbox enforces the 10 MiB RAM cap (host simulation by default; native WAMR via wasm_runtime_full_init when linked) and creating an Ephemeral Job DID requires burning a 10-minute sequential VDF. |
+| **Phase 2: Sandbox** | Integration of the Wesolowski VDF (fast verification) and WAMR environment deployment. | The sandbox enforces the 10 MiB RAM cap (host simulation by default; native WAMR via wasm_runtime_full_init when linked) and creating an Ephemeral Job DID requires burning a 10-minute sequential VDF. |
 | **Phase 3: Consensus** | Deployment of trie-db, nova-snark, and yrs CRDT-based merging architectures. | Edge nodes successfully verify the ledger via a sub-megabyte constant proof and disconnected islands merge data deterministically via binary deltas. |
 | **Phase 4: Logic** | Compile shakmaty loop to wasm32-wasip1 and bring lxmf-rs messaging online. | The WASM chess engine benchmarks at ~836 Mnps. Escrowed credits use Hashed Timelock Contracts (HTLCs) protected by VDF-Delayed Cancellation. |
 | **Phase 5: Interop** | UI layout serving, Reticulum_AsyncAPI_rs endpoints, and TWAMM orchestration. | Reconnecting to the internet spins up an OpenAPI gateway, bridging local liquidity to a global AMM using a TWAMM with a strict 2% max-spread cap. | <br> ## 4. Project Cost & Resource Management <br> ### Initial Hardware Baseline
@@ -48,7 +48,7 @@
 | :--- | :--- | :--- | :--- |
 | **Apple iOS Wi-Fi Drops (Kernel Panics)** | Critical | High | **Mitigate:** Mandate sudo rpi-update patches; force systemd-timesyncd offline time sync to local NTP prior to deployment. |
 | **Upstream Dependency Abandonment** | High | Medium | **Mitigate:** "Fork and Maintain" strategy. Vendor or fork core crates like reticulum-rs directly to the project organization to shield against bit-rot. |
-| **ASIC/GPU Spam Farms (Sybil Attacks)** | High | Medium | **Mitigate:** Require sequential MinRoot VDF calculations (x \to x^{1/5} \pmod p) to generate Ephemeral Job DIDs, raising the cost of parallel hardware. Sequentiality is heuristic and MinRoot is not memory-hard (see docs/math-minroot-vdf.md). |
+| **ASIC/GPU Spam Farms (Sybil Attacks)** | High | Medium | **Mitigate:** Require sequential Wesolowski VDF evaluation (repeated squaring mod the RSA-2048 challenge integer) to generate Ephemeral Job DIDs, raising the cost of parallel hardware. Verification is milliseconds regardless of delay (no CPU-DoS amplifier; see docs/math-wesolowski-vdf.md). |
 | **Storage Bloat Exhausting Edge RAM** | High | Medium | **Mitigate:** Utilize nova-snark MicroSpartan preprocessing to ensure verification circuits remain constant-sized (~10,000 gates). |
 | **Regional SSD Hub Destruction** | High | Low | **Mitigate:** Securely anchor 200-byte ZK-SNARK ledger proofs to neighboring macro-islands via High-Frequency (Ham) radio bursts up to 300 miles away. |
 | **Solo Developer Burnout** | Critical | High | **Mitigate:** Adhere strictly to the 10-hour/week allocation constraint. Enforce sequential, phase-by-phase completion to minimize context-switching. |

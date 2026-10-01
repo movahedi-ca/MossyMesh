@@ -9,6 +9,7 @@ tokio = { version = "1.37.0", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
 log = "0.4.21"
 sha2 = "0.10"
+num-bigint = "0.4"
 chacha20poly1305 = "0.10"
 zeroize = { version = "1.8", features = ["derive"] }
 getrandom = "0.2"

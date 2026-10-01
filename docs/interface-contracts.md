@@ -64,10 +64,12 @@ TraceHash     = 32-byte hash-chain link of WASM execution trace
 
 | Field | Type | Notes |
 | --- | --- | --- |
-| `start_x` | field element / u64 stub | MinRoot start |
-| `steps` | `u64` | Sequential steps (~10 min wall in prod) |
-| `final_x` | field element / u64 stub | Claimed output |
-| `modulus_id` | `u32` / curve id | Parameter set |
+| `input` | `u64` seed | Hashed into the group via `hash_to_group` |
+| `params.iterations` | `u64` | Sequential squarings (~10 min wall in prod) |
+| `claimed_iterations` | `u64` | Must equal `params.iterations` (under-claims rejected) |
+| `output` | 256-byte big-endian | Claimed `y = x^(2^t) mod N` |
+| `proof` | 256-byte big-endian | Wesolowski `pi = x^floor(2^t / l) mod N` |
+| `params.modulus_id` | `u32` | Registered group (`1` = RSA-2048 challenge) |
 
 **Invariant:** Creating a new `JobId` without a verifiable VDF burn is rejected.
 

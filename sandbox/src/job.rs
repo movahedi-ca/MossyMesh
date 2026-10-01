@@ -113,7 +113,7 @@ impl Job {
     /// Verify a VDF receipt, then load the module under the global MEM_LIMIT pool.
     ///
     /// This is the Phase-2 production entry: no guest work without a Job DID.
-    /// Verification is mandatory (`verify_receipt` / MinRoot or stub).
+    /// Verification is mandatory (`verify_receipt` / Wesolowski or stub).
     pub fn admit_and_load(
         receipt: &VdfReceipt,
         verifier: &impl VdfVerifier,
@@ -156,7 +156,7 @@ impl Job {
         Ok(job)
     }
 
-    /// Bind an already-verified Job DID (e.g. transport pre-checked MinRoot).
+    /// Bind an already-verified Job DID (e.g. transport pre-checked the Wesolowski receipt).
     ///
     /// Crate-internal only (issue #181): binding a DID asserts the VDF receipt
     /// was verified elsewhere in this crate, and the public admit gate must not
@@ -262,7 +262,8 @@ mod tests {
     fn bad_receipt_never_loads_module() {
         let stub = DomainSeparatedHashVdfStub::default();
         let mut receipt = stub.issue(3, 10, 0, b"m");
-        receipt.final_x = receipt.final_x.wrapping_add(1);
+        let last = receipt.final_x.len() - 1;
+        receipt.final_x[last] ^= 0x01;
         let err = Job::admit_and_load(&receipt, &stub, b"\0asm").unwrap_err();
         assert!(matches!(err, JobError::Admit(AdmitError::InvalidVdf)));
         if let JobError::Admit(e) = err {
@@ -281,9 +282,9 @@ mod tests {
     }
 
     #[test]
-    fn minroot_admit_and_load() {
-        use crate::admit::MinRootVdfVerifier;
-        let v = MinRootVdfVerifier::for_tests(8);
+    fn wesolowski_admit_and_load() {
+        use crate::admit::WesolowskiVdfVerifier;
+        let v = WesolowskiVdfVerifier::for_tests(8);
         let receipt = v.issue_test(11, 16, b"chess-eval").unwrap();
         let mut job = Job::admit_and_load(&receipt, &v, b"\0asm").unwrap();
         assert!(job.is_admitted());

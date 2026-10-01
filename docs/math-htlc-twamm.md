@@ -77,7 +77,7 @@ On success: \( \sigma(H) \leftarrow \mathsf{VdfCancelled} \).
 
 **Invariant H4 (VDF gate).**  
 \( s < s^\star \Rightarrow \mathsf{vdf\_cancel} \) fails with \(\mathsf{VdfNotComplete}\).  
-Steps are sequential (\( x_{i+1} = f(x_i, i) \)); completing \( s^\star \) steps cannot be parallelized in the real MinRoot VDF (mock used only in tests).
+Steps are sequential (\( x_{i+1} = f(x_i, i) \)); completing \( s^\star \) steps cannot be parallelized in the real Wesolowski VDF (mock used only in tests).
 
 **Invariant H5 (single settlement).**  
 From \(\sigma \in \mathcal{T}\), every further \(\mathsf{claim}\), \(\mathsf{refund}\), or \(\mathsf{vdf\_cancel}\) fails with \(\mathsf{AlreadySettled}\).  
