@@ -343,19 +343,20 @@ fn handle_twamm(req: &AsyncApiRequest) -> Result<String, InteropError> {
         if let Some(exec) = exec_price {
             match book.stream_slice(&id, exec) {
                 Ok(fill) => {
-                    return Ok(format!(
-                        "{{\"order_id\":\"{}\",\"amount_in\":{},\"amount_out\":{},\"execution_price\":{},\"spread_bps\":{},\"max_spread_bps\":{},\"side\":\"{}\"}}",
-                        fill.order_id,
-                        fill.amount_in,
-                        fill.amount_out,
-                        fill.execution_price,
-                        fill.spread_bps,
-                        MAX_SPREAD_BPS,
-                        match side {
+                    // Issue #187: serialize, never hand-format.
+                    return Ok(serde_json::json!({
+                        "order_id": fill.order_id,
+                        "amount_in": fill.amount_in,
+                        "amount_out": fill.amount_out,
+                        "execution_price": fill.execution_price,
+                        "spread_bps": fill.spread_bps,
+                        "max_spread_bps": MAX_SPREAD_BPS,
+                        "side": match side {
                             OrderSide::Buy => "buy",
                             OrderSide::Sell => "sell",
-                        }
-                    ));
+                        },
+                    })
+                    .to_string());
                 }
                 Err(e) => {
                     println!("TWAMM stream error: {e}");
@@ -364,10 +365,13 @@ fn handle_twamm(req: &AsyncApiRequest) -> Result<String, InteropError> {
             }
         }
 
-        return Ok(format!(
-            "{{\"order_id\":\"{}\",\"status\":\"accepted\",\"slices\":{},\"max_spread_bps\":{}}}",
-            id, slices, MAX_SPREAD_BPS
-        ));
+        return Ok(serde_json::json!({
+            "order_id": id,
+            "status": "accepted",
+            "slices": slices,
+            "max_spread_bps": MAX_SPREAD_BPS,
+        })
+        .to_string());
     }
 
     Err(InteropError::BadRequest)
@@ -436,30 +440,38 @@ fn handle_liquidity(req: &AsyncApiRequest) -> Result<String, InteropError> {
             let gained = m
                 .accrue_offline_epochs(&node_id, epochs)
                 .map_err(|_| InteropError::BadRequest)?;
-            Ok(format!(
-                "{{\"node_id\":\"{}\",\"epochs\":{},\"points_gained\":{},\"total_points\":{}}}",
-                node_id,
-                epochs,
-                gained,
-                m.get(&node_id).map(|a| a.points).unwrap_or(0)
-            ))
+            // Issue #187: serialize, never hand-format (node_id is
+            // caller-controlled).
+            Ok(serde_json::json!({
+                "node_id": node_id,
+                "epochs": epochs,
+                "points_gained": gained,
+                "total_points": m.get(&node_id).map(|a| a.points).unwrap_or(0),
+            })
+            .to_string())
         }
         "claim" => {
             if node_id.is_empty() {
                 return Err(InteropError::BadRequest);
             }
             match m.claim_airdrop(&node_id) {
-                Ok(tokens) => Ok(format!(
-                    "{{\"node_id\":\"{}\",\"tokens_airdropped\":{},\"status\":\"claimed\"}}",
-                    node_id, tokens
-                )),
+                // Issue #187: serialize, never hand-format (node_id is
+                // caller-controlled).
+                Ok(tokens) => Ok(serde_json::json!({
+                    "node_id": node_id,
+                    "tokens_airdropped": tokens,
+                    "status": "claimed",
+                })
+                .to_string()),
                 // Idempotent claim (issue #46): a well-formed claim with
                 // nothing left to claim is not a malformed request, so it
                 // must not 400. Report zero tokens instead.
-                Err(liquidity::LiquidityError::NothingToClaim) => Ok(format!(
-                    "{{\"node_id\":\"{}\",\"tokens_airdropped\":0,\"status\":\"nothing_to_claim\"}}",
-                    node_id
-                )),
+                Err(liquidity::LiquidityError::NothingToClaim) => Ok(serde_json::json!({
+                    "node_id": node_id,
+                    "tokens_airdropped": 0,
+                    "status": "nothing_to_claim",
+                })
+                .to_string()),
                 Err(liquidity::LiquidityError::StillOffline) => Err(InteropError::GatewayDormant),
                 Err(_) => Err(InteropError::BadRequest),
             }
@@ -531,11 +543,12 @@ fn handle_gateway(req: &AsyncApiRequest) -> Result<String, InteropError> {
                 let mut gw = gateway().lock().map_err(|_| InteropError::Timeout)?;
                 let bal: u64 = bal.parse().unwrap_or(0);
                 gw.set_local_credit(acc.trim(), bal);
-                return Ok(format!(
-                    "{{\"account\":\"{}\",\"local_credit\":{}}}",
-                    acc.trim(),
-                    bal
-                ));
+                // Issue #187: serialize, never hand-format.
+                return Ok(serde_json::json!({
+                    "account": acc.trim(),
+                    "local_credit": bal,
+                })
+                .to_string());
             }
         }
     }

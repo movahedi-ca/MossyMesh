@@ -331,36 +331,32 @@ impl TwammEngine {
 
     /// JSON summary of open book state (for REST).
     pub fn status_json(&self) -> String {
-        let open: Vec<&TwammOrder> = self
+        // Issue #187: serialize, never hand-format; order ids are
+        // caller-influenced strings.
+        let open: Vec<serde_json::Value> = self
             .orders
             .iter()
             .filter(|o| o.remaining_in > 0 && o.slices_remaining > 0)
+            .map(|o| {
+                serde_json::json!({
+                    "id": o.id,
+                    "side": match o.side {
+                        OrderSide::Buy => "buy",
+                        OrderSide::Sell => "sell",
+                    },
+                    "remaining_in": o.remaining_in,
+                    "slices_remaining": o.slices_remaining,
+                    "reference_price": o.reference_price,
+                })
+            })
             .collect();
-        format!(
-            "{{\"max_spread_bps\":{},\"open_orders\":{},\"orders\":{}}}",
-            MAX_SPREAD_BPS,
-            open.len(),
-            serde_json_orders(&open)
-        )
-    }
-}
-
-fn serde_json_orders(orders: &[&TwammOrder]) -> String {
-    // Lightweight manual JSON to avoid requiring serde_json as a hard runtime dep path.
-    let parts: Vec<String> = orders
-        .iter()
-        .map(|o| {
-            let side = match o.side {
-                OrderSide::Buy => "buy",
-                OrderSide::Sell => "sell",
-            };
-            format!(
-                "{{\"id\":\"{}\",\"side\":\"{}\",\"remaining_in\":{},\"slices_remaining\":{},\"reference_price\":{}}}",
-                o.id, side, o.remaining_in, o.slices_remaining, o.reference_price
-            )
+        serde_json::json!({
+            "max_spread_bps": MAX_SPREAD_BPS,
+            "open_orders": open.len(),
+            "orders": open,
         })
-        .collect();
-    format!("[{}]", parts.join(","))
+        .to_string()
+    }
 }
 
 /// Parse a minimal JSON-ish payload for REST submit:
