@@ -11,6 +11,7 @@ pub mod twamm;
 use std::sync::{Mutex, OnceLock};
 use axum::{routing::{get, post}, Router, Json, extract::State};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use liquidity::LiquidityMiner;
 use openapi_gateway::OpenApiGateway;
@@ -106,8 +107,102 @@ async fn health_handler() -> &'static str {
 }
 
 async fn submit_job_handler(body: String) -> &'static str {
-    println!("Routing job payload [{}] into Kademlia DHT/Sandbox...", body);
-    "Job Accepted"
+    match dispatch_job(&body) {
+        Ok(job) => {
+            println!(
+                "Dispatched '{}' job to DHT outbox (route key {:02x}).",
+                job.action, job.route_key[0]
+            );
+            "Job Accepted"
+        }
+        Err(e) => {
+            println!("Job rejected: {e:?}");
+            "Job Rejected"
+        }
+    }
+}
+
+/// A validated job accepted by the gateway, ready for DHT dispatch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MeshJob {
+    pub action: String,
+    pub from: String,
+    pub to: String,
+    pub fen: String,
+    /// Kademlia routing key: sha256(action || 0x00 || from || 0x00 || to || 0x00 || fen).
+    /// The mesh-transport DHT publisher routes the job to the island nodes
+    /// responsible for this key.
+    pub route_key: [u8; 32],
+}
+
+/// Errors when turning an HTTP payload into a dispatchable [`MeshJob`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JobDispatchError {
+    /// Body is not valid JSON for the job schema.
+    InvalidPayload,
+    /// `action` is missing or empty; the router cannot classify the job.
+    MissingAction,
+    /// `move` jobs require a `fen` position.
+    MissingFen,
+}
+
+/// Bounded outbox between the HTTP gateway and the mesh-transport DHT
+/// publisher. The publisher drains it (see [`drain_job_outbox`]) and routes
+/// each job under its `route_key`. Bounded so a flood of HTTP submissions
+/// cannot grow memory without limit on edge nodes.
+fn job_outbox() -> &'static Mutex<std::collections::VecDeque<MeshJob>> {
+    static OUTBOX: OnceLock<Mutex<std::collections::VecDeque<MeshJob>>> = OnceLock::new();
+    OUTBOX.get_or_init(|| Mutex::new(std::collections::VecDeque::new()))
+}
+
+/// Maximum jobs buffered for the DHT publisher.
+pub const JOB_OUTBOX_CAP: usize = 1024;
+
+/// Parse, validate, and route a `/api/v1/submit_job` body (issue #14).
+///
+/// The payload is decoded into the [`GenericPayload`] job struct, validated,
+/// hashed to a Kademlia route key, and queued for the mesh-transport DHT
+/// publisher instead of being printed to the console.
+pub fn dispatch_job(body: &str) -> Result<MeshJob, JobDispatchError> {
+    let payload: GenericPayload =
+        serde_json::from_str(body).map_err(|_| JobDispatchError::InvalidPayload)?;
+    if payload.action.trim().is_empty() {
+        return Err(JobDispatchError::MissingAction);
+    }
+    if payload.action == "move" && payload.fen.trim().is_empty() {
+        return Err(JobDispatchError::MissingFen);
+    }
+
+    let mut key_input = Vec::with_capacity(128);
+    for part in [&payload.action, &payload.from, &payload.to, &payload.fen] {
+        key_input.extend_from_slice(part.as_bytes());
+        key_input.push(0x00);
+    }
+    let route_key: [u8; 32] = Sha256::digest(&key_input).into();
+
+    let job = MeshJob {
+        action: payload.action,
+        from: payload.from,
+        to: payload.to,
+        fen: payload.fen,
+        route_key,
+    };
+
+    if let Ok(mut outbox) = job_outbox().lock() {
+        if outbox.len() >= JOB_OUTBOX_CAP {
+            outbox.pop_front();
+        }
+        outbox.push_back(job.clone());
+    }
+    Ok(job)
+}
+
+/// Drain jobs queued for the mesh-transport DHT publisher.
+pub fn drain_job_outbox() -> Vec<MeshJob> {
+    job_outbox()
+        .lock()
+        .map(|mut outbox| outbox.drain(..).collect())
+        .unwrap_or_default()
 }
 
 /// Simulates routing an incoming HTTP REST request to the offline Mesh network.
@@ -126,10 +221,10 @@ pub fn handle_rest_call(req: &AsyncApiRequest) -> Result<String, InteropError> {
 
     match path {
         "/api/v1/health" => Ok("Mesh Island Active".to_string()),
-        "/api/v1/submit_job" => {
-            println!("Routing job payload [{}] into Kademlia DHT...", req.payload);
-            Ok("Job Accepted".to_string())
-        }
+        "/api/v1/submit_job" => match dispatch_job(&req.payload) {
+            Ok(_) => Ok("Job Accepted".to_string()),
+            Err(_) => Err(InteropError::BadRequest),
+        },
         "/api/v1/twamm" => handle_twamm(req),
         "/api/v1/liquidity" => handle_liquidity(req),
         "/api/v1/gateway" => handle_gateway(req),
@@ -506,7 +601,7 @@ mod tests {
 
         let job = handle_rest_call(&AsyncApiRequest {
             endpoint: "/api/v1/submit_job".into(),
-            payload: r#"{"action":"move"}"#.into(),
+            payload: r#"{"action":"move","fen":"rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"}"#.into(),
         })
         .unwrap();
         assert_eq!(job, "Job Accepted");
@@ -595,6 +690,52 @@ mod tests {
     }
 
     #[test]
+    fn dispatch_job_parses_routes_and_queues() {
+        let _ = drain_job_outbox();
+        let job = dispatch_job(
+            r#"{"action":"move","from":"alice","to":"bob","fen":"rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"}"#,
+        )
+        .expect("valid job");
+        assert_eq!(job.action, "move");
+        assert_eq!(job.from, "alice");
+        // Route key is deterministic for the same payload.
+        let again = dispatch_job(
+            r#"{"action":"move","from":"alice","to":"bob","fen":"rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"}"#,
+        )
+        .unwrap();
+        assert_eq!(job.route_key, again.route_key);
+        // Different payload -> different route key.
+        let other = dispatch_job(r#"{"action":"move","from":"alice","to":"carol","fen":"8/8/8/8/8/8/8/8 w - - 0 1"}"#).unwrap();
+        assert_ne!(job.route_key, other.route_key);
+        // Queued for the DHT publisher drain (superset check: tests share
+        // the process-wide outbox and run in parallel).
+        let queued = drain_job_outbox();
+        assert!(queued.len() >= 3);
+        let keys: Vec<[u8; 32]> = queued.iter().map(|j| j.route_key).collect();
+        assert!(keys.contains(&job.route_key));
+        assert!(keys.contains(&other.route_key));
+    }
+
+    #[test]
+    fn dispatch_job_rejects_bad_payloads() {
+        assert_eq!(
+            dispatch_job("not json"),
+            Err(JobDispatchError::InvalidPayload)
+        );
+        assert_eq!(
+            dispatch_job(r#"{"action":""}"#),
+            Err(JobDispatchError::MissingAction)
+        );
+        assert_eq!(
+            dispatch_job(r#"{"action":"move"}"#),
+            Err(JobDispatchError::MissingFen)
+        );
+        // Rejected through the REST surface too.
+        let err = handle_rest_call(&AsyncApiRequest {
+            endpoint: "/api/v1/submit_job".into(),
+            payload: "not json".into(),
+        });
+        assert_eq!(err, Err(InteropError::BadRequest));
     fn abrupt_disconnect_prunes_connection() {
         let mut registry = WsRegistry::new();
         let a = registry.register("peer-a");
