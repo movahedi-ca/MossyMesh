@@ -360,7 +360,7 @@ pub fn reassemble_mesh_packet(frames: &[LoraFrame]) -> Result<ReticulumPacket, T
 }
 
 /// Maximum entries in the dedup cache. 256 u32 ids = 1 KiB, well under the
-/// 10 MB edge ledger RAM cap.
+/// 10 MiB edge ledger RAM cap.
 pub const DEDUP_CACHE_CAPACITY: usize = 256;
 
 /// Bounded cache of recently seen message IDs for flood-fill deduplication.

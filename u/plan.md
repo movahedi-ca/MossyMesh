@@ -1,7 +1,7 @@
 # Swarm Execution Plan
 
 Phased parallel execution for the MossyMesh AI Swarm (16 agents).  
-Hard constraints: **≤10 MB active ledger**, **<1% unverifiable outputs**, **no centralized DNS/IP/cloud DBs**.
+Hard constraints: **≤10 MiB active ledger**, **<1% unverifiable outputs**, **no centralized DNS/IP/cloud DBs**.
 
 | Doc | Path |
 | --- | --- |
@@ -32,7 +32,7 @@ Hard constraints: **≤10 MB active ledger**, **<1% unverifiable outputs**, **no
 | --- | --- | --- |
 | A Frontend/Portal | 04, 15 | Offline PWA + captive portal shell |
 | B Mesh Transport | 02, 03, 13 | Phone packet → LoRa + Kademlia to offline node (sim OK) |
-| C Consensus | 06, 07, 09 | Trie/SNARK/CRDT stubs with 10 MB constant |
+| C Consensus | 06, 07, 09 | Trie/SNARK/CRDT stubs with 10 MiB constant |
 | D Engine | 05 | shakmaty startpos + move gen tests |
 | E Sandbox | 08, 14 | MEM_LIMIT enforce + VDF stub |
 | F Interop | 10, 11, 12 | AsyncAPI health/submit mocks |
@@ -41,7 +41,7 @@ Hard constraints: **≤10 MB active ledger**, **<1% unverifiable outputs**, **no
 
 ## Phase 2: Sandbox & Constraint Enforcement
 
-- WAMR hardens 10 MB guest heap; fixed-block pools; INT8 policy hooks.
+- WAMR hardens 10 MiB guest heap; fixed-block pools; INT8 policy hooks.
 - Ephemeral Job DID = VDF burn (~10 min MinRoot in prod params).
 - Frontend reaches engine only through sandbox FFI (`evaluate_move`, `get_best_move`).
 - **transport admits job only after `verify_vdf`.**

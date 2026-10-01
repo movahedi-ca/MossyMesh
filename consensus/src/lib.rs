@@ -19,20 +19,17 @@
 //! - [`light_client`] — light client: verify state without the full trie
 //! - [`error`] — [`ConsensusError`]
 //! - [`crdt`] — YATA/RGA document merge (peer agent surface; already present)
-//! - [`erasure`] / [`ring_buffer`] — DA helpers (peer agent surface)
 //! - [`snark`] — constant-size public SNARK types (200-byte radio anchors)
 //! - [`folding`] — Nova-style recursive fold of ledger steps (constant proof size)
 //! - [`verifier`] — swappable folding-verifier trait (mock backend today;
 //!   Nova-SNARK path structured but unwired)
 
 pub mod crdt;
-pub mod erasure;
 pub mod error;
 pub mod folding;
 pub mod ipld_codec;
 pub mod light_client;
 pub mod proof;
-pub mod ring_buffer;
 pub mod snark;
 pub mod trie;
 pub mod verifier;
@@ -56,8 +53,10 @@ pub use verifier::{default_verifier, FoldingVerifier, NovaSnarkVerifier};
 /// 32-byte cryptographic digest / content pointer.
 pub type Hash32 = [u8; 32];
 
-/// DOC 35: Strict 10 MB memory limit for the active ledger on edge devices.
-pub const MAX_LEDGER_SIZE: usize = 10_000_000;
+/// DOC 35: Strict 10 MiB memory limit for the active ledger on edge devices.
+/// Canonical value (issue #174): 10 MiB = 10_485_760 bytes, matching
+/// docs/sla-and-dod.md (SLA-RAM) and sandbox MEM_LIMIT.
+pub const MAX_LEDGER_SIZE: usize = 10_485_760;
 
 /// Initialize the consensus subsystem (daemon boot hook).
 pub fn init_consensus() {
