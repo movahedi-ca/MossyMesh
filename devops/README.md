@@ -12,7 +12,31 @@ ARM and ESP32, and captive-portal packaging.
 | `engine-wasm.md` | `engine` crate → `wasm32-wasip1` build notes + Mnps bench how-to |
 | `build-engine-wasm.sh` / `.ps1` | Optional helper: build `engine` for WASI (host defaults unchanged) |
 | `cargo-config-engine-wasm.toml` | Optional Cargo fragment (runner only; not auto-applied) |
+| `Dockerfile.daemon` | mesh-daemon container image (issue #149) |
 | `hostapd-dnsmasq.notes.md` | Optional Wi-Fi AP + DNS hijack for captive portal |
+
+## mesh-daemon packaging (issue #149)
+
+The edge-node binary is the `mesh-daemon` binary in the `mesh-transport`
+crate. It is packaged as a container and as a compose service:
+
+```bash
+# Stage the runtime engine.wasm first (gitignored; CI stages the
+# engine-wasm artifact automatically)
+./devops/build-engine-wasm.sh
+
+# Build and run the daemon image
+docker build -f devops/Dockerfile.daemon -t mossymesh/daemon:local .
+docker run -p 8080:8080 mossymesh/daemon:local
+
+# Or via compose (portal + daemon together)
+docker compose up daemon
+```
+
+The daemon serves the interop HTTP API on `MESH_GATEWAY_BIND`
+(`0.0.0.0:8080` in the image and compose service; the binary default is
+`127.0.0.1:8080`). Health: `GET /api/v1/health` returns "Mesh Island Active".
+CI boots the image against the staged artifact in the `daemon-smoke` job.
 
 ## Quick start (Pi)
 
@@ -38,19 +62,13 @@ GitHub Actions (`.github/workflows/ci.yml`) on push/PR to `main` (and push to
 | Job | What it runs |
 | --- | --- |
 | Frontend + portal | `npm ci` + build for `frontend` and `captive-portal` |
-| **Cargo test (workspace lib)** | `cargo test --locked --workspace --lib` on `ubuntu-latest` / Rust stable (30m timeout, cargo cache) |
-| cargo check + test (windows-msvc) | `cargo check --locked --workspace --all-targets` and `cargo test --locked --workspace --lib` on `windows-latest` (issue #148) |
-| Feature matrix | documented non-default combos: `sandbox --features wamr`, `engine --features syzygy` / `syzygy-mmap` (issue #147) |
-| Integration smoke tests | `cargo test --locked -p integration`, default and `--features transport` (issue #172) |
-| Docker portal image | Builds the `captive-portal` image, then runs it and probes `/healthz` and `/app/` (15m timeout, issue #151) |
+| **Cargo test (workspace lib)** | `cargo test --workspace --lib` on `ubuntu-latest` / Rust stable (30m timeout, cargo cache) |
+| Docker portal image | Builds `captive-portal` image after frontend jobs |
 
-**Rust gate notes:** `rust-lib` runs `--lib` only (unit tests in library crates)
-so bin/integration tests that need RF hardware or long runtime do not block
-the monorepo; `rust-windows` additionally compiles `--all-targets` and runs
-the lib suite on `windows-latest`, and the `integration-smoke` job covers the
-cross-crate suite. All cargo invocations use `--locked` so CI tests exactly
-the committed `Cargo.lock` (issue #152). If a single crate is known broken,
-exclude it with `--exclude <crate>` in the workflow and list it here, do not
-paper over failures with `continue-on-error`.
+**Rust gate notes:** CI uses `--lib` only (unit tests in library crates), not
+`--all-targets`, so bin/integration tests that need RF hardware or long runtime
+do not block the monorepo. If a single crate is known broken, exclude it with
+`cargo test --workspace --lib --exclude <crate>` in the workflow and list it
+here — do not paper over failures with `continue-on-error`.
 
 **Currently excluded:** none.

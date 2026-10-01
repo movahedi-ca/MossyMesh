@@ -66,8 +66,8 @@ function App() {
             type="button"
             className="theme-toggle"
             onClick={toggleTheme}
-            aria-label={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
-            title={theme === 'dark' ? 'Light theme' : 'Dark theme'}
+            aria-label={theme === 'dark' ? t.themeToLightAria : t.themeToDarkAria}
+            title={theme === 'dark' ? t.themeLightTitle : t.themeDarkTitle}
           >
             <span aria-hidden="true">{theme === 'dark' ? '☀' : '☾'}</span>
           </button>
