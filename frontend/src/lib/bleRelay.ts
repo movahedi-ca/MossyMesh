@@ -39,10 +39,12 @@ export function isBleSupported(): boolean {
   );
 }
 
-function toChunks(frame: Uint8Array): Uint8Array[] {
-  const chunks: Uint8Array[] = [];
+function toChunks(frame: Uint8Array): Uint8Array<ArrayBuffer>[] {
+  const chunks: Uint8Array<ArrayBuffer>[] = [];
   for (let i = 0; i < frame.length; i += BLE_FRAME_MAX) {
-    chunks.push(frame.subarray(i, i + BLE_FRAME_MAX));
+    // slice() copies into a fresh ArrayBuffer; subarray() would keep the
+    // ArrayBufferLike view type, which writeValue()'s BufferSource rejects.
+    chunks.push(frame.slice(i, i + BLE_FRAME_MAX));
   }
   return chunks.length > 0 ? chunks : [new Uint8Array(0)];
 }
