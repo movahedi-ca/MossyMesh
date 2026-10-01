@@ -284,40 +284,11 @@ impl MerklePatriciaTrie {
         let mut steps: Vec<ProofStep> = Vec::new();
         let (terminal, value) = build_proof(root, &nibbles, &mut steps)?;
 
-        let leaf_path = match &terminal {
-            ProofTerminal::Leaf { path, .. } => path.clone(),
-            ProofTerminal::BranchValue { .. } => Vec::new(),
-        };
-
-        let mut siblings = Vec::new();
-        for step in &steps {
-            if let ProofStep::Branch {
-                nibble, children, ..
-            } = step
-            {
-                for (i, h) in children.iter().enumerate() {
-                    if i != *nibble as usize {
-                        if let Some(hash) = h {
-                            siblings.push(*hash);
-                        }
-                    }
-                }
-            }
-        }
-        // Include sibling hashes from a branch-terminal as well.
-        if let ProofTerminal::BranchValue { children, .. } = &terminal {
-            for h in children.iter().flatten() {
-                siblings.push(*h);
-            }
-        }
-
         Ok(MerkleProof {
             key: key.to_vec(),
             value,
-            leaf_path,
             terminal,
             steps,
-            siblings,
         })
     }
 

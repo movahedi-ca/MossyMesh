@@ -44,14 +44,10 @@ pub struct MerkleProof {
     pub key: Vec<u8>,
     /// Value bound at the terminal.
     pub value: Vec<u8>,
-    /// Remaining leaf path nibbles (empty when terminal is a branch value).
-    pub leaf_path: Vec<u8>,
     /// Terminal node at the bottom of the proof.
     pub terminal: ProofTerminal,
     /// Ancestor steps ordered terminal→root (bottom-up application order).
     pub steps: Vec<ProofStep>,
-    /// DOC 32: flat sibling hash list collected from branch steps.
-    pub siblings: Vec<Hash32>,
 }
 
 impl MerkleProof {
@@ -155,6 +151,24 @@ pub fn verify_proof_bool(proof: &MerkleProof, expected_root: &Hash32) -> bool {
 mod tests {
     use super::*;
     use crate::trie::MerklePatriciaTrie;
+
+    #[test]
+    fn proof_cbor_roundtrip_after_field_removal() {
+        // Issue #196: MerkleProof no longer carries the redundant leaf_path /
+        // siblings fields. CBOR round-trip still works and the decoded proof
+        // verifies under the root.
+        let mut t = MerklePatriciaTrie::new();
+        t.insert(b"alice", b"100".to_vec()).unwrap();
+        t.insert(b"bob", b"200".to_vec()).unwrap();
+        t.insert(b"alice/payment", b"42".to_vec()).unwrap();
+
+        let root = t.root_hash();
+        let proof = t.prove(b"alice").unwrap();
+        let bytes = proof.to_cbor().unwrap();
+        let back = MerkleProof::from_cbor(&bytes).unwrap();
+        assert_eq!(back, proof);
+        assert!(verify_proof(&back, &root).unwrap());
+    }
 
     #[test]
     fn proof_verifies_for_inserted_key() {
