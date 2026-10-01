@@ -569,6 +569,9 @@ fn insert_extension(
     let mut branch_value: Option<Vec<u8>> = None;
 
     let ext_nibble = path[shared] as usize;
+    if ext_nibble > 15 {
+        return Err(ConsensusError::InvalidInput("nibble out of range"));
+    }
     let ext_rem = path[shared + 1..].to_vec();
     let existing_child = if ext_rem.is_empty() {
         child
@@ -585,6 +588,9 @@ fn insert_extension(
         branch_value = Some(value);
     } else {
         let k_nibble = key[shared] as usize;
+        if k_nibble > 15 {
+            return Err(ConsensusError::InvalidInput("nibble out of range"));
+        }
         let k_rem = key[shared + 1..].to_vec();
         children[k_nibble] = Some(Box::new(MptNode::Leaf {
             path: k_rem,
