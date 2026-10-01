@@ -265,6 +265,13 @@ fn handle_liquidity(req: &AsyncApiRequest) -> Result<String, InteropError> {
                     "{{\"node_id\":\"{}\",\"tokens_airdropped\":{},\"status\":\"claimed\"}}",
                     node_id, tokens
                 )),
+                // Idempotent claim (issue #46): a well-formed claim with
+                // nothing left to claim is not a malformed request, so it
+                // must not 400. Report zero tokens instead.
+                Err(liquidity::LiquidityError::NothingToClaim) => Ok(format!(
+                    "{{\"node_id\":\"{}\",\"tokens_airdropped\":0,\"status\":\"nothing_to_claim\"}}",
+                    node_id
+                )),
                 Err(liquidity::LiquidityError::StillOffline) => Err(InteropError::GatewayDormant),
                 Err(_) => Err(InteropError::BadRequest),
             }
@@ -538,6 +545,41 @@ mod tests {
         })
         .unwrap();
         assert!(acc.contains("points_gained"));
+    }
+
+    #[test]
+    fn liquidity_claim_is_idempotent_not_bad_request() {
+        // Issue #46: a well-formed claim must never 400 just because there
+        // is nothing (left) to claim.
+        let node = "genesis-claim-idem-1";
+        signal_internet_disconnect();
+        handle_rest_call(&AsyncApiRequest {
+            endpoint: "/api/v1/liquidity".into(),
+            payload: format!("action=register,node_id={node}"),
+        })
+        .unwrap();
+        handle_rest_call(&AsyncApiRequest {
+            endpoint: "/api/v1/liquidity".into(),
+            payload: format!("action=accrue,node_id={node},epochs=2"),
+        })
+        .unwrap();
+
+        signal_internet_reconnect();
+        let first = handle_rest_call(&AsyncApiRequest {
+            endpoint: "/api/v1/liquidity".into(),
+            payload: format!("action=claim,node_id={node}"),
+        })
+        .unwrap();
+        assert!(first.contains("\"status\":\"claimed\""));
+
+        // Second claim: nothing left, but still a valid request (200, not 400).
+        let second = handle_rest_call(&AsyncApiRequest {
+            endpoint: "/api/v1/liquidity".into(),
+            payload: format!("action=claim,node_id={node}"),
+        })
+        .unwrap();
+        assert!(second.contains("\"status\":\"nothing_to_claim\""));
+        assert!(second.contains("\"tokens_airdropped\":0"));
     }
 
     #[test]
