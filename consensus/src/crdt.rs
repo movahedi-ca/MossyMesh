@@ -126,6 +126,13 @@ struct LwwValue {
     value: Option<Vec<u8>>,
     time: LogicalTime,
 }
+/// Max wall-clock advance adopted from a single remote map op (issue #191).
+/// Remote walls arrive over the mesh from untrusted islands; adopting an
+/// unbounded wall lets one crafted op panic (`u64::MAX + 1` in debug builds)
+/// or brick the replica clock (wrap to 0 in release, so every later local
+/// op loses all LWW conflicts). Adoption is capped per op; the local clock
+/// stays monotone and keeps advancing, so a crafted op can never freeze it.
+pub const MAX_REMOTE_WALL_SKEW: u64 = 1_000_000;
 
 /// Document CRDT: RGA sequence + LWW map, with full op log for deltas.
 #[derive(Clone, Debug, Default)]
@@ -373,21 +380,28 @@ impl Doc {
                         time,
                     },
                 );
-                if time.wall >= self.next_wall {
-                    self.next_wall = time.wall + 1;
-                }
+                self.adopt_remote_wall(time.wall);
                 self.note_map_time(time);
             }
             CrdtOp::MapDelete { key, time } => {
                 self.map.insert(key, LwwValue { value: None, time });
-                if time.wall >= self.next_wall {
-                    self.next_wall = time.wall + 1;
-                }
+                self.adopt_remote_wall(time.wall);
                 self.note_map_time(time);
             }
         }
 
         self.op_log.push(op);
+    }
+
+    /// Adopt a remote wall time into the local clock, bounded (issue #191).
+    /// Monotonicity is preserved (`next_wall` never decreases), but a single
+    /// remote op can advance it by at most `MAX_REMOTE_WALL_SKEW`. Saturating
+    /// arithmetic means `u64::MAX` can neither panic nor wrap the clock.
+    fn adopt_remote_wall(&mut self, wall: u64) {
+        if wall >= self.next_wall {
+            let adopted = wall.min(self.next_wall.saturating_add(MAX_REMOTE_WALL_SKEW));
+            self.next_wall = adopted.saturating_add(1);
+        }
     }
 
     /// Record a map op's wall time in the map version vector.
@@ -608,6 +622,35 @@ mod tests {
         assert_eq!(a.text(), "bc");
     }
 
+    #[test]
+    fn remote_wall_clock_adoption_is_bounded() {
+        // Issue #191: a crafted remote op with wall = u64::MAX must not panic
+        // (debug) or brick the replica clock (wrap to 0 in release).
+        let mut d = Doc::new(1);
+        d.map_set("k", b"v".to_vec()); // next_wall is now 2
+        assert_eq!(d.next_wall, 2);
+
+        d.integrate(CrdtOp::MapSet {
+            key: "evil".into(),
+            value: b"x".to_vec(),
+            time: LogicalTime::new(u64::MAX, 99),
+        });
+        // The op itself still applies (LWW by its own time)...
+        assert_eq!(d.map_get("evil"), Some(b"x".as_ref()));
+        // ...but the local clock only advanced by at most MAX_REMOTE_WALL_SKEW.
+        assert!(d.next_wall <= 2 + MAX_REMOTE_WALL_SKEW + 1);
+        assert!(d.next_wall >= 2);
+
+        // Local ops keep ticking normally, so the replica can still win
+        // future LWW conflicts.
+        let op = d.map_set("local", b"y".to_vec());
+        match op {
+            CrdtOp::MapSet { time, .. } => {
+                assert!(time.wall <= 2 + MAX_REMOTE_WALL_SKEW + 1);
+            }
+            _ => panic!("expected MapSet"),
+        }
+    }
     #[test]
     fn map_lww_deterministic() {
         let mut a = Doc::new(1);
