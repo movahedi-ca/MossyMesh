@@ -546,7 +546,7 @@ mod tests {
 
     #[test]
     fn non_admin_cannot_sign() {
-        let keys = five_admin_keys();
+        let _keys = five_admin_keys();
         let mut ms = AdminMultisig::new(five_admins(), 0).unwrap();
         let id = ms.propose("x").unwrap();
         let desc = ms.proposal(id).unwrap().description.clone();
@@ -687,7 +687,7 @@ mod tests {
 
     #[test]
     fn signature_from_wrong_key_claiming_admin_rejected() {
-        let keys = five_admin_keys();
+        let _keys = five_admin_keys();
         let mut ms = AdminMultisig::new(five_admins(), 0).unwrap();
         let id = ms.propose("impersonate").unwrap();
         let desc = ms.proposal(id).unwrap().description.clone();
