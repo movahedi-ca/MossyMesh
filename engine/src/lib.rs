@@ -25,9 +25,7 @@ pub mod tablebase;
 pub use benchmark::{benchmark_mnps, benchmark_mnps_detailed, BenchmarkReport};
 pub use eval::{evaluate_side_to_move, evaluate_white_perspective, MATE_SCORE};
 pub use search::{negamax_search, perft, SearchResult};
-pub use tablebase::{
-    open_tablebase, FileBackedTablebase, StubTablebase, TablebaseProbe, TbWdl,
-};
+pub use tablebase::{open_tablebase, FileBackedTablebase, StubTablebase, TablebaseProbe, TbWdl};
 
 /// DOC 44 / DOC 43: Hard depth cap prevents infinite search loops (battery / WASM safety).
 /// Practical callers may use much smaller depths; this is the absolute ceiling.

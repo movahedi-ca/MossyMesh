@@ -330,10 +330,7 @@ mod tests {
     fn multi_block_request_oom_when_fragmented_or_too_large() {
         let mut pool = FixedBlockPool::with_limit(64, 256).unwrap();
         // Ask for more than the entire arena.
-        assert_eq!(
-            pool.allocate(257).unwrap_err(),
-            PoolError::OutOfMemory
-        );
+        assert_eq!(pool.allocate(257).unwrap_err(), PoolError::OutOfMemory);
         // Fill with single blocks then free middle — first-fit still works for 1 block.
         let _h0 = pool.allocate(64).unwrap();
         let h1 = pool.allocate(64).unwrap();

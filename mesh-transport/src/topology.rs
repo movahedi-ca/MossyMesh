@@ -46,7 +46,12 @@ pub struct LinkEdge {
 }
 
 impl LinkEdge {
-    pub fn new(from: impl Into<String>, to: impl Into<String>, link: LinkType, quality: u8) -> Self {
+    pub fn new(
+        from: impl Into<String>,
+        to: impl Into<String>,
+        link: LinkType,
+        quality: u8,
+    ) -> Self {
         let from = from.into();
         let to = to.into();
         let cost = compute_edge_cost(link, quality);
@@ -183,10 +188,7 @@ impl TopologyGraph {
     }
 
     pub fn links_from(&self, id: &str) -> &[LinkEdge] {
-        self.edges
-            .get(id)
-            .map(|v| v.as_slice())
-            .unwrap_or(&[])
+        self.edges.get(id).map(|v| v.as_slice()).unwrap_or(&[])
     }
 
     /// Lowest-cost path (Dijkstra). Deterministic: equal costs prefer

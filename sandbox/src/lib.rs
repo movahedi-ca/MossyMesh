@@ -40,9 +40,8 @@ pub use admit::{
     admit_job, admit_job_required, validate_minroot_modulus, AdmitError,
     DomainSeparatedHashVdfStub, JobDid, MinRootVdfVerifier, VdfReceipt, VdfVerifier,
     DEFAULT_TEST_ITERATIONS, DEFAULT_TEST_MODULUS, HASH_VDF_STUB_DEFAULT_MIN_STEPS,
-    HASH_VDF_STUB_DOMAIN, MAX_TEST_ITERATIONS, MODULUS_ID_HASH_STUB,
-    MODULUS_ID_PRODUCTION_MINROOT, MODULUS_ID_TEST_MINROOT, PRODUCTION_ITERATIONS,
-    PRODUCTION_MODULUS,
+    HASH_VDF_STUB_DOMAIN, MAX_TEST_ITERATIONS, MODULUS_ID_HASH_STUB, MODULUS_ID_PRODUCTION_MINROOT,
+    MODULUS_ID_TEST_MINROOT, PRODUCTION_ITERATIONS, PRODUCTION_MODULUS,
 };
 pub use host::{HostError, HostRuntime, AUX_STACK_SIZE};
 pub use job::{Job, JobError};
@@ -178,12 +177,8 @@ fn job_error_static(e: &JobError) -> &'static str {
         JobError::InvalidModule => "Host Error: Invalid or empty WASM module bytes.",
         JobError::AuxStackOverflow => "Host Error: Bounded aux stack overflow.",
         JobError::NotAdmitted => "Admit denied: job has no verified Job DID.",
-        JobError::Admit(AdmitError::MissingVdf) => {
-            "Admit denied: missing VDF proof / receipt."
-        }
-        JobError::Admit(AdmitError::InvalidVdf) => {
-            "Admit denied: VDF receipt verification failed."
-        }
+        JobError::Admit(AdmitError::MissingVdf) => "Admit denied: missing VDF proof / receipt.",
+        JobError::Admit(AdmitError::InvalidVdf) => "Admit denied: VDF receipt verification failed.",
         JobError::Admit(AdmitError::DidMismatch) => {
             "Admit denied: Job DID does not match VDF receipt."
         }
@@ -231,7 +226,10 @@ mod tests {
         assert!(pool.allocate(64).is_ok());
         let err = pool.allocate(1).unwrap_err();
         assert_eq!(err, PoolError::OutOfMemory);
-        assert_eq!(err.as_str(), "Allocation failed: 10MB memory limit exceeded.");
+        assert_eq!(
+            err.as_str(),
+            "Allocation failed: 10MB memory limit exceeded."
+        );
     }
 
     #[test]
@@ -322,7 +320,10 @@ mod tests {
     fn wamr_instance_unknown_export() {
         let mut inst = WamrInstance::new(b"\0asm".to_vec());
         let err = inst.invoke_wasm_function("nope", &[]).unwrap_err();
-        assert_eq!(err, "FFI Error: Exported function not found in WASM module.");
+        assert_eq!(
+            err,
+            "FFI Error: Exported function not found in WASM module."
+        );
     }
 
     #[test]

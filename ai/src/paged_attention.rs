@@ -573,15 +573,11 @@ impl PagedAttention {
         }
         let n_tokens = end - start;
         let floats_per = self.token_bytes / 4;
-        if self.token_bytes % 4 != 0 {
+        if !self.token_bytes.is_multiple_of(4) {
             return Err(PagedAttentionError::InvalidPageSize);
         }
-        SitfTensor::new(
-            vec![n_tokens as u32, floats_per as u32],
-            DType::Fp32,
-            bytes,
-        )
-        .map_err(Into::into)
+        SitfTensor::new(vec![n_tokens as u32, floats_per as u32], DType::Fp32, bytes)
+            .map_err(Into::into)
     }
 
     /// Clear the context window (unmaps all used slots).
@@ -661,11 +657,7 @@ mod tests {
     /// Same append sequence always gathers the same bytes (deterministic context).
     #[test]
     fn gather_deterministic_across_runs() {
-        let kv = [
-            [1u8, 2, 3, 4],
-            [5, 6, 7, 8],
-            [9, 10, 11, 12],
-        ];
+        let kv = [[1u8, 2, 3, 4], [5, 6, 7, 8], [9, 10, 11, 12]];
         let mut g1 = {
             let mut pa = PagedAttention::new_memory(4, 8, 8).unwrap();
             for row in &kv {

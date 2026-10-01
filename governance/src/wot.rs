@@ -94,10 +94,7 @@ impl WotGraph {
     }
 
     pub fn invitees_of(&self, voucher: &NodeId) -> Vec<NodeId> {
-        self.by_voucher
-            .get(voucher)
-            .cloned()
-            .unwrap_or_default()
+        self.by_voucher.get(voucher).cloned().unwrap_or_default()
     }
 
     /// Onboard `invitee` under `voucher`, locking quadratic collateral for `power_units`.
@@ -219,10 +216,7 @@ mod tests {
         g.onboard(root, bad, 2).unwrap();
         g.mark_malicious_and_slash(bad).unwrap();
 
-        assert_eq!(
-            g.onboard(bad, victim, 1),
-            Err(WotError::MaliciousInvitee)
-        );
+        assert_eq!(g.onboard(bad, victim, 1), Err(WotError::MaliciousInvitee));
     }
 
     #[test]

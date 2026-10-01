@@ -417,10 +417,7 @@ mod tests {
         assert_eq!(ledger.free_balance("bob"), 400);
 
         let err = ledger.claim_escrow(&id, preimage).unwrap_err();
-        assert!(matches!(
-            err,
-            CreditError::Htlc(HtlcError::AlreadySettled)
-        ));
+        assert!(matches!(err, CreditError::Htlc(HtlcError::AlreadySettled)));
         assert_eq!(ledger.free_balance("bob"), 400);
         assert_eq!(ledger.conserved_supply(), 1_000);
     }

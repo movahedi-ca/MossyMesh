@@ -446,10 +446,7 @@ fn insert_extension(
     } else {
         let k_nibble = key[shared] as usize;
         let k_rem = key[shared + 1..].to_vec();
-        children[k_nibble] = Some(Box::new(MptNode::Leaf {
-            path: k_rem,
-            value,
-        }));
+        children[k_nibble] = Some(Box::new(MptNode::Leaf { path: k_rem, value }));
     }
 
     let branch = MptNode::Branch {
@@ -572,7 +569,7 @@ fn build_proof(
                 }
                 return Ok((
                     ProofTerminal::BranchValue {
-                        children: child_hashes,
+                        children: Box::new(child_hashes),
                         value: v.clone(),
                     },
                     v,
@@ -600,7 +597,7 @@ fn build_proof(
 
             steps.push(ProofStep::Branch {
                 nibble,
-                children: child_hashes,
+                children: Box::new(child_hashes),
                 value: value.clone(),
             });
             Ok((terminal, val))
@@ -781,11 +778,7 @@ mod tests {
     fn root_hash_deterministic() {
         let mut a = MerklePatriciaTrie::new();
         let mut b = MerklePatriciaTrie::new();
-        for (k, v) in [
-            (b"x" as &[u8], b"1" as &[u8]),
-            (b"y", b"2"),
-            (b"z", b"3"),
-        ] {
+        for (k, v) in [(b"x" as &[u8], b"1" as &[u8]), (b"y", b"2"), (b"z", b"3")] {
             a.insert(k, v.to_vec()).unwrap();
             b.insert(k, v.to_vec()).unwrap();
         }

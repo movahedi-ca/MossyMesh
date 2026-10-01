@@ -15,6 +15,12 @@ sha2 = "0.10"
 chacha20poly1305 = "0.10"
 zeroize = { version = "1.8", features = ["derive"] }
 
+# Path deps for the mesh-daemon binary (mesh-transport/src/main.rs).
+consensus = { path = "../consensus" }
+engine = { path = "../engine" }
+sandbox = { path = "../sandbox" }
+interop = { path = "../interop" }
+
 [lib]
 name = "mesh_transport"
 path = "src/lib.rs"

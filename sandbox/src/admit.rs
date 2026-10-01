@@ -363,7 +363,8 @@ impl VdfVerifier for MinRootVdfVerifier {
         if receipt.steps < self.min_steps {
             return Err(AdmitError::InsufficientSteps);
         }
-        let modulus = Self::resolve_modulus(receipt.modulus_id).ok_or(AdmitError::InvalidModulus)?;
+        let modulus =
+            Self::resolve_modulus(receipt.modulus_id).ok_or(AdmitError::InvalidModulus)?;
         if !validate_minroot_modulus(modulus) {
             return Err(AdmitError::InvalidModulus);
         }
@@ -372,8 +373,8 @@ impl VdfVerifier for MinRootVdfVerifier {
                 return Err(AdmitError::InvalidModulus);
             }
         }
-        let expected =
-            Self::evaluate(receipt.start_x, receipt.steps, modulus).ok_or(AdmitError::InvalidVdf)?;
+        let expected = Self::evaluate(receipt.start_x, receipt.steps, modulus)
+            .ok_or(AdmitError::InvalidVdf)?;
         if expected != receipt.final_x {
             return Err(AdmitError::InvalidVdf);
         }
@@ -387,14 +388,14 @@ impl VdfVerifier for MinRootVdfVerifier {
 
 /// Strong MinRoot modulus checks (mirror of transport `validate_modulus`).
 pub fn validate_minroot_modulus(p: u64) -> bool {
-    if p <= 5 || p % 2 == 0 {
+    if p <= 5 || p.is_multiple_of(2) {
         return false;
     }
     if p % 5 == 1 {
         return false;
     }
     let num = 2u128 * p as u128 - 1;
-    if num % 5 != 0 {
+    if !num.is_multiple_of(5) {
         return false;
     }
     is_prime_u64(p)
@@ -409,13 +410,13 @@ fn is_prime_u64(n: u64) -> bool {
         if n == p {
             return true;
         }
-        if n % p == 0 {
+        if n.is_multiple_of(p) {
             return false;
         }
     }
     let mut d = n - 1;
     let mut s = 0u32;
-    while d % 2 == 0 {
+    while d.is_multiple_of(2) {
         d /= 2;
         s += 1;
     }
@@ -444,7 +445,7 @@ fn fifth_root_exponent(p: u64) -> Option<u64> {
         return None;
     }
     let num = 2u128 * p as u128 - 1;
-    if num % 5 == 0 {
+    if num.is_multiple_of(5) {
         return Some((num / 5) as u64);
     }
     None
@@ -638,10 +639,7 @@ mod tests {
         let v = MinRootVdfVerifier::for_tests(4);
         let mut receipt = v.issue_test(7, 8, b"m").unwrap();
         receipt.final_x = receipt.final_x.wrapping_add(1);
-        assert_eq!(
-            admit_job(&receipt, &v).unwrap_err().code(),
-            "INVALID_VDF"
-        );
+        assert_eq!(admit_job(&receipt, &v).unwrap_err().code(), "INVALID_VDF");
     }
 
     #[test]
@@ -666,8 +664,10 @@ mod tests {
         );
         // Production floor must remain documented and separated.
         assert_eq!(PRODUCTION_ITERATIONS, 50_000_000);
-        assert!(DEFAULT_TEST_ITERATIONS < PRODUCTION_ITERATIONS);
-        assert!(MAX_TEST_ITERATIONS < PRODUCTION_ITERATIONS);
+        const {
+            assert!(DEFAULT_TEST_ITERATIONS < PRODUCTION_ITERATIONS);
+            assert!(MAX_TEST_ITERATIONS < PRODUCTION_ITERATIONS);
+        }
         let prod_policy = MinRootVdfVerifier::production();
         assert_eq!(prod_policy.min_steps, PRODUCTION_ITERATIONS);
         assert_eq!(prod_policy.required_modulus, Some(PRODUCTION_MODULUS));
@@ -688,9 +688,6 @@ mod tests {
         assert_eq!(AdmitError::DidMismatch.code(), "DID_MISMATCH");
         assert_eq!(AdmitError::InsufficientSteps.code(), "INSUFFICIENT_STEPS");
         assert_eq!(AdmitError::InvalidModulus.code(), "INVALID_MODULUS");
-        assert_eq!(
-            AdmitError::Rejected("x".into()).code(),
-            "REJECTED"
-        );
+        assert_eq!(AdmitError::Rejected("x".into()).code(), "REJECTED");
     }
 }

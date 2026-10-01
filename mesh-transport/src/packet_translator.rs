@@ -190,7 +190,7 @@ pub fn fragment_payload(
         return Err(TranslateError::EmptyPayload);
     }
     let mtu = LORA_FRAG_MTU;
-    let count = ((payload.len() + mtu - 1) / mtu) as u16;
+    let count = payload.len().div_ceil(mtu) as u16;
     if count == 0 {
         return Err(TranslateError::EmptyPayload);
     }
@@ -221,9 +221,7 @@ pub fn mesh_to_lora_frames(pkt: &ReticulumPacket) -> Result<Vec<LoraFrame>, Tran
 }
 
 /// Full Phase-1 path: smartphone packet → mesh → LoRa frames.
-pub fn smartphone_to_lora_frames(
-    pkt: &SmartphonePacket,
-) -> Result<Vec<LoraFrame>, TranslateError> {
+pub fn smartphone_to_lora_frames(pkt: &SmartphonePacket) -> Result<Vec<LoraFrame>, TranslateError> {
     let mesh = smartphone_to_mesh(pkt)?;
     mesh_to_lora_frames(&mesh)
 }
@@ -293,9 +291,7 @@ impl ReassemblyBuffer {
 }
 
 /// Reassemble ordered or unordered LoRa fragments into a mesh packet.
-pub fn reassemble_mesh_packet(
-    frames: &[LoraFrame],
-) -> Result<ReticulumPacket, TranslateError> {
+pub fn reassemble_mesh_packet(frames: &[LoraFrame]) -> Result<ReticulumPacket, TranslateError> {
     if frames.is_empty() {
         return Err(TranslateError::EmptyPayload);
     }
@@ -377,7 +373,9 @@ mod tests {
     }
 
     fn frames_message_id(frames: &[LoraFrame]) -> u32 {
-        LoRaFragment::from_lora_frame(&frames[0]).unwrap().message_id
+        LoRaFragment::from_lora_frame(&frames[0])
+            .unwrap()
+            .message_id
     }
 
     #[test]
@@ -412,7 +410,13 @@ mod tests {
 
     #[test]
     fn roundtrip_small_and_exact_mtu_boundary() {
-        for len in [1usize, LORA_FRAG_MTU - 16, LORA_FRAG_MTU, LORA_FRAG_MTU + 1, 1000] {
+        for len in [
+            1usize,
+            LORA_FRAG_MTU - 16,
+            LORA_FRAG_MTU,
+            LORA_FRAG_MTU + 1,
+            1000,
+        ] {
             // mesh blob = 16 dest + data; fragmenter sees dest||data
             let data = vec![0xABu8; len];
             let phone = sample_phone(data.clone());

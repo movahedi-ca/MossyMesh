@@ -189,9 +189,9 @@ impl OpenApiGateway {
             return Err(GatewayError::EmptyPool);
         }
 
-        let order_id = self
-            .twamm
-            .submit_order(OrderSide::Sell, amount, slices.max(1), reference_price)?;
+        let order_id =
+            self.twamm
+                .submit_order(OrderSide::Sell, amount, slices.max(1), reference_price)?;
 
         let mut filled_in = 0u64;
         let mut filled_out = 0u64;
@@ -209,7 +209,10 @@ impl OpenApiGateway {
                     filled_out = filled_out.saturating_add(out);
                     max_spread_seen = max_spread_seen.max(fill.spread_bps);
                 }
-                Err(TwammError::SpreadExceeded { spread_bps, max_bps }) => {
+                Err(TwammError::SpreadExceeded {
+                    spread_bps,
+                    max_bps,
+                }) => {
                     // Refund unfilled remainder back to local balance accounting below.
                     let _ = (spread_bps, max_bps);
                     break;
@@ -243,10 +246,7 @@ impl OpenApiGateway {
 
     /// Human / REST status blob.
     pub fn status_json(&self) -> String {
-        let note = self
-            .last_bridge_note
-            .as_deref()
-            .unwrap_or("idle");
+        let note = self.last_bridge_note.as_deref().unwrap_or("idle");
         format!(
             "{{\"active\":{},\"internet_reconnected\":{},\"max_spread_bps\":{},\"global_mid\":{},\"accounts\":{},\"note\":\"{}\"}}",
             self.is_active(),

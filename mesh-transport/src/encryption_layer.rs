@@ -172,7 +172,10 @@ pub fn perform_handshake() -> Result<(), &'static str> {
     let bob_shared = compute_dhke_public_key(alice_public, bob_private, prime);
 
     if alice_shared == bob_shared {
-        println!("DHKE Handshake Successful: Shared Secret is {}", alice_shared);
+        println!(
+            "DHKE Handshake Successful: Shared Secret is {}",
+            alice_shared
+        );
         Ok(())
     } else {
         Err("DHKE Handshake failed to produce symmetric key.")
@@ -201,7 +204,10 @@ mod tests {
         let mut ct = aead.seal(&nonce, b"data", b"aad").unwrap();
         let last = ct.len() - 1;
         ct[last] ^= 0xff;
-        assert_eq!(aead.open(&nonce, &ct, b"aad"), Err(EncryptionError::DecryptFailed));
+        assert_eq!(
+            aead.open(&nonce, &ct, b"aad"),
+            Err(EncryptionError::DecryptFailed)
+        );
     }
 
     #[test]

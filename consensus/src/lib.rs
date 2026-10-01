@@ -23,8 +23,8 @@
 //! - [`folding`] — Nova-style recursive fold of ledger steps (constant proof size)
 
 pub mod crdt;
-pub mod error;
 pub mod erasure;
+pub mod error;
 pub mod folding;
 pub mod ipld_codec;
 pub mod proof;

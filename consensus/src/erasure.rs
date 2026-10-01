@@ -93,7 +93,7 @@ pub fn encode(
     let original_len = payload.len();
 
     // Pad to a multiple of data_shards so each data shard has equal length.
-    let shard_len = (original_len + data_shards - 1) / data_shards;
+    let shard_len = original_len.div_ceil(data_shards);
     let padded_len = shard_len * data_shards;
     let mut padded = vec![0u8; padded_len];
     padded[..original_len].copy_from_slice(payload);
@@ -183,8 +183,8 @@ fn concat_data(
     original_len: usize,
 ) -> Result<Vec<u8>, ErasureError> {
     let mut out = Vec::with_capacity(original_len);
-    for i in 0..data_shards {
-        let shard = present[i]
+    for (i, shard_opt) in present.iter().take(data_shards).enumerate() {
+        let shard = shard_opt
             .as_ref()
             .ok_or_else(|| ErasureError::Config(format!("data shard {i} still missing")))?;
         out.extend_from_slice(shard);
@@ -253,9 +253,6 @@ mod tests {
 
     #[test]
     fn empty_payload_rejected() {
-        assert!(matches!(
-            encode(b"", 2, 1),
-            Err(ErasureError::EmptyPayload)
-        ));
+        assert!(matches!(encode(b"", 2, 1), Err(ErasureError::EmptyPayload)));
     }
 }

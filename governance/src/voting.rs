@@ -367,8 +367,7 @@ mod tests {
     #[test]
     fn invalid_reveal_rejected() {
         let (mut v, a, _, _) = setup_three_voters();
-        let ballot =
-            ZkBlindedVoting::prepare_ballot(a, 1, BallotChoice::Yes, b"nonce", b"blind");
+        let ballot = ZkBlindedVoting::prepare_ballot(a, 1, BallotChoice::Yes, b"nonce", b"blind");
         v.commit(ballot).unwrap();
 
         // Wrong choice
@@ -393,8 +392,7 @@ mod tests {
         let mut v = ZkBlindedVoting::new();
         v.open_proposal(7);
         let stranger = NodeId::from_label("stranger");
-        let ballot =
-            ZkBlindedVoting::prepare_ballot(stranger, 7, BallotChoice::Yes, b"n", b"b");
+        let ballot = ZkBlindedVoting::prepare_ballot(stranger, 7, BallotChoice::Yes, b"n", b"b");
         assert_eq!(v.commit(ballot), Err(VotingError::NotEligible));
     }
 
@@ -428,8 +426,7 @@ mod tests {
         v.set_eligible(a, true);
         v.open_proposal(1);
         v.close_proposal(1);
-        let ballot =
-            ZkBlindedVoting::prepare_ballot(a, 1, BallotChoice::Abstain, b"n", b"b");
+        let ballot = ZkBlindedVoting::prepare_ballot(a, 1, BallotChoice::Abstain, b"n", b"b");
         assert_eq!(v.commit(ballot), Err(VotingError::VotingClosed));
     }
 
@@ -477,8 +474,7 @@ mod tests {
     #[test]
     fn invalid_proof_rejected_on_commit() {
         let (mut v, a, _, _) = setup_three_voters();
-        let mut ballot =
-            ZkBlindedVoting::prepare_ballot(a, 1, BallotChoice::Yes, b"n", b"b");
+        let mut ballot = ZkBlindedVoting::prepare_ballot(a, 1, BallotChoice::Yes, b"n", b"b");
         ballot.proof.proof_digest[0] ^= 0xff;
         assert_eq!(v.commit(ballot), Err(VotingError::InvalidProof));
     }
@@ -486,8 +482,7 @@ mod tests {
     #[test]
     fn double_reveal_rejected() {
         let (mut v, a, _, _) = setup_three_voters();
-        let ballot =
-            ZkBlindedVoting::prepare_ballot(a, 1, BallotChoice::Yes, b"n", b"b");
+        let ballot = ZkBlindedVoting::prepare_ballot(a, 1, BallotChoice::Yes, b"n", b"b");
         v.commit(ballot).unwrap();
         v.reveal(a, 1, BallotChoice::Yes, b"n", b"b").unwrap();
         assert!(v.is_revealed(1, &a));
@@ -512,13 +507,8 @@ mod tests {
         let ballot =
             ZkBlindedVoting::prepare_ballot(voter, 42, BallotChoice::Abstain, b"nonce", b"blind");
         assert!(ballot.proof.verify(&ballot.commitment, &ballot.voter));
-        let expected = ZkBlindedVoting::make_commitment(
-            42,
-            &voter,
-            BallotChoice::Abstain,
-            b"nonce",
-            b"blind",
-        );
+        let expected =
+            ZkBlindedVoting::make_commitment(42, &voter, BallotChoice::Abstain, b"nonce", b"blind");
         assert_eq!(ballot.commitment, expected);
     }
 
@@ -535,7 +525,10 @@ mod tests {
     fn blinding_proof_digest_is_deterministic() {
         let voter = NodeId::from_label("v");
         let c = [7u8; 32];
-        assert_eq!(BlindingProof::digest(&c, &voter), BlindingProof::digest(&c, &voter));
+        assert_eq!(
+            BlindingProof::digest(&c, &voter),
+            BlindingProof::digest(&c, &voter)
+        );
         let p1 = BlindingProof::stub(&c, &voter);
         let p2 = BlindingProof::stub(&c, &voter);
         assert_eq!(p1, p2);

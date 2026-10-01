@@ -286,7 +286,9 @@ fn hex_prefix(bytes: &[u8], n: usize) -> String {
 pub fn init_identity_manager() {
     println!("Initializing Identity Manager (PeerID + destination-name identities).");
     let mut mgr = IdentityManager::new();
-    let peer = mgr.bootstrap_from_seed(b"mossymesh-bootstrap-node-0").clone();
+    let peer = mgr
+        .bootstrap_from_seed(b"mossymesh-bootstrap-node-0")
+        .clone();
     let dest = mgr
         .announce_destination("mesh", &["lxmf", "delivery"])
         .expect("local identity set");
@@ -371,6 +373,9 @@ mod tests {
         let pk_bytes = [7u8; 32];
         let p = PeerId::from_key_bytes(pk_bytes);
         assert_eq!(p.key(), pk_bytes);
-        assert_eq!(p.id, peer_id_from_public_key(&PublicKey::from_bytes(pk_bytes)));
+        assert_eq!(
+            p.id,
+            peer_id_from_public_key(&PublicKey::from_bytes(pk_bytes))
+        );
     }
 }

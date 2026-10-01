@@ -183,9 +183,7 @@ impl Doc {
     }
 
     pub fn map_get(&self, key: &str) -> Option<&[u8]> {
-        self.map
-            .get(key)
-            .and_then(|v| v.value.as_ref().map(|b| b.as_slice()))
+        self.map.get(key).and_then(|v| v.value.as_deref())
     }
 
     pub fn map_keys(&self) -> impl Iterator<Item = &String> {
@@ -359,13 +357,7 @@ impl Doc {
                 }
             }
             CrdtOp::MapDelete { key, time } => {
-                self.map.insert(
-                    key,
-                    LwwValue {
-                        value: None,
-                        time,
-                    },
-                );
+                self.map.insert(key, LwwValue { value: None, time });
                 if time.wall >= self.next_wall {
                     self.next_wall = time.wall + 1;
                 }
