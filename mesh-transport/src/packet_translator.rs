@@ -586,6 +586,9 @@ mod tests {
         assert!(!cache.is_duplicate(7));
         assert!(cache.forget(7));
         assert!(!cache.is_duplicate(7), "forgotten id is new again");
+        // 7 was re-added by is_duplicate above, so forget succeeds once more.
+        assert!(cache.forget(7));
+        // Now 7 is gone; forgetting again returns false.
         assert!(!cache.forget(7));
     }
 }
