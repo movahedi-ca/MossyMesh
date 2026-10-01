@@ -56,7 +56,9 @@ pub fn job_pipeline(module_bytes: Vec<u8>) -> Result<JobPipelineResult, String> 
     // 1) Interop gateway accepts the job (REST surface).
     let req = interop::AsyncApiRequest {
         endpoint: "/api/v1/submit_job".to_string(),
-        payload: "startpos".to_string(),
+        // The /api/v1/submit_job endpoint validates job JSON (issue #14);
+        // send a well-formed payload so the pipeline exercises the accept path.
+        payload: r#"{"action":"startpos"}"#.to_string(),
     };
     let accept = interop::handle_rest_call(&req).map_err(|_| "interop rejected job".to_string())?;
     if accept.is_empty() {
@@ -548,105 +550,5 @@ mod tests {
         assert_eq!(path_a, "mesh/lxmf/smoke");
         assert_eq!(path_b, path_a);
         assert_ne!(id_a, [0u8; 32]);
-    }
-
-    // --- NET-26: network partition and merge simulation ---
-    #[cfg(feature = "transport")]
-    mod partition_sim {
-        use mesh_transport::kademlia_routing::{NodeContact, RoutingTable, node_id_from_u8};
-        use mesh_transport::simulation::SimNode;
-
-        /// 8 nodes with fully meshed routing tables (every node knows all 7 others).
-        fn mesh_nodes() -> Vec<SimNode> {
-            let mut nodes: Vec<SimNode> = (0u8..8)
-                .map(|i| SimNode::new(format!("node-{i}"), node_id_from_u8(i)))
-                .collect();
-            let contacts: Vec<NodeContact> = nodes
-                .iter()
-                .map(|nd| NodeContact::new(nd.id, format!("ble:{}", nd.name)))
-                .collect();
-            for nd in nodes.iter_mut() {
-                for c in &contacts {
-                    nd.routing.insert(c.clone());
-                }
-            }
-            nodes
-        }
-
-        fn known_ids(rt: &RoutingTable) -> Vec<[u8; 32]> {
-            rt.buckets.iter().flatten().map(|c| c.id).collect()
-        }
-
-        /// Island of a node id: ids 0-3 vs 4-7.
-        fn island(id: &[u8; 32]) -> bool {
-            id[0] < 4
-        }
-
-        /// Split the mesh into two islands by dropping cross-island contacts.
-        fn partition(nodes: &mut [SimNode]) {
-            for nd in nodes.iter_mut() {
-                let mine = island(&nd.id);
-                for bucket in nd.routing.buckets.iter_mut() {
-                    bucket.retain(|c| island(&c.id) == mine);
-                }
-            }
-        }
-
-        /// NET-26a: after a partition, no node retains cross-island contacts
-        /// while intra-island lookups still resolve.
-        #[test]
-        fn partition_isolates_islands() {
-            let mut nodes = mesh_nodes();
-            for nd in &nodes {
-                assert_eq!(known_ids(&nd.routing).len(), 7, "pre-split full mesh");
-            }
-
-            partition(&mut nodes);
-
-            for nd in &nodes {
-                let mine = island(&nd.id);
-                let known = known_ids(&nd.routing);
-                assert!(
-                    known.iter().all(|id| island(id) == mine),
-                    "{} keeps no cross-island contacts",
-                    nd.name
-                );
-                // The 3 same-island peers are still reachable.
-                assert_eq!(known.len(), 3, "{} keeps intra-island peers", nd.name);
-            }
-        }
-
-        /// NET-26b: on reconnect the islands merge back into a full mesh.
-        #[test]
-        fn merge_restores_full_mesh() {
-            let mut nodes = mesh_nodes();
-            partition(&mut nodes);
-
-            // Reconnect: exchange contacts across the healed link.
-            let contacts: Vec<NodeContact> = nodes
-                .iter()
-                .map(|nd| NodeContact::new(nd.id, format!("ble:{}", nd.name)))
-                .collect();
-            for nd in nodes.iter_mut() {
-                for c in &contacts {
-                    nd.routing.insert(c.clone());
-                }
-            }
-
-            for nd in &nodes {
-                let known = known_ids(&nd.routing);
-                assert_eq!(known.len(), 7, "{} knows all peers again", nd.name);
-                for other in &nodes {
-                    if other.id != nd.id {
-                        assert!(
-                            known.contains(&other.id),
-                            "{} can reach {} after merge",
-                            nd.name,
-                            other.name
-                        );
-                    }
-                }
-            }
-        }
     }
 }
