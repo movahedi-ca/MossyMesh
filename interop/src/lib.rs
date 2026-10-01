@@ -1109,9 +1109,13 @@ mod tests {
 
         // HTTP handler maps it to 429.
         let addr: SocketAddr = "127.0.0.1:55994".parse().unwrap();
-        let err = submit_job_handler(ConnectInfo(addr), HeaderMap::new(), r#"{"action":"ping"}"#.into())
-            .await
-            .unwrap_err();
+        let err = submit_job_handler(
+            ConnectInfo(addr),
+            HeaderMap::new(),
+            r#"{"action":"ping"}"#.into(),
+        )
+        .await
+        .unwrap_err();
         assert_eq!(err, StatusCode::TOO_MANY_REQUESTS);
 
         // Cleanup so other tests sharing the global outbox are unaffected.
