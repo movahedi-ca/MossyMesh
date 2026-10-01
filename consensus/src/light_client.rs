@@ -199,9 +199,12 @@ impl LightClient {
         let mut seen = HashSet::new();
         let mut valid = 0usize;
         for sig in signatures {
-            let key = self.validators.get(sig.validator_index).ok_or(
-                ConsensusError::InvalidInput("signature references an unknown validator"),
-            )?;
+            let key =
+                self.validators
+                    .get(sig.validator_index)
+                    .ok_or(ConsensusError::InvalidInput(
+                        "signature references an unknown validator",
+                    ))?;
             // Each validator counts once; duplicates do not inflate the tally.
             if !seen.insert(sig.validator_index) {
                 continue;
@@ -336,10 +339,7 @@ mod tests {
         let (t, _) = fixture();
         let (mut lc, _) = gated_client(t.root_hash());
         let cp = fresh_checkpoint(1, [0xAAu8; 32]);
-        assert_eq!(
-            lc.retarget(&cp, &[]),
-            Err(ConsensusError::InvalidProof)
-        );
+        assert_eq!(lc.retarget(&cp, &[]), Err(ConsensusError::InvalidProof));
         assert_eq!(lc.trusted_root(), t.root_hash());
     }
 
@@ -350,10 +350,7 @@ mod tests {
         let cp = fresh_checkpoint(1, [0xBBu8; 32]);
         // Only 1 of the required 2 signatures.
         let sigs = vec![sign(&sks, 0, &cp)];
-        assert_eq!(
-            lc.retarget(&cp, &sigs),
-            Err(ConsensusError::InvalidProof)
-        );
+        assert_eq!(lc.retarget(&cp, &sigs), Err(ConsensusError::InvalidProof));
         assert_eq!(lc.trusted_root(), t.root_hash());
     }
 
@@ -428,10 +425,7 @@ mod tests {
         let (mut lc, sks) = gated_client(t.root_hash());
         let cp = fresh_checkpoint(1, [0x22u8; 32]);
         let sigs = vec![sign(&sks, 0, &cp), sign(&sks, 0, &cp)];
-        assert_eq!(
-            lc.retarget(&cp, &sigs),
-            Err(ConsensusError::InvalidProof)
-        );
+        assert_eq!(lc.retarget(&cp, &sigs), Err(ConsensusError::InvalidProof));
     }
 
     #[test]
@@ -447,10 +441,7 @@ mod tests {
             validator_index: 1,
             signature: foreign,
         });
-        assert_eq!(
-            lc.retarget(&cp, &sigs),
-            Err(ConsensusError::InvalidProof)
-        );
+        assert_eq!(lc.retarget(&cp, &sigs), Err(ConsensusError::InvalidProof));
     }
 
     #[test]
@@ -471,9 +462,7 @@ mod tests {
     fn with_validators_rejects_bad_quorum() {
         let (_, lc) = fixture();
         let sks = signing_keys(3);
-        assert!(lc
-            .with_validators(verifying_keys(&sks), 0)
-            .is_err());
+        assert!(lc.with_validators(verifying_keys(&sks), 0).is_err());
         let (_, lc2) = fixture();
         assert!(lc2.with_validators(verifying_keys(&sks), 4).is_err());
         let (_, lc3) = fixture();
