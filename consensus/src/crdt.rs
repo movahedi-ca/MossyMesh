@@ -712,7 +712,6 @@ mod tests {
         assert_eq!(doc.op_log_len(), 200);
     }
 
-
     #[test]
     fn delete_before_insert_converges() {
         // Issue #31: a delete integrated before its target insert must
