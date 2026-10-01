@@ -136,17 +136,11 @@ pub async fn run_http_server() -> Result<(), HttpServerError> {
     match validate_gateway_bind(&bind, gateway_token().as_deref()) {
         GatewayBindDecision::Allow => {}
         GatewayBindDecision::AllowWithWarning => {
-            eprintln!(
-                "WARNING: MESH_GATEWAY_TOKEN is not set, so the job API on {bind} \
-                 accepts unauthenticated requests. The loopback bind is the only \
-                 access control. Set MESH_GATEWAY_TOKEN to require a Bearer <redacted>"
-            );
+            eprintln!("WARNING: MESH_GATEWAY_TOKEN is not set; job API on {bind} accepts unauthenticated requests.");
         }
         GatewayBindDecision::Refuse => {
             return Err(HttpServerError::Bind(format!(
-                "refusing to bind {bind}: a non-loopback MESH_GATEWAY_BIND without \
-                 MESH_GATEWAY_TOKEN would expose the job API to the network \
-                 unauthenticated. Set MESH_GATEWAY_TOKEN or bind loopback."
+                "refusing to bind {bind}: non-loopback bind without MESH_GATEWAY_TOKEN"
             )));
         }
     }
