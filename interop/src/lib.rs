@@ -9,7 +9,15 @@ pub mod openapi_gateway;
 pub mod twamm;
 
 use std::sync::{Mutex, OnceLock};
-use axum::{routing::{get, post}, Router, Json, extract::State};
+use std::collections::HashMap;
+use std::net::{IpAddr, SocketAddr};
+use std::time::{Duration, Instant};
+use axum::{
+    extract::{ConnectInfo, State},
+    http::{header, HeaderMap, StatusCode},
+    routing::{get, post},
+    Router, Json,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -89,7 +97,10 @@ pub struct GenericPayload {
     fen: String,
 }
 
-/// Starts an Axum HTTP server on port 8080 for the frontend.
+/// Starts an Axum HTTP server for the frontend.
+///
+/// Binds loopback by default (override with `MESH_GATEWAY_BIND`); the old
+/// 0.0.0.0 bind exposed an unauthenticated remote surface on shared LANs.
 pub async fn run_http_server() {
     let app = Router::new()
         .route("/api/v1/health", get(health_handler).post(health_handler))
@@ -97,27 +108,107 @@ pub async fn run_http_server() {
         .route("/api-docs/openapi.json", get(api_docs::serve_openapi_json))
         .merge(api_docs::swagger_ui());
 
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await.unwrap();
-    println!("Interop: HTTP Server listening on 0.0.0.0:8080");
-    axum::serve(listener, app).await.unwrap();
+    let bind = std::env::var("MESH_GATEWAY_BIND").unwrap_or_else(|_| "127.0.0.1:8080".into());
+    let listener = tokio::net::TcpListener::bind(&bind).await.unwrap();
+    println!("Interop: HTTP Server listening on {}", bind);
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await
+    .unwrap();
 }
 
 async fn health_handler() -> &'static str {
     "Mesh Island Active"
 }
 
-async fn submit_job_handler(body: String) -> &'static str {
+/// Bearer <redacted> for the job API. Read from `MESH_GATEWAY_TOKEN`; when unset,
+/// the loopback-only bind is the access control (local daemon and UI only).
+fn gateway_token() -> Option<String> {
+    std::env::var("MESH_GATEWAY_TOKEN").ok().filter(|t| !t.is_empty())
+}
+
+fn check_auth(headers: &HeaderMap) -> bool {
+    let Some(expected) = gateway_token() else {
+        return true;
+    };
+    let Some(value) = headers.get(header::AUTHORIZATION) else {
+        return false;
+    };
+    let Ok(value) = value.to_str() else {
+        return false;
+    };
+    let Some(presented) = value.strip_prefix("Bearer ") else {
+        return false;
+    };
+    presented.len() == expected.len()
+        && presented.bytes().zip(expected.bytes()).all(|(a, b)| a == b)
+}
+
+/// Bounded per-peer rate limiter: 60 requests per 60 seconds per IP.
+/// The table is capped at 1024 peers so a LAN-wide scan cannot grow it
+/// without bound.
+fn rate_limited_peers() -> &'static Mutex<HashMap<IpAddr, Vec<Instant>>> {
+    static RL: OnceLock<Mutex<HashMap<IpAddr, Vec<Instant>>>> = OnceLock::new();
+    RL.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+const RATE_LIMIT: usize = 60;
+const RATE_WINDOW: Duration = Duration::from_secs(60);
+
+fn check_rate_limit(ip: IpAddr) -> bool {
+    let now = Instant::now();
+    let mut table = match rate_limited_peers().lock() {
+        Ok(t) => t,
+        Err(_) => return false,
+    };
+    if table.len() > 1024 && !table.contains_key(&ip) {
+        return false;
+    }
+    let entry = table.entry(ip).or_default();
+    entry.retain(|t| now.duration_since(*t) < RATE_WINDOW);
+    if entry.len() >= RATE_LIMIT {
+        return false;
+    }
+    entry.push(now);
+    true
+}
+
+/// Payload digest for logs: never print raw request bodies (log injection
+/// on a shared LAN, and bodies may carry private job data).
+fn payload_digest(body: &str) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    body.hash(&mut h);
+    h.finish()
+}
+
+async fn submit_job_handler(
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    body: String,
+) -> Result<&'static str, StatusCode> {
+    if !check_auth(&headers) {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    if !check_rate_limit(addr.ip()) {
+        return Err(StatusCode::TOO_MANY_REQUESTS);
+    }
     match dispatch_job(&body) {
         Ok(job) => {
             println!(
-                "Dispatched '{}' job to DHT outbox (route key {:02x}).",
-                job.action, job.route_key[0]
+                "Dispatched '{}' job to DHT outbox (route key {:02x}, payload digest {:016x}).",
+                job.action,
+                job.route_key[0],
+                payload_digest(&body)
             );
-            "Job Accepted"
+            Ok("Job Accepted")
         }
         Err(e) => {
             println!("Job rejected: {e:?}");
-            "Job Rejected"
+            Err(StatusCode::BAD_REQUEST)
         }
     }
 }
