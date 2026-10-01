@@ -710,13 +710,9 @@ fn get_from(node: &MptNode, key: &[u8]) -> Option<Vec<u8>> {
                 if nibble > 15 {
                     return None;
                 }
-                match children[nibble].as_ref() {
-                    Some(child) => {
-                        rest = &rest[1..];
-                        current = child;
-                    }
-                    None => return None,
-                }
+                let child = children[nibble].as_ref()?;
+                rest = &rest[1..];
+                current = child;
             }
         }
     }
