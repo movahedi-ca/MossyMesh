@@ -21,6 +21,8 @@
 //! - [`erasure`] / [`ring_buffer`] — DA helpers (peer agent surface)
 //! - [`snark`] — constant-size public SNARK types (200-byte radio anchors)
 //! - [`folding`] — Nova-style recursive fold of ledger steps (constant proof size)
+//! - [`verifier`] — swappable folding-verifier trait (mock backend today;
+//!   Nova-SNARK path structured but unwired)
 
 pub mod crdt;
 pub mod error;
@@ -31,6 +33,7 @@ pub mod proof;
 pub mod ring_buffer;
 pub mod snark;
 pub mod trie;
+pub mod verifier;
 
 pub use error::ConsensusError;
 pub use folding::{
@@ -43,6 +46,7 @@ pub use snark::{
     MAX_VERIFICATION_PAYLOAD_BYTES, MICROSPARTAN_GATE_COUNT, MICROSPARTAN_PREPROCESS_META_BYTES,
 };
 pub use trie::{bytes_to_nibbles, MerklePatriciaTrie, MptNode, StateMerge, TrieNode};
+pub use verifier::{default_verifier, FoldingVerifier, MockFoldingVerifier, NovaSnarkVerifier};
 
 /// 32-byte cryptographic digest / content pointer.
 pub type Hash32 = [u8; 32];
