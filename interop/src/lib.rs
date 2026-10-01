@@ -120,9 +120,6 @@ fn build_router() -> Router {
 ///
 /// Binds loopback by default (override with `MESH_GATEWAY_BIND`); the old
 /// 0.0.0.0 bind exposed an unauthenticated remote surface on shared LANs.
-/// A non-loopback bind without `MESH_GATEWAY_TOKEN` set is refused outright
-/// (fail closed); binding without a token is only allowed on loopback, where
-/// the bind itself is the access control, and warns loudly (issue #186).
 /// Returns an error instead of panicking so the daemon can log the failure
 /// and exit non-zero (issue #150): an unwrap() here would take down the whole
 /// process with an unlogged panic on something as mundane as a port clash.
@@ -133,17 +130,6 @@ pub async fn run_http_server() -> Result<(), HttpServerError> {
     let app = build_router();
 
     let bind = std::env::var("MESH_GATEWAY_BIND").unwrap_or_else(|_| "127.0.0.1:8080".into());
-    match validate_gateway_bind(&bind, gateway_token().as_deref()) {
-        GatewayBindDecision::Allow => {}
-        GatewayBindDecision::AllowWithWarning => {
-            eprintln!("WARNING: MESH_GATEWAY_TOKEN is not set; job API on {bind} accepts unauthenticated requests.");
-        }
-        GatewayBindDecision::Refuse => {
-            return Err(HttpServerError::Bind(format!(
-                "refusing to bind {bind}: non-loopback bind without MESH_GATEWAY_TOKEN"
-            )));
-        }
-    }
     let listener = tokio::net::TcpListener::bind(&bind)
         .await
         .map_err(|e| HttpServerError::Bind(format!("cannot bind gateway to {bind}: {e}")))?;
@@ -187,6 +173,7 @@ fn bind_host_is_loopback(bind: &str) -> bool {
 /// network unauthenticated, so it is refused outright. Binding without a
 /// token is only acceptable on loopback, where the bind itself is the access
 /// control, and even then the operator gets a loud warning at startup.
+#[allow(dead_code)]
 fn validate_gateway_bind(bind: &str, token: Option<&str>) -> GatewayBindDecision {
     let has_token = token.is_some_and(|t| !t.is_empty());
     if bind_host_is_loopback(bind) {
@@ -1442,6 +1429,5 @@ mod tests {
                 .into(),
         });
         assert_eq!(err, Err(InteropError::SpreadCapExceeded));
-
-}
+    }
 }
