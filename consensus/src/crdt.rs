@@ -311,6 +311,35 @@ impl Doc {
         op
     }
 
+    /// Drop LWW-map tombstones that no future op can resurrect (issue #194).
+    ///
+    /// A tombstone whose wall time is at most the minimum of the map version
+    /// vector is dominated by every known replica: any map op that can still
+    /// arrive from a known agent carries a strictly larger wall time (its
+    /// agent's counter has advanced past the recorded max), so it wins LWW on
+    /// its own and the tombstone entry can never change an outcome. The op
+    /// log keeps the `MapDelete` op, so a cold-syncing replica still learns
+    /// the deletion; only the live map entry is freed. Collection order does
+    /// not affect the result (removal is by key), so the outcome is
+    /// deterministic.
+    ///
+    /// Run this after syncing with the replica set: `map_vector` is this
+    /// replica's view of who has advanced, so a tombstone ahead of a lagging
+    /// replica's entry is retained (safe: that replica may still send an op
+    /// the tombstone needs to beat).
+    pub fn gc_tombstones(&mut self) {
+        let horizon = self.map_vector.values().copied().min().unwrap_or(0);
+        let dead: Vec<String> = self
+            .map
+            .iter()
+            .filter(|(_, v)| v.value.is_none() && v.time.wall <= horizon)
+            .map(|(k, _)| k.clone())
+            .collect();
+        for k in dead {
+            self.map.remove(&k);
+        }
+    }
+
     /// Integrate a remote or local operation (idempotent).
     pub fn integrate(&mut self, op: CrdtOp) {
         match &op {
@@ -502,6 +531,62 @@ fn map_op_time(op: &CrdtOp) -> LogicalTime {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tombstone_gc_removes_dominated_tombstones() {
+        // Issue #194: a tombstone dominated by every replica's map version
+        // vector can never change an LWW outcome, so gc_tombstones frees it.
+        let mut a = Doc::new(1);
+        let mut b = Doc::new(2);
+        let set = a.map_set("k", b"v");
+        b.integrate(set.clone());
+        let del = a.map_delete("k");
+        b.integrate(del.clone());
+        // Both replicas advance their own clocks past the tombstone's wall,
+        // so min(map_vector) dominates it on each side.
+        let b_op = b.map_set("other", b"x");
+        a.integrate(b_op.clone());
+        let b_op2 = b.map_set("other2", b"z");
+        a.integrate(b_op2.clone());
+        let a_op = a.map_set("another", b"y");
+        b.integrate(a_op.clone());
+
+        assert!(a.map.contains_key("k"));
+        assert!(b.map.contains_key("k"));
+        a.gc_tombstones();
+        b.gc_tombstones();
+        assert!(!a.map.contains_key("k"));
+        assert!(!b.map.contains_key("k"));
+
+        // The op log retains the MapDelete, so a cold-syncing third replica
+        // still converges with "k" absent.
+        let mut c = Doc::new(3);
+        for op in a.op_log.clone() {
+            c.integrate(op);
+        }
+        assert_eq!(c.map_get("k"), None);
+        assert_eq!(a.map_get("other"), c.map_get("other"));
+    }
+
+    #[test]
+    fn tombstone_gc_keeps_tombstones_ahead_of_lagging_replica() {
+        // Issue #194: gc_tombstones must retain a tombstone that a lagging
+        // replica has not yet dominated in this replica's map version vector.
+        // b's next op could still carry a wall time the tombstone needs to beat.
+        let mut a = Doc::new(1);
+        let mut b = Doc::new(2);
+        let set = a.map_set("k", b"v");
+        b.integrate(set.clone());
+        let b_op = b.map_set("bkey", b"1");
+        a.integrate(b_op.clone());
+        let del = a.map_delete("k"); // wall 2 on a; b's recorded max is wall 1
+        let _ = del;
+        assert!(a.map.contains_key("k"));
+        a.gc_tombstones();
+        // min(map_vector) == 1 (b is lagging) < tombstone wall 2: retained.
+        assert!(a.map.contains_key("k"));
+        assert_eq!(a.map_get("k"), None); // still a tombstone, not resurrected
+    }
 
     #[test]
     fn delete_before_insert_converges() {
