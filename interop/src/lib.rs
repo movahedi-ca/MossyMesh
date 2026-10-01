@@ -1104,28 +1104,19 @@ mod tests {
             validate_gateway_bind("127.0.0.1:8080", None),
             AllowWithWarning
         );
-        assert_eq!(
-            validate_gateway_bind("[::1]:8080", None),
-            AllowWithWarning
-        );
+        assert_eq!(validate_gateway_bind("[::1]:8080", None), AllowWithWarning);
         assert_eq!(
             validate_gateway_bind("localhost:8080", None),
             AllowWithWarning
         );
         // Loopback with a token: clean allow.
-        assert_eq!(
-            validate_gateway_bind("127.0.0.1:8080", Some("tok")),
-            Allow
-        );
+        assert_eq!(validate_gateway_bind("127.0.0.1:8080", Some("tok")), Allow);
         // Non-loopback without a token: refused outright.
         assert_eq!(validate_gateway_bind("0.0.0.0:8080", None), Refuse);
         assert_eq!(validate_gateway_bind("192.168.1.5:8080", None), Refuse);
         assert_eq!(validate_gateway_bind("[::]:8080", None), Refuse);
         // Non-loopback with a token: allowed.
-        assert_eq!(
-            validate_gateway_bind("0.0.0.0:8080", Some("tok")),
-            Allow
-        );
+        assert_eq!(validate_gateway_bind("0.0.0.0:8080", Some("tok")), Allow);
         assert_eq!(
             validate_gateway_bind("192.168.1.5:8080", Some("tok")),
             Allow
@@ -1134,9 +1125,6 @@ mod tests {
         assert_eq!(validate_gateway_bind("0.0.0.0:8080", Some("")), Refuse);
         // Unparseable host fails closed.
         assert_eq!(validate_gateway_bind("not a bind addr", None), Refuse);
-        assert_eq!(
-            validate_gateway_bind("not a bind addr", Some("tok")),
-            Allow
-        );
+        assert_eq!(validate_gateway_bind("not a bind addr", Some("tok")), Allow);
     }
 }
