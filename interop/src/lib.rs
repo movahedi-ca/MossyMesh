@@ -360,9 +360,6 @@ fn handle_liquidity(req: &AsyncApiRequest) -> Result<String, InteropError> {
                     "{{\"node_id\":\"{}\",\"tokens_airdropped\":{},\"status\":\"claimed\"}}",
                     node_id, tokens
                 )),
-                // Idempotent claim (issue #46): a well-formed claim with
-                // nothing left to claim is not a malformed request, so it
-                // must not 400. Report zero tokens instead.
                 Err(liquidity::LiquidityError::StillOffline) => Err(InteropError::GatewayDormant),
                 Err(_) => Err(InteropError::BadRequest),
             }
