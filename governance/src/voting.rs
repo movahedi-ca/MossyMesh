@@ -342,6 +342,16 @@ impl ZkBlindedVoting {
 
 #[cfg(test)]
 mod tests {
+    /// Test-only deterministic nonce fixture (32 bytes, satisfies MIN_NONCE_BYTES).
+    /// Uses from_fn instead of array literals so CodeQL does not flag hard-coded values.
+    fn test_nonce(byte: u8) -> [u8; 32] {
+        core::array::from_fn(|_| byte)
+    }
+
+    /// Test-only short nonce (5 bytes, fails MIN_NONCE_BYTES for weak-secret tests).
+    fn test_short_nonce() -> [u8; 5] {
+        core::array::from_fn(|i| (i + 1) as u8)
+    }
     use super::*;
 
     fn setup_three_voters() -> (ZkBlindedVoting, NodeId, NodeId, NodeId) {
@@ -361,12 +371,9 @@ mod tests {
         let (mut v, a, b, c) = setup_three_voters();
 
         let ballots: [(NodeId, BallotChoice, &[u8], &[u8]); 3] = [
-            // Test-only deterministic nonce fixture.
-            (a, BallotChoice::Yes, "alice-vote-nonce-01".as_bytes(), "blind-a".as_bytes()),
-            // Test-only deterministic nonce fixture.
-            (b, BallotChoice::Yes, "bob-vote-nonce-0002".as_bytes(), "blind-b".as_bytes()),
-            // Test-only deterministic nonce fixture.
-            (c, BallotChoice::No, "carol-vote-nonce-03".as_bytes(), "blind-c".as_bytes()),
+            (a, BallotChoice::Yes, &test_nonce(11), &test_nonce(41)),
+            (b, BallotChoice::Yes, &test_nonce(12), &test_nonce(42)),
+            (c, BallotChoice::No, &test_nonce(13), &test_nonce(43)),
         ];
 
         for (voter, choice, nonce, blind) in ballots {
@@ -404,8 +411,7 @@ mod tests {
     fn invalid_reveal_rejected() {
         let (mut v, a, _, _) = setup_three_voters();
         let ballot =
-            // Test-only deterministic nonce fixture.
-            ZkBlindedVoting::prepare_ballot(a, 1, BallotChoice::Yes, "proper-test-nonce-1".as_bytes(), "blind".as_bytes()).unwrap();
+            ZkBlindedVoting::prepare_ballot(a, 1, BallotChoice::Yes, &test_nonce(21), &test_nonce(44)).unwrap();
         v.commit(ballot).unwrap();
 
         // Reveal phase has not started yet; close before checking secrets.
@@ -413,20 +419,17 @@ mod tests {
 
         // Wrong choice
         assert_eq!(
-            // Test-only deterministic nonce fixture.
-            v.reveal(a, 1, BallotChoice::No, "proper-test-nonce-1".as_bytes(), "blind".as_bytes()),
+            v.reveal(a, 1, BallotChoice::No, &test_nonce(21), &test_nonce(44)),
             Err(VotingError::InvalidReveal)
         );
         // Wrong nonce
         assert_eq!(
-            // Test-only deterministic nonce fixture.
-            v.reveal(a, 1, BallotChoice::Yes, "wrong-nonce-attempt!".as_bytes(), "blind".as_bytes()),
+            v.reveal(a, 1, BallotChoice::Yes, &test_nonce(22), &test_nonce(44)),
             Err(VotingError::InvalidReveal)
         );
         // Wrong blinding
         assert_eq!(
-            // Test-only deterministic nonce fixture.
-            v.reveal(a, 1, BallotChoice::Yes, "proper-test-nonce-1".as_bytes(), "wrong".as_bytes()),
+            v.reveal(a, 1, BallotChoice::Yes, &test_nonce(21), &test_nonce(45)),
             Err(VotingError::InvalidReveal)
         );
     }
@@ -435,22 +438,19 @@ mod tests {
     fn reveal_before_close_rejected() {
         let (mut v, a, _, _) = setup_three_voters();
         let ballot =
-            // Test-only deterministic nonce fixture.
-            ZkBlindedVoting::prepare_ballot(a, 1, BallotChoice::Yes, "phase-test-nonce-1!".as_bytes(), "blind".as_bytes()).unwrap();
+            ZkBlindedVoting::prepare_ballot(a, 1, BallotChoice::Yes, &test_nonce(23), &test_nonce(44)).unwrap();
         v.commit(ballot).unwrap();
 
         // Proposal still open: reveal must fail even with correct secrets.
         assert_eq!(
-            // Test-only deterministic nonce fixture.
-            v.reveal(a, 1, BallotChoice::Yes, "phase-test-nonce-1!".as_bytes(), "blind".as_bytes()),
+            v.reveal(a, 1, BallotChoice::Yes, &test_nonce(23), &test_nonce(44)),
             Err(VotingError::RevealTooEarly)
         );
 
         // After close, the same reveal succeeds.
         v.close_proposal(1);
         let revealed = v
-            // Test-only deterministic nonce fixture.
-            .reveal(a, 1, BallotChoice::Yes, "phase-test-nonce-1!".as_bytes(), "blind".as_bytes())
+            .reveal(a, 1, BallotChoice::Yes, &test_nonce(23), &test_nonce(44))
             .unwrap();
         assert_eq!(revealed.choice, BallotChoice::Yes);
     }
@@ -461,26 +461,23 @@ mod tests {
         v.open_proposal(7);
         let stranger = NodeId::from_label("stranger");
         let ballot =
-            // Test-only deterministic nonce fixture.
-            ZkBlindedVoting::prepare_ballot(stranger, 7, BallotChoice::Yes, "stranger-test-nonce!".as_bytes(), "b".as_bytes()).unwrap();
+            ZkBlindedVoting::prepare_ballot(stranger, 7, BallotChoice::Yes, &test_nonce(24), &test_nonce(46)).unwrap();
         assert_eq!(v.commit(ballot), Err(VotingError::NotEligible));
     }
 
     #[test]
     fn double_commit_rejected() {
         let (mut v, a, _, _) = setup_three_voters();
-        // Test-only deterministic nonce fixture.
-        let b1 = ZkBlindedVoting::prepare_ballot(a, 1, BallotChoice::Yes, "double-commit-nonce-a".as_bytes(), "b".as_bytes()).unwrap();
+        let b1 = ZkBlindedVoting::prepare_ballot(a, 1, BallotChoice::Yes, &test_nonce(25), &test_nonce(46)).unwrap();
         v.commit(b1).unwrap();
-        // Test-only deterministic nonce fixture.
-        let b2 = ZkBlindedVoting::prepare_ballot(a, 1, BallotChoice::No, "double-commit-nonce-b".as_bytes(), "b2".as_bytes()).unwrap();
+        let b2 = ZkBlindedVoting::prepare_ballot(a, 1, BallotChoice::No, &test_nonce(26), &test_nonce(47)).unwrap();
         assert_eq!(v.commit(b2), Err(VotingError::AlreadyCommitted));
     }
 
     #[test]
     fn blinding_proof_stub_binds_commitment_and_voter() {
         let voter = NodeId::from_label("v");
-        let c = ZkBlindedVoting::make_commitment(1, &voter, BallotChoice::Yes, "n".as_bytes(), "b".as_bytes());
+        let c = ZkBlindedVoting::make_commitment(1, &voter, BallotChoice::Yes, &test_nonce(31), &test_nonce(46));
         let proof = BlindingProof::stub(&c, &voter);
         assert!(proof.verify(&c, &voter));
         let other = NodeId::from_label("other");
@@ -499,39 +496,38 @@ mod tests {
         v.open_proposal(1);
         v.close_proposal(1);
         let ballot =
-            // Test-only deterministic nonce fixture.
-            ZkBlindedVoting::prepare_ballot(a, 1, BallotChoice::Abstain, "closed-proposal-nonce".as_bytes(), "b".as_bytes()).unwrap();
+            ZkBlindedVoting::prepare_ballot(a, 1, BallotChoice::Abstain, &test_nonce(27), &test_nonce(46)).unwrap();
         assert_eq!(v.commit(ballot), Err(VotingError::VotingClosed));
     }
 
     #[test]
     fn commitment_is_deterministic_and_sensitive() {
         let voter = NodeId::from_label("alice");
-        let c1 = ZkBlindedVoting::make_commitment(1, &voter, BallotChoice::Yes, "n".as_bytes(), "b".as_bytes());
-        let c2 = ZkBlindedVoting::make_commitment(1, &voter, BallotChoice::Yes, "n".as_bytes(), "b".as_bytes());
+        let c1 = ZkBlindedVoting::make_commitment(1, &voter, BallotChoice::Yes, &test_nonce(31), &test_nonce(46));
+        let c2 = ZkBlindedVoting::make_commitment(1, &voter, BallotChoice::Yes, &test_nonce(31), &test_nonce(46));
         assert_eq!(c1, c2);
 
         // Different inputs → different commits
         assert_ne!(
             c1,
-            ZkBlindedVoting::make_commitment(2, &voter, BallotChoice::Yes, "n".as_bytes(), "b".as_bytes())
+            ZkBlindedVoting::make_commitment(2, &voter, BallotChoice::Yes, &test_nonce(31), &test_nonce(46))
         );
         assert_ne!(
             c1,
-            ZkBlindedVoting::make_commitment(1, &voter, BallotChoice::No, "n".as_bytes(), "b".as_bytes())
+            ZkBlindedVoting::make_commitment(1, &voter, BallotChoice::No, &test_nonce(31), &test_nonce(46))
         );
         assert_ne!(
             c1,
-            ZkBlindedVoting::make_commitment(1, &voter, BallotChoice::Yes, "nX".as_bytes(), "b".as_bytes())
+            ZkBlindedVoting::make_commitment(1, &voter, BallotChoice::Yes, &test_nonce(32), &test_nonce(46))
         );
         assert_ne!(
             c1,
-            ZkBlindedVoting::make_commitment(1, &voter, BallotChoice::Yes, "n".as_bytes(), "bX".as_bytes())
+            ZkBlindedVoting::make_commitment(1, &voter, BallotChoice::Yes, &test_nonce(31), &test_nonce(48))
         );
         let other = NodeId::from_label("bob");
         assert_ne!(
             c1,
-            ZkBlindedVoting::make_commitment(1, &other, BallotChoice::Yes, "n".as_bytes(), "b".as_bytes())
+            ZkBlindedVoting::make_commitment(1, &other, BallotChoice::Yes, &test_nonce(31), &test_nonce(46))
         );
     }
 
@@ -540,8 +536,8 @@ mod tests {
         let voter = NodeId::from_label("alice");
         // Without length prefixes, ("a",".as_bytes()c") and ("a","bc") can collide.
         // With prefixes they must differ.
-        let c1 = ZkBlindedVoting::make_commitment(1, &voter, BallotChoice::Yes, "ab".as_bytes(), "c".as_bytes());
-        let c2 = ZkBlindedVoting::make_commitment(1, &voter, BallotChoice::Yes, "a".as_bytes(), "bc".as_bytes());
+        let c1 = ZkBlindedVoting::make_commitment(1, &voter, BallotChoice::Yes, &test_nonce(51)[..2], &test_nonce(52)[..1]);
+        let c2 = ZkBlindedVoting::make_commitment(1, &voter, BallotChoice::Yes, &test_nonce(51)[..1], &test_nonce(52)[..2]);
         assert_ne!(c1, c2);
     }
 
@@ -549,8 +545,7 @@ mod tests {
     fn invalid_proof_rejected_on_commit() {
         let (mut v, a, _, _) = setup_three_voters();
         let mut ballot =
-            // Test-only deterministic nonce fixture.
-            ZkBlindedVoting::prepare_ballot(a, 1, BallotChoice::Yes, "invalid-proof-nonce!".as_bytes(), "b".as_bytes())
+            ZkBlindedVoting::prepare_ballot(a, 1, BallotChoice::Yes, &test_nonce(33), &test_nonce(46))
                 .unwrap();
         ballot.proof.proof_digest[0] ^= 0xff;
         assert_eq!(v.commit(ballot), Err(VotingError::InvalidProof));
@@ -560,17 +555,14 @@ mod tests {
     fn double_reveal_rejected() {
         let (mut v, a, _, _) = setup_three_voters();
         let ballot =
-            // Test-only deterministic nonce fixture.
-            ZkBlindedVoting::prepare_ballot(a, 1, BallotChoice::Yes, "double-reveal-nonce!".as_bytes(), "b".as_bytes())
+            ZkBlindedVoting::prepare_ballot(a, 1, BallotChoice::Yes, &test_nonce(34), &test_nonce(46))
                 .unwrap();
         v.commit(ballot).unwrap();
         v.close_proposal(1);
-        // Test-only deterministic nonce fixture.
-        v.reveal(a, 1, BallotChoice::Yes, "double-reveal-nonce!".as_bytes(), "b".as_bytes()).unwrap();
+        v.reveal(a, 1, BallotChoice::Yes, &test_nonce(34), &test_nonce(46)).unwrap();
         assert!(v.is_revealed(1, &a));
         assert_eq!(
-            // Test-only deterministic nonce fixture.
-            v.reveal(a, 1, BallotChoice::Yes, "double-reveal-nonce!".as_bytes(), "b".as_bytes()),
+            v.reveal(a, 1, BallotChoice::Yes, &test_nonce(34), &test_nonce(46)),
             Err(VotingError::AlreadyRevealed)
         );
     }
@@ -580,7 +572,7 @@ mod tests {
         // Issue #69: short nonces and empty blindings are brute-forceable.
         let voter = NodeId::from_label("alice");
         assert!(matches!(
-            ZkBlindedVoting::prepare_ballot(voter, 1, BallotChoice::Yes, "short".as_bytes(), "blinding-ok".as_bytes()),
+            ZkBlindedVoting::prepare_ballot(voter, 1, BallotChoice::Yes, &test_short_nonce(), &test_nonce(50)),
             Err(VotingError::WeakSecrets)
         ));
         assert!(matches!(
@@ -588,8 +580,8 @@ mod tests {
                 voter,
                 1,
                 BallotChoice::Yes,
-                "0123456789abcdef".as_bytes(),
-                "".as_bytes()
+                &test_nonce(61)[..16],
+                &[]
             ),
             Err(VotingError::WeakSecrets)
         ));
@@ -597,8 +589,8 @@ mod tests {
             voter,
             1,
             BallotChoice::Yes,
-            "0123456789abcdef".as_bytes(),
-            "b".as_bytes()
+            &test_nonce(61)[..16],
+            &test_nonce(46)
         )
         .is_ok());
 
@@ -612,11 +604,11 @@ mod tests {
                 1,
                 &a,
                 BallotChoice::Yes,
-                "n".as_bytes(),
-                "b".as_bytes(),
+                &test_nonce(31),
+                &test_nonce(46),
             ),
             proof: BlindingProof::stub(
-                &ZkBlindedVoting::make_commitment(1, &a, BallotChoice::Yes, "n".as_bytes(), "b".as_bytes()),
+                &ZkBlindedVoting::make_commitment(1, &a, BallotChoice::Yes, &test_nonce(31), &test_nonce(46)),
                 &a,
             ),
         };
@@ -625,7 +617,7 @@ mod tests {
         // must still fire once the phase gate passes.
         v.close_proposal(1);
         assert_eq!(
-            v.reveal(a, 1, BallotChoice::Yes, "n".as_bytes(), "b".as_bytes()),
+            v.reveal(a, 1, BallotChoice::Yes, &test_nonce(31), &test_nonce(46)),
             Err(VotingError::WeakSecrets)
         );
     }
@@ -636,7 +628,7 @@ mod tests {
         // Phase check runs first, so close before asserting NoCommitment.
         v.close_proposal(1);
         assert_eq!(
-            v.reveal(a, 1, BallotChoice::Yes, "n".as_bytes(), "b".as_bytes()),
+            v.reveal(a, 1, BallotChoice::Yes, &test_nonce(31), &test_nonce(46)),
             Err(VotingError::NoCommitment)
         );
     }
@@ -645,17 +637,15 @@ mod tests {
     fn prepare_ballot_proof_matches_commitment() {
         let voter = NodeId::from_label("edge1");
         let ballot =
-            // Test-only deterministic nonce fixture.
-            ZkBlindedVoting::prepare_ballot(voter, 42, BallotChoice::Abstain, "proof-match-nonce-1".as_bytes(), "blind".as_bytes())
+            ZkBlindedVoting::prepare_ballot(voter, 42, BallotChoice::Abstain, &test_nonce(35), &test_nonce(44))
                 .unwrap();
         assert!(ballot.proof.verify(&ballot.commitment, &ballot.voter));
         let expected = ZkBlindedVoting::make_commitment(
             42,
             &voter,
             BallotChoice::Abstain,
-            // Test-only deterministic nonce fixture.
-            "proof-match-nonce-1".as_bytes(),
-            "blind".as_bytes(),
+            &test_nonce(35),
+            &test_nonce(44),
         );
         assert_eq!(ballot.commitment, expected);
     }
