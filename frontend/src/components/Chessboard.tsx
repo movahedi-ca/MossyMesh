@@ -179,7 +179,10 @@ export const Chessboard = () => {
         {RANKS.map((rank, rankIdx) =>
           FILES.map((_file, fileIdx) => {
             const sq = squareName(fileIdx, rank);
-            const isDark = (rank + fileIdx) % 2 === 0;
+            // rankIdx and fileIdx are both 0-indexed here (RANKS[0] is rank 8).
+            // a1 is dark: rankIdx 7 + fileIdx 0 = 7, odd -> dark. h1 (7 + 7)
+            // is even -> light. Regression guard: keep this parity, a1 dark.
+            const isDark = (rankIdx + fileIdx) % 2 === 1;
             const piece = board[rankIdx][fileIdx];
             const glyph = piece ? PIECE_GLYPH[`${piece.color}${piece.type.toUpperCase()}`] : "";
             const isSelected = selected === sq;
