@@ -136,13 +136,19 @@ impl LocalIdentity {
         Self { secret, peer }
     }
 
-    /// Random-ish identity using a process-local counter mix (not CSPRNG).
+    /// Random identity from the OS CSPRNG.
+    ///
+    /// Key material comes from `getrandom` (the OS entropy source), never from
+    /// PIDs, tags, or other guessable inputs (fixes #65). The `tag` parameter
+    /// is kept for API compatibility and is not mixed into key material.
     /// Prefer [`LocalIdentity::generate_from_seed`] for tests and reproducible nodes.
-    pub fn generate_ephemeral(tag: &str) -> Self {
-        let mut seed = Vec::from(b"ephemeral:".as_slice());
-        seed.extend_from_slice(tag.as_bytes());
-        seed.extend_from_slice(&std::process::id().to_le_bytes());
-        Self::generate_from_seed(&seed)
+    pub fn generate_ephemeral(_tag: &str) -> Self {
+        let mut bytes = [0u8; KEY_LEN];
+        getrandom::getrandom(&mut bytes).expect("OS RNG unavailable for ephemeral identity");
+        let secret = SecretKey::from_bytes(bytes);
+        let public_key = PublicKey::derive_from_secret(&secret);
+        let peer = PeerId::from_public_key(public_key);
+        Self { secret, peer }
     }
 }
 
@@ -306,6 +312,16 @@ pub fn init_identity_manager() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ephemeral_keys_are_unpredictable_and_unique() {
+        let a = LocalIdentity::generate_ephemeral("node");
+        let b = LocalIdentity::generate_ephemeral("node");
+        // Same tag must NOT reproduce the same key (the old PID-seeded
+        // scheme did). Two calls must differ.
+        assert_ne!(a.secret.expose(), b.secret.expose());
+        assert_ne!(a.peer.id, b.peer.id);
+    }
 
     #[test]
     fn seed_identity_is_deterministic() {
