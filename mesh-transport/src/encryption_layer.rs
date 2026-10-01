@@ -121,8 +121,7 @@ impl IdentityAead {
 /// Build a deterministic demo nonce from a counter (tests only).
 #[cfg(test)]
 pub fn nonce_from_counter(counter: u64) -> AeadNonce {
-    // codeql[rust/hard-coded-cryptographic-value]: test-only deterministic nonce
-    let mut nonce = [0u8; 12];
+    let mut nonce = [0u8; 12]; // codeql[rust/hard-coded-cryptographic-value]: test-only deterministic nonce
     nonce[4..].copy_from_slice(&counter.to_be_bytes());
     nonce
 }
