@@ -174,7 +174,10 @@ impl CreditLedger {
         preimage: &[u8],
         current_height: Option<u64>,
     ) -> Result<(u64, String), CreditError> {
-        let htlc = self.escrows.get(id).ok_or(CreditError::UnknownEscrow(*id))?;
+        let htlc = self
+            .escrows
+            .get(id)
+            .ok_or(CreditError::UnknownEscrow(*id))?;
         match current_height {
             None => {
                 if !htlc.is_open() {
@@ -212,7 +215,10 @@ impl CreditLedger {
     /// The credit is pre-checked before the cancel state transition, so an
     /// overflow leaves the escrow `Funded` instead of destroying funds.
     pub fn vdf_cancel_escrow(&mut self, id: &[u8; 32]) -> Result<u64, CreditError> {
-        let htlc = self.escrows.get(id).ok_or(CreditError::UnknownEscrow(*id))?;
+        let htlc = self
+            .escrows
+            .get(id)
+            .ok_or(CreditError::UnknownEscrow(*id))?;
         if !htlc.is_open() {
             return Err(CreditError::Htlc(HtlcError::AlreadySettled));
         }
