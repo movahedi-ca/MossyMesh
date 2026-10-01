@@ -117,7 +117,8 @@ impl IdentityAead {
     }
 }
 
-/// Build a deterministic demo nonce from a counter (tests / non-production only).
+/// Build a deterministic demo nonce from a counter (tests only).
+#[cfg(test)]
 pub fn nonce_from_counter(counter: u64) -> AeadNonce {
     let mut nonce = [0u8; 12];
     nonce[4..].copy_from_slice(&counter.to_be_bytes());
