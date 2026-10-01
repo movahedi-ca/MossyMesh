@@ -160,6 +160,7 @@ impl Job {
     /// be bypassable from outside it. A repo-wide grep confirms no in-crate or
     /// cross-crate callers need this public. Use [`Job::admit_and_load`] (or
     /// [`crate::admit::admit_job`]) for the verified path.
+    #[allow(dead_code)] // reserved for future crate-internal admit wiring
     pub(crate) fn bind_admitted_did(&mut self, did: JobDid) {
         self.admitted_did = Some(did);
     }
