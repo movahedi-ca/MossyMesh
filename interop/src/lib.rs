@@ -1231,6 +1231,7 @@ mod tests {
         assert!(ok.is_ok(), "authed call should pass: {ok:?}");
 
         std::env::remove_var("MESH_GATEWAY_TOKEN");
+    }
     /// Issue #160: per-IP 60/60s limit still enforced.
     #[test]
     fn rate_limiter_enforces_per_ip_window() {
