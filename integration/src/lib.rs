@@ -623,21 +623,13 @@ mod tests {
             partition(&mut nodes);
 
             // Reconnect: exchange contacts across the healed link.
-            // #132 added probe rate limiting: inserts into full buckets
-            // within the 32-tick cooldown are dropped. Retry until the
-            // mesh converges; each insert advances the tick.
             let contacts: Vec<NodeContact> = nodes
                 .iter()
                 .map(|nd| NodeContact::new(nd.id, format!("ble:{}", nd.name)))
                 .collect();
-            for _ in 0..10 {
-                for nd in nodes.iter_mut() {
-                    for c in &contacts {
-                        nd.routing.insert(c.clone());
-                    }
-                }
-                if nodes.iter().all(|nd| known_ids(&nd.routing).len() == 7) {
-                    break;
+            for nd in nodes.iter_mut() {
+                for c in &contacts {
+                    nd.routing.insert(c.clone());
                 }
             }
 
