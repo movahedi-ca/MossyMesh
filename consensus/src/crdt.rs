@@ -55,6 +55,13 @@ pub struct SeqItem {
     pub deleted: bool,
 }
 
+/// Applied map ops between opportunistic tombstone collections (issue #194).
+///
+/// The integrate path calls [`Doc::gc_tombstones`] every this many applied
+/// map ops, amortizing the O(map) scan. The trigger counts *applied* ops
+/// (post-LWW-check), so retried/duplicate deliveries cannot inflate it.
+const GC_MAP_OP_INTERVAL: u64 = 64;
+
 /// Operations that can be exchanged as binary deltas between islands.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CrdtOp {
@@ -158,6 +165,9 @@ pub struct Doc {
     next_seq: Seq,
     /// Local wall-clock counter for LWW (monotone).
     next_wall: u64,
+    /// Applied map ops since the last opportunistic tombstone collection.
+    /// Drives [`Doc::maybe_gc_tombstones`] (issue #194).
+    map_ops_since_gc: u64,
 }
 
 impl Doc {
@@ -340,6 +350,26 @@ impl Doc {
         }
     }
 
+    /// Opportunistic tombstone collection on the integrate path (issue #194).
+    ///
+    /// Called after every applied map op; runs [`Doc::gc_tombstones`] every
+    /// [`GC_MAP_OP_INTERVAL`] ops. Collection only removes tombstones that
+    /// can never change a visible LWW outcome for ops from known agents, so
+    /// replicas converge on visible state regardless of arrival order; the
+    /// exact internal map size may differ transiently between replicas and
+    /// converges as more map ops arrive. Inherits the caveat documented on
+    /// [`Doc::gc_tombstones`]: safest once the replica set is fully synced,
+    /// since an op from a previously-unknown agent carrying an older wall
+    /// time for a collected key is treated as live on replicas that already
+    /// collected it.
+    fn maybe_gc_tombstones(&mut self) {
+        self.map_ops_since_gc += 1;
+        if self.map_ops_since_gc >= GC_MAP_OP_INTERVAL {
+            self.map_ops_since_gc = 0;
+            self.gc_tombstones();
+        }
+    }
+
     /// Integrate a remote or local operation (idempotent).
     pub fn integrate(&mut self, op: CrdtOp) {
         match &op {
@@ -406,6 +436,7 @@ impl Doc {
                     self.next_wall = time.wall + 1;
                 }
                 self.note_map_time(time);
+                self.maybe_gc_tombstones();
             }
             CrdtOp::MapDelete { key, time } => {
                 self.map.insert(key, LwwValue { value: None, time });
@@ -413,6 +444,7 @@ impl Doc {
                     self.next_wall = time.wall + 1;
                 }
                 self.note_map_time(time);
+                self.maybe_gc_tombstones();
             }
         }
 
@@ -586,6 +618,42 @@ mod tests {
         // min(map_vector) == 1 (b is lagging) < tombstone wall 2: retained.
         assert!(a.map.contains_key("k"));
         assert_eq!(a.map_get("k"), None); // still a tombstone, not resurrected
+    }
+
+    #[test]
+    fn tombstone_gc_runs_automatically_on_integrate_path() {
+        // Issue #194 rework: gc_tombstones must be reachable without a manual
+        // call. The integrate path collects dominated tombstones
+        // opportunistically every GC_MAP_OP_INTERVAL applied map ops.
+        let mut doc = Doc::new(1);
+        let n_keys = 100u64;
+        for i in 0..n_keys {
+            doc.map_set(format!("auto-key-{i}"), vec![i as u8]);
+        }
+        for i in 0..n_keys {
+            doc.map_delete(format!("auto-key-{i}"));
+        }
+        // 200 applied map ops cross GC_MAP_OP_INTERVAL (64) at ops 64, 128
+        // and 192. Sets take walls 1..=100, deletes walls 101..=200, so the
+        // collection at op 192 (horizon 192) frees every tombstone with
+        // wall <= 192: exactly the last 8 deletes (walls 193..=200) remain.
+        // No manual gc_tombstones() call was made.
+        let remaining: Vec<u64> = (0..n_keys)
+            .filter(|i| doc.map.contains_key(&format!("auto-key-{i}")))
+            .collect();
+        assert_eq!(
+            remaining,
+            (92..n_keys).collect::<Vec<_>>(),
+            "automatic GC must have collected tombstones for keys 0..92"
+        );
+        for i in 0..92u64 {
+            assert_eq!(doc.map_get(&format!("auto-key-{i}")), None);
+        }
+        // A manual pass still clears the trailing partial window.
+        doc.gc_tombstones();
+        assert!((0..n_keys).all(|i| !doc.map.contains_key(&format!("auto-key-{i}"))));
+        // Op log is untouched: cold-syncing replicas still learn the deletes.
+        assert_eq!(doc.op_log_len(), 200);
     }
 
     #[test]
