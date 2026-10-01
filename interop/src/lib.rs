@@ -3,7 +3,6 @@
 //! Phase 5: AsyncAPI / OpenAPI gateway, TWAMM orchestration (2% max-spread),
 //! and retroactive AMM liquidity mining for genesis offline nodes.
 
-pub mod api_docs;
 pub mod liquidity;
 pub mod openapi_gateway;
 pub mod twamm;
