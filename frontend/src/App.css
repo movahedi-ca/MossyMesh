@@ -105,7 +105,14 @@
 .mesh-metrics-sep { opacity: 0.5; }
 .dht-ready { color: var(--primary-color); }
 .dht-boot { color: #c72dfb; }
-.visualizer-wrap { width: 100%; }
+.visualizer-wrap {
+  width: 100%;
+  /* #22: reserve layout space so the node cards mounting after the
+     scanning placeholder does not push content below the fold. */
+  min-height: 22rem;
+  display: flex;
+  flex-direction: column;
+}
 .visualizer-header { margin-bottom: 0.5rem; }
 .visualizer-title {
   font-size: 1.35rem;
@@ -117,8 +124,10 @@
 }
 .visualizer-sub { margin-bottom: 1rem !important; font-size: 0.95rem !important; }
 .visualizer-scanning {
-  display: inline-flex;
+  display: flex;
   align-items: center;
+  justify-content: center;
+  flex: 1;
   gap: 0.6rem;
   color: var(--text-muted);
   font-size: 0.9rem;
@@ -161,6 +170,55 @@
   margin-left: auto;
   margin-right: auto;
   opacity: 0.9;
+}
+
+/* #19: daemon-unreachable toast. Fixed to the viewport so it never
+   disturbs page layout; slides in once per offline episode. */
+.daemon-toast {
+  position: fixed;
+  left: 50%;
+  bottom: 1.5rem;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  background: rgba(20, 20, 28, 0.94);
+  border: 1px solid rgba(255, 179, 71, 0.45);
+  color: var(--text-main);
+  padding: 0.8rem 1rem;
+  border-radius: 12px;
+  z-index: 1000;
+  max-width: min(92vw, 30rem);
+  font-size: 0.88rem;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
+  animation: daemon-toast-in 0.25s ease-out;
+}
+
+.daemon-toast-dot {
+  background-color: #ffb347;
+  box-shadow: 0 0 10px #ffb347;
+  animation: none;
+  flex: none;
+}
+
+.daemon-toast-close {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 0.9rem;
+  padding: 0.25rem 0.4rem;
+  border-radius: 8px;
+  flex: none;
+}
+
+.daemon-toast-close:hover {
+  color: var(--text-main);
+}
+
+@keyframes daemon-toast-in {
+  from { opacity: 0; transform: translate(-50%, 8px); }
+  to { opacity: 1; transform: translate(-50%, 0); }
 }
 @media (max-width: 640px) {
   .network-status-stack {

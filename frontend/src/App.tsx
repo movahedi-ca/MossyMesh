@@ -2,6 +2,7 @@ import "./App.css";
 import { NetworkVisualizer } from "./components/NetworkVisualizer";
 import { Chessboard } from "./components/Chessboard";
 import { NetworkStatus } from "./components/NetworkStatus";
+import { DaemonToast } from "./components/DaemonToast";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { MeshProvider, useOnlineStatus } from "./hooks/useMeshNetwork";
 
@@ -43,6 +44,7 @@ function PortalBody() {
           <NetworkVisualizer />
         </div>
       </div>
+      <DaemonToast />
     </div>
   );
 }

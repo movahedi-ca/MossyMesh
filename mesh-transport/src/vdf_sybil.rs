@@ -93,7 +93,9 @@ impl VdfVerifyError {
             VdfVerifyError::IterationMismatch => "VDF verify failed: iteration claim mismatch.",
             VdfVerifyError::ZeroIterations => "VDF verify failed: zero iterations.",
             VdfVerifyError::OutputMismatch => "VDF verify failed: output mismatch.",
-            VdfVerifyError::UndefinedExponent => "VDF verify failed: fifth-root exponent undefined.",
+            VdfVerifyError::UndefinedExponent => {
+                "VDF verify failed: fifth-root exponent undefined."
+            }
         }
     }
 }
@@ -197,7 +199,7 @@ const MR_WITNESSES: &[u64] = &[2, 3, 5, 7, 11, 13, 23];
 /// - prefer classical form: `p ≡ 3 (mod 5)` so `d = (2p−1)/5` is integral
 /// - probable prime under Miller–Rabin with fixed deterministic witnesses
 pub fn validate_modulus(p: u64) -> bool {
-    if p <= 5 || p % 2 == 0 {
+    if p <= 5 || p.is_multiple_of(2) {
         return false;
     }
     // Classical MinRoot: p ≡ 3 (mod 5). Also accept other residues ≠ 1 if
@@ -207,7 +209,7 @@ pub fn validate_modulus(p: u64) -> bool {
     }
     // Require classical integral d for production-grade acceptance.
     let num = 2u128 * p as u128 - 1;
-    if num % 5 != 0 {
+    if !num.is_multiple_of(5) {
         return false;
     }
     is_prime_u64(p)
@@ -224,14 +226,14 @@ pub fn is_prime_u64(n: u64) -> bool {
         if n == p {
             return true;
         }
-        if n % p == 0 {
+        if n.is_multiple_of(p) {
             return false;
         }
     }
     // Write n-1 = d * 2^s with d odd.
     let mut d = n - 1;
     let mut s = 0u32;
-    while d % 2 == 0 {
+    while d.is_multiple_of(2) {
         d /= 2;
         s += 1;
     }
@@ -259,7 +261,7 @@ fn fifth_root_exponent_for(p: u64) -> Option<u64> {
         return None;
     }
     let num = 2u128 * p as u128 - 1;
-    if num % 5 == 0 {
+    if num.is_multiple_of(5) {
         return Some((num / 5) as u64);
     }
     // d ≡ 5^{-1} (mod p-1)
@@ -551,10 +553,7 @@ mod tests {
             verify_vdf_proof_detailed(&proof).unwrap_err(),
             VdfVerifyError::OutputMismatch
         );
-        assert_eq!(
-            VdfVerifyError::OutputMismatch.code(),
-            "OUTPUT_MISMATCH"
-        );
+        assert_eq!(VdfVerifyError::OutputMismatch.code(), "OUTPUT_MISMATCH");
     }
 
     #[test]
@@ -646,8 +645,10 @@ mod tests {
         assert!(prod.iterations > 1_000_000);
 
         // Test path is orders of magnitude smaller and capped.
-        assert!(DEFAULT_TEST_ITERATIONS < MAX_TEST_ITERATIONS);
-        assert!(MAX_TEST_ITERATIONS < PRODUCTION_ITERATIONS);
+        const {
+            assert!(DEFAULT_TEST_ITERATIONS < MAX_TEST_ITERATIONS);
+            assert!(MAX_TEST_ITERATIONS < PRODUCTION_ITERATIONS);
+        }
         let t = VdfParams::for_tests(DEFAULT_TEST_ITERATIONS);
         assert_eq!(t.iterations, DEFAULT_TEST_ITERATIONS);
         assert_ne!(t.iterations, PRODUCTION_ITERATIONS);

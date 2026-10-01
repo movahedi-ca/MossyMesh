@@ -130,7 +130,8 @@ pub fn symbol_duration_us(cfg: &LoraRadioConfig) -> u64 {
     ((1u64 << sf) * 1_000_000) / bw
 }
 
-/// Integer-ceil division.
+/// Integer-ceil division for `i64` (`i64::div_ceil` is still unstable on stable Rust).
+#[allow(clippy::manual_div_ceil)]
 fn div_ceil(n: i64, d: i64) -> i64 {
     if d <= 0 {
         return 0;
@@ -159,7 +160,7 @@ pub fn estimate_airtime_us(payload_len: usize, cfg: &LoraRadioConfig) -> u64 {
     let crc = if cfg.crc_enabled { 1i64 } else { 0 };
     let h = if cfg.explicit_header { 0i64 } else { 1 };
     let de = if cfg.low_data_rate_optimize { 1i64 } else { 0 };
-    let cr_n = cfg.cr.0.max(1).min(4) as i64;
+    let cr_n = cfg.cr.0.clamp(1, 4) as i64;
 
     let numerator = 8 * pl - 4 * sf + 28 + 16 * crc - 20 * h;
     let denom = 4 * (sf - 2 * de);
@@ -188,7 +189,7 @@ impl DutyCycleTracker {
     /// EU 868.0–868.6: 1% duty cycle over a 1-hour window.
     pub fn eu868_1pct() -> Self {
         Self {
-            limit_bp: 100, // 1.00%
+            limit_bp: 100,            // 1.00%
             window_us: 3_600_000_000, // 1 hour
             on_air_us: 0,
             now_us: 0,
@@ -428,8 +429,10 @@ mod tests {
 
     #[test]
     fn airtime_increases_with_payload_and_sf() {
-        let mut cfg = LoraRadioConfig::default();
-        cfg.sf = SpreadingFactor::Sf7;
+        let mut cfg = LoraRadioConfig {
+            sf: SpreadingFactor::Sf7,
+            ..Default::default()
+        };
         let t_small = estimate_airtime_us(10, &cfg);
         let t_large = estimate_airtime_us(100, &cfg);
         assert!(t_large > t_small);
@@ -504,9 +507,11 @@ mod tests {
 
     #[test]
     fn symbol_duration_sf7_bw125() {
-        let mut cfg = LoraRadioConfig::default();
-        cfg.sf = SpreadingFactor::Sf7;
-        cfg.bw = Bandwidth::Bw125;
+        let cfg = LoraRadioConfig {
+            sf: SpreadingFactor::Sf7,
+            bw: Bandwidth::Bw125,
+            ..Default::default()
+        };
         // 2^7 / 125000 * 1e6 = 1024 us
         assert_eq!(symbol_duration_us(&cfg), 1024);
     }

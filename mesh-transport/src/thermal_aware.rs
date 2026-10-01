@@ -116,10 +116,7 @@ mod tests {
         assert!(should_deprioritize(75.1));
         assert!(should_deprioritize(90.0));
         assert!(!should_deprioritize(74.9));
-        assert_eq!(
-            classify_temperature(80.0),
-            ThermalPriority::Deprioritized
-        );
+        assert_eq!(classify_temperature(80.0), ThermalPriority::Deprioritized);
     }
 
     #[test]

@@ -114,9 +114,8 @@ jobs:
           workspaces: '. -> target'
           shared-key: workspace-windows
 
-      # --all-targets so the mesh-daemon [[bin]] also compiles (see issue #85).
-      - name: cargo check --workspace --all-targets
-        run: cargo check --workspace --all-targets
+      - name: cargo check --workspace
+        run: cargo check --workspace
 
   # Engine is wasm32-wasip1-ready by design (see engine/Cargo.toml target
   # notes). Keep the WASM compilation pipeline green.

@@ -11,13 +11,13 @@ log = "0.4.21"
 sha2 = "0.10"
 chacha20poly1305 = "0.10"
 zeroize = { version = "1.8", features = ["derive"] }
+getrandom = "0.2"
 
-# Path deps for the mesh-daemon binary (mesh-transport/src/main.rs)
+# Path deps for the mesh-daemon binary (mesh-transport/src/main.rs).
 consensus = { path = "../consensus" }
 engine = { path = "../engine" }
 sandbox = { path = "../sandbox" }
 interop = { path = "../interop" }
-getrandom = "0.2"
 
 [lib]
 name = "mesh_transport"
