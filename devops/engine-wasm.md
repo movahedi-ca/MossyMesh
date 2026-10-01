@@ -109,6 +109,20 @@ chmod +x devops/build-engine-wasm.sh
 
 Scripts only add the target (if missing) and run `cargo build -p engine … --target wasm32-wasip1`. They do not change workspace default features or host toolchain.
 
+### 4b. Bundled engine (sandbox `bundled-engine` feature)
+
+`cargo build -p sandbox --features bundled-engine` embeds
+`sandbox/assets/engine.wasm` into the binary for fast daemon cold starts
+(see `sandbox/src/engine_bundle.rs`). Running `./devops/build-engine-wasm.sh`
+first is a **hard prerequisite**: the asset is gitignored and absent on a
+fresh checkout.
+
+If the feature is enabled without the asset, the build still succeeds but
+nothing is embedded (`sandbox::engine_wasm_bytes()` returns `None` and
+callers read from disk as before); `sandbox/build.rs` emits a warning in
+that case. CI covers both paths in the `rust-bundled-engine` job
+(`.github/workflows/ci.yml`).
+
 ---
 
 ## 5. Mnps bench how-to
