@@ -191,9 +191,7 @@ impl RoutingTable {
         // The first probe always fires; the cooldown applies between probes.
         let now = self.tick;
         let last_probe = self.bucket_refreshed_at[idx];
-        if last_probe != 0
-            && now.wrapping_sub(last_probe) < BUCKET_REFRESH_COOLDOWN_TICKS
-        {
+        if last_probe != 0 && now.wrapping_sub(last_probe) < BUCKET_REFRESH_COOLDOWN_TICKS {
             return false;
         }
         self.bucket_refreshed_at[idx] = now;
@@ -249,7 +247,10 @@ impl RoutingTable {
 
     /// All contacts (arbitrary order).
     pub fn all_contacts(&self) -> Vec<NodeContact> {
-        self.buckets.iter().flat_map(|b| b.iter().cloned()).collect()
+        self.buckets
+            .iter()
+            .flat_map(|b| b.iter().cloned())
+            .collect()
     }
 }
 
@@ -448,7 +449,10 @@ pub fn find_node_local(table: &RoutingTable, target: &NodeId) -> Option<NodeCont
 
 /// Initialize module (daemon boot path).
 pub fn init_kademlia_routing() {
-    println!("Initializing Kademlia DHT for offline identity-based routing (k={}).", K);
+    println!(
+        "Initializing Kademlia DHT for offline identity-based routing (k={}).",
+        K
+    );
     let local = node_id_from_u8(0xAA);
     let mut table = RoutingTable::new(local);
     for i in 1u8..=25 {
@@ -506,8 +510,8 @@ mod tests {
         b[0] = 0x0F;
         let d = xor_distance(&a, &b);
         assert_eq!(d[0], 0xFF);
-        for i in 1..32 {
-            assert_eq!(d[i], 0);
+        for byte in &d[1..] {
+            assert_eq!(*byte, 0);
         }
     }
 
@@ -551,7 +555,13 @@ mod tests {
             }
         }
         // At most k contacts in that single bucket.
-        let idx = bucket_for(&local, &[0x80, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        let idx = bucket_for(
+            &local,
+            &[
+                0x80, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0,
+            ],
+        );
         assert!(table.buckets[idx].len() <= K);
         assert_eq!(table.buckets[idx].len(), K);
         assert!(inserted >= K);
@@ -602,10 +612,7 @@ mod tests {
     fn test_iterative_find_node_deterministic() {
         // Build a small mesh of routing tables that know their neighbors.
         let ids: Vec<NodeId> = (0..16u64).map(node_id_from_u64).collect();
-        let mut tables: Vec<RoutingTable> = ids
-            .iter()
-            .map(|id| RoutingTable::new(*id))
-            .collect();
+        let mut tables: Vec<RoutingTable> = ids.iter().map(|id| RoutingTable::new(*id)).collect();
 
         // Ring + skip links so FIND_NODE can walk toward the target.
         for i in 0..tables.len() {
@@ -634,7 +641,11 @@ mod tests {
         assert!(
             result.found_exact || result.closest.iter().any(|c| c.id == target),
             "expected to discover target via iterative lookup; closest={:?}",
-            result.closest.iter().map(|c| c.endpoint.as_str()).collect::<Vec<_>>()
+            result
+                .closest
+                .iter()
+                .map(|c| c.endpoint.as_str())
+                .collect::<Vec<_>>()
         );
         assert!(!result.closest.is_empty());
         assert!(result.rounds >= 1);

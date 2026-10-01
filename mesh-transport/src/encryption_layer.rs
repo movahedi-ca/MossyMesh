@@ -214,7 +214,10 @@ mod tests {
         let mut ct = aead.seal(&nonce, b"data", b"aad").unwrap();
         let last = ct.len() - 1;
         ct[last] ^= 0xff;
-        assert_eq!(aead.open(&nonce, &ct, b"aad"), Err(EncryptionError::DecryptFailed));
+        assert_eq!(
+            aead.open(&nonce, &ct, b"aad"),
+            Err(EncryptionError::DecryptFailed)
+        );
     }
 
     #[test]
@@ -242,7 +245,10 @@ mod tests {
         let aead = IdentityAead::from_raw_key(key);
         let nonce = nonce_from_counter(9);
         let ct = aead.seal(&nonce, b"production payload", b"hdr").unwrap();
-        assert_eq!(aead.open(&nonce, &ct, b"hdr").unwrap(), b"production payload");
+        assert_eq!(
+            aead.open(&nonce, &ct, b"hdr").unwrap(),
+            b"production payload"
+        );
     }
 
     #[test]

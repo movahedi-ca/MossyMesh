@@ -291,10 +291,7 @@ impl IdentityManager {
             if winner == peer {
                 self.peers[pos] = peer;
             }
-            return IdCollisionOutcome::CollisionResolved {
-                winner,
-                loser,
-            };
+            return IdCollisionOutcome::CollisionResolved { winner, loser };
         }
         // Collision with our own id: resolve the same way. If we lose, the
         // caller must rekey via [`IdentityManager::rekey_after_collision`].
@@ -331,11 +328,7 @@ impl IdentityManager {
         // it; mix the attempt count in to guarantee forward progress.
         let mut attempt = 0u32;
         let mut candidate = new_id;
-        while self
-            .peers
-            .iter()
-            .any(|p| p.id == candidate.peer.id)
-        {
+        while self.peers.iter().any(|p| p.id == candidate.peer.id) {
             attempt = attempt.wrapping_add(1);
             seed.extend_from_slice(&attempt.to_le_bytes());
             candidate = LocalIdentity::generate_from_seed(&seed);
@@ -397,7 +390,9 @@ fn hex_prefix(bytes: &[u8], n: usize) -> String {
 pub fn init_identity_manager() {
     println!("Initializing Identity Manager (PeerID + destination-name identities).");
     let mut mgr = IdentityManager::new();
-    let peer = mgr.bootstrap_from_seed(b"mossymesh-bootstrap-node-0").clone();
+    let peer = mgr
+        .bootstrap_from_seed(b"mossymesh-bootstrap-node-0")
+        .clone();
     let dest = mgr
         .announce_destination("mesh", &["lxmf", "delivery"])
         .expect("local identity set");
@@ -417,7 +412,6 @@ pub fn init_identity_manager() {
 #[cfg(test)]
 mod tests {
     use super::*;
-
 
     #[test]
     fn ephemeral_keys_are_unpredictable_and_unique() {
@@ -493,7 +487,10 @@ mod tests {
         let pk_bytes = [7u8; 32];
         let p = PeerId::from_key_bytes(pk_bytes);
         assert_eq!(p.key(), pk_bytes);
-        assert_eq!(p.id, peer_id_from_public_key(&PublicKey::from_bytes(pk_bytes)));
+        assert_eq!(
+            p.id,
+            peer_id_from_public_key(&PublicKey::from_bytes(pk_bytes))
+        );
     }
 
     fn colliding_peer(id: PeerIdBytes, key_byte: u8) -> PeerId {
@@ -510,7 +507,10 @@ mod tests {
         let high = colliding_peer(contested, 0xAA);
 
         // Register low first, then high collides.
-        assert_eq!(mgr.add_peer_checked(low.clone()), IdCollisionOutcome::Accepted);
+        assert_eq!(
+            mgr.add_peer_checked(low.clone()),
+            IdCollisionOutcome::Accepted
+        );
         let out = mgr.add_peer_checked(high.clone());
         match out {
             IdCollisionOutcome::CollisionResolved { winner, loser } => {
@@ -520,7 +520,10 @@ mod tests {
             other => panic!("expected CollisionResolved, got {other:?}"),
         }
         // Peer list holds the winner under the contested id.
-        assert_eq!(mgr.find_peer(&contested).unwrap().public_key, high.public_key);
+        assert_eq!(
+            mgr.find_peer(&contested).unwrap().public_key,
+            high.public_key
+        );
 
         // Same inputs, same verdict: fully deterministic.
         let mut mgr2 = IdentityManager::new();
@@ -538,7 +541,10 @@ mod tests {
         let mut mgr = IdentityManager::new();
         mgr.bootstrap_from_seed(b"local-id-29");
         let p = LocalIdentity::generate_from_seed(b"remote-29").peer;
-        assert_eq!(mgr.add_peer_checked(p.clone()), IdCollisionOutcome::Accepted);
+        assert_eq!(
+            mgr.add_peer_checked(p.clone()),
+            IdCollisionOutcome::Accepted
+        );
         assert_eq!(
             mgr.add_peer_checked(p),
             IdCollisionOutcome::DuplicateIgnored

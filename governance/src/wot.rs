@@ -164,10 +164,7 @@ impl WotGraph {
     }
 
     pub fn invitees_of(&self, voucher: &NodeId) -> Vec<NodeId> {
-        self.by_voucher
-            .get(voucher)
-            .cloned()
-            .unwrap_or_default()
+        self.by_voucher.get(voucher).cloned().unwrap_or_default()
     }
 
     /// Register the ed25519 verifying key a member vouches with.
@@ -282,7 +279,13 @@ mod tests {
         nonce_byte: u8,
     ) -> VoucherConsent {
         // Test-only deterministic nonce; each test uses a distinct byte value.
-        VoucherConsent::issue(sk, voucher, invitee, power, core::array::from_fn(|_| nonce_byte))
+        VoucherConsent::issue(
+            sk,
+            voucher,
+            invitee,
+            power,
+            core::array::from_fn(|_| nonce_byte),
+        )
     }
 
     #[test]
@@ -291,7 +294,9 @@ mod tests {
         let alice = NodeId::from_label("alice");
 
         // Test-only deterministic nonce.
-        let lock = g.onboard(&consent(&sk, root, alice, 3, 1)).expect("onboard");
+        let lock = g
+            .onboard(&consent(&sk, root, alice, 3, 1))
+            .expect("onboard");
         assert_eq!(lock.collateral, quadratic_cost(3));
         assert!(g.is_onboarded(&alice));
         assert_eq!(g.staking.locked_collateral(&root), quadratic_cost(3));
@@ -308,10 +313,7 @@ mod tests {
         let attacker_sk = SigningKey::from_bytes(&core::array::from_fn(|_| 9u8));
         // Test-only deterministic nonce.
         let forged = consent(&attacker_sk, root, alice, 3, 2);
-        assert_eq!(
-            g.onboard(&forged),
-            Err(WotError::InvalidVoucherSignature)
-        );
+        assert_eq!(g.onboard(&forged), Err(WotError::InvalidVoucherSignature));
         assert!(!g.is_onboarded(&alice));
         assert_eq!(g.staking.locked_collateral(&root), 0);
     }
@@ -325,10 +327,7 @@ mod tests {
         // Test-only deterministic nonce.
         let mut bad_sig = consent(&sk, root, bob, 4, 3);
         bad_sig.signature[0] ^= 0xff;
-        assert_eq!(
-            g.onboard(&bad_sig),
-            Err(WotError::InvalidVoucherSignature)
-        );
+        assert_eq!(g.onboard(&bad_sig), Err(WotError::InvalidVoucherSignature));
 
         // Power units changed after signing.
         // Test-only deterministic nonce.

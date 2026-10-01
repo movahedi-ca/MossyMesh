@@ -65,7 +65,10 @@ pub enum TwammError {
 impl std::fmt::Display for TwammError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            TwammError::SpreadExceeded { spread_bps, max_bps } => {
+            TwammError::SpreadExceeded {
+                spread_bps,
+                max_bps,
+            } => {
                 write!(
                     f,
                     "spread {spread_bps} bps exceeds max cap of {max_bps} bps"
@@ -91,11 +94,7 @@ pub fn spread_bps(execution_price: u64, reference_price: u64) -> Result<u32, Twa
     if reference_price == 0 || execution_price == 0 {
         return Err(TwammError::InvalidPrice);
     }
-    let diff = if execution_price >= reference_price {
-        execution_price - reference_price
-    } else {
-        reference_price - execution_price
-    };
+    let diff = execution_price.abs_diff(reference_price);
     let bps = diff
         .saturating_mul(BPS_DENOM)
         .checked_div(reference_price)
@@ -149,7 +148,11 @@ pub fn spread_within_cap(execution_price: u64, reference_price: u64) -> bool {
 }
 
 /// Apply a buy or sell against a quoted execution price and return `(amount_out, execution_price)`.
-fn quote_fill(side: OrderSide, amount_in: u64, execution_price: u64) -> Result<(u64, u64), TwammError> {
+fn quote_fill(
+    side: OrderSide,
+    amount_in: u64,
+    execution_price: u64,
+) -> Result<(u64, u64), TwammError> {
     if amount_in == 0 {
         return Err(TwammError::ZeroAmount);
     }
@@ -246,8 +249,12 @@ impl TwammEngine {
             return Err(TwammError::ZeroAmount);
         }
 
-        let (amount_out, bps) =
-            quote_with_spread_cap(order.side, amount_in, execution_price, order.reference_price)?;
+        let (amount_out, bps) = quote_with_spread_cap(
+            order.side,
+            amount_in,
+            execution_price,
+            order.reference_price,
+        )?;
 
         Ok(StreamFill {
             order_id: order_id.to_string(),
@@ -275,9 +282,8 @@ impl TwammEngine {
             .position(|o| o.id == order_id)
             .ok_or(TwammError::OrderNotFound)?;
 
-        self.orders[idx].remaining_in = self.orders[idx]
-            .remaining_in
-            .saturating_sub(fill.amount_in);
+        self.orders[idx].remaining_in =
+            self.orders[idx].remaining_in.saturating_sub(fill.amount_in);
         self.orders[idx].slices_remaining -= 1;
 
         Ok(fill)
@@ -367,12 +373,14 @@ pub fn parse_order_payload(payload: &str) -> Option<(OrderSide, u64, u32, u64, O
     let mut ref_price = None;
     let mut exec_price = None;
 
-    for part in payload.split(|c| c == ',' || c == '&' || c == ';') {
-        let part = part.trim().trim_matches(|c| c == '{' || c == '}' || c == '"');
+    for part in payload.split([',', '&', ';']) {
+        let part = part
+            .trim()
+            .trim_matches(|c| c == '{' || c == '}' || c == '"');
         if part.is_empty() {
             continue;
         }
-        let mut kv = part.splitn(2, |c| c == '=' || c == ':');
+        let mut kv = part.splitn(2, ['=', ':']);
         let key = kv.next()?.trim().trim_matches('"').to_ascii_lowercase();
         let val = kv.next()?.trim().trim_matches('"');
         match key.as_str() {
@@ -410,7 +418,10 @@ mod tests {
         // 201 bps
         let err = enforce_max_spread(1_020_100, 1_000_000).unwrap_err();
         match err {
-            TwammError::SpreadExceeded { spread_bps, max_bps } => {
+            TwammError::SpreadExceeded {
+                spread_bps,
+                max_bps,
+            } => {
                 assert!(spread_bps > MAX_SPREAD_BPS);
                 assert_eq!(max_bps, MAX_SPREAD_BPS);
             }
@@ -486,11 +497,12 @@ mod tests {
     #[test]
     fn stream_rejects_when_exhausted() {
         let mut eng = TwammEngine::new();
-        let id = eng
-            .submit_order(OrderSide::Buy, 100, 1, 1_000_000)
-            .unwrap();
+        let id = eng.submit_order(OrderSide::Buy, 100, 1, 1_000_000).unwrap();
         eng.stream_slice(&id, 1_000_000).unwrap();
-        assert_eq!(eng.stream_slice(&id, 1_000_000), Err(TwammError::OrderExhausted));
+        assert_eq!(
+            eng.stream_slice(&id, 1_000_000),
+            Err(TwammError::OrderExhausted)
+        );
     }
 
     #[test]
@@ -558,7 +570,10 @@ mod tests {
     fn quote_with_spread_cap_rejects_standalone() {
         let err = quote_with_spread_cap(OrderSide::Sell, 1_000, 1_050_000, 1_000_000).unwrap_err();
         match err {
-            TwammError::SpreadExceeded { spread_bps, max_bps } => {
+            TwammError::SpreadExceeded {
+                spread_bps,
+                max_bps,
+            } => {
                 assert_eq!(spread_bps, 500);
                 assert_eq!(max_bps, MAX_SPREAD_BPS);
             }
@@ -654,14 +669,9 @@ mod tests {
     /// T3 + T4: invalid price and exhaustion.
     #[test]
     fn invariant_t3_t4_invalid_and_exhausted() {
-        assert_eq!(
-            enforce_max_spread(0, 1),
-            Err(TwammError::InvalidPrice)
-        );
+        assert_eq!(enforce_max_spread(0, 1), Err(TwammError::InvalidPrice));
         let mut eng = TwammEngine::new();
-        let id = eng
-            .submit_order(OrderSide::Sell, 50, 1, 1_000_000)
-            .unwrap();
+        let id = eng.submit_order(OrderSide::Sell, 50, 1, 1_000_000).unwrap();
         eng.stream_slice(&id, 1_000_000).unwrap();
         assert_eq!(
             eng.stream_slice(&id, 1_000_000),

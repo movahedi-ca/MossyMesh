@@ -3,9 +3,7 @@
 
 use consensus::init_consensus;
 use engine::init_engine;
-use sandbox::init_sandbox;
-use interop::{init_interop, AsyncApiRequest, handle_rest_call, handle_websocket};
-use mesh_transport::wifi_direct::{WifiDirectManager, WifiState};
+use interop::init_interop;
 use mesh_transport::ble_mesh::init_ble_mesh;
 use mesh_transport::identity_manager::init_identity_manager;
 use mesh_transport::kademlia_routing::{
@@ -13,6 +11,8 @@ use mesh_transport::kademlia_routing::{
 };
 use mesh_transport::network::{init_network, MeshNode};
 use mesh_transport::stun_hole_punch::init_stun_hole_punch;
+use mesh_transport::wifi_direct::{WifiDirectManager, WifiPeer, WifiState};
+use sandbox::init_sandbox;
 
 #[tokio::main]
 async fn main() {
@@ -58,18 +58,22 @@ async fn main() {
     // 3. Negotiate Swarm Leadership
     println!("\n[Network] Negotiating offline Access Point leadership...");
     let mut wifi_manager = WifiDirectManager::new(950); // High simulated battery weight
-    wifi_manager.peers_in_range.push(("low_power_peer".to_string(), 150));
+    wifi_manager
+        .peers_in_range
+        .push(WifiPeer::new("low_power_peer", 150));
     wifi_manager.negotiate_group_owner();
 
     match wifi_manager.state {
-        WifiState::GroupOwner => println!("[Network] Successfully claimed Group Owner status. Broadcasting SSID: MossyMesh_Local"),
+        WifiState::GroupOwner => println!(
+            "[Network] Successfully claimed Group Owner status. Broadcasting SSID: MossyMesh_Local"
+        ),
         WifiState::Client => println!("[Network] Yielded to stronger peer. Connecting as Client."),
         _ => println!("[Network] Isolated state."),
     }
 
     // 4. Mount Interop Bridging
     println!("\n[Interop] Mounting HTTP API endpoints...");
-    
+
     let server_handle = tokio::spawn(async {
         interop::run_http_server().await;
     });

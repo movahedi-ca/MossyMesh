@@ -377,8 +377,7 @@ mod tests {
         ];
 
         for (voter, choice, nonce, blind) in ballots {
-            let ballot =
-                ZkBlindedVoting::prepare_ballot(voter, 1, choice, nonce, blind).unwrap();
+            let ballot = ZkBlindedVoting::prepare_ballot(voter, 1, choice, nonce, blind).unwrap();
             v.commit(ballot).unwrap();
         }
         assert_eq!(v.commitment_count(1), 3);
@@ -410,8 +409,14 @@ mod tests {
     #[test]
     fn invalid_reveal_rejected() {
         let (mut v, a, _, _) = setup_three_voters();
-        let ballot =
-            ZkBlindedVoting::prepare_ballot(a, 1, BallotChoice::Yes, &test_nonce(21), &test_nonce(44)).unwrap();
+        let ballot = ZkBlindedVoting::prepare_ballot(
+            a,
+            1,
+            BallotChoice::Yes,
+            &test_nonce(21),
+            &test_nonce(44),
+        )
+        .unwrap();
         v.commit(ballot).unwrap();
 
         // Reveal phase has not started yet; close before checking secrets.
@@ -437,8 +442,14 @@ mod tests {
     #[test]
     fn reveal_before_close_rejected() {
         let (mut v, a, _, _) = setup_three_voters();
-        let ballot =
-            ZkBlindedVoting::prepare_ballot(a, 1, BallotChoice::Yes, &test_nonce(23), &test_nonce(44)).unwrap();
+        let ballot = ZkBlindedVoting::prepare_ballot(
+            a,
+            1,
+            BallotChoice::Yes,
+            &test_nonce(23),
+            &test_nonce(44),
+        )
+        .unwrap();
         v.commit(ballot).unwrap();
 
         // Proposal still open: reveal must fail even with correct secrets.
@@ -460,24 +471,50 @@ mod tests {
         let mut v = ZkBlindedVoting::new();
         v.open_proposal(7);
         let stranger = NodeId::from_label("stranger");
-        let ballot =
-            ZkBlindedVoting::prepare_ballot(stranger, 7, BallotChoice::Yes, &test_nonce(24), &test_nonce(46)).unwrap();
+        let ballot = ZkBlindedVoting::prepare_ballot(
+            stranger,
+            7,
+            BallotChoice::Yes,
+            &test_nonce(24),
+            &test_nonce(46),
+        )
+        .unwrap();
         assert_eq!(v.commit(ballot), Err(VotingError::NotEligible));
     }
 
     #[test]
     fn double_commit_rejected() {
         let (mut v, a, _, _) = setup_three_voters();
-        let b1 = ZkBlindedVoting::prepare_ballot(a, 1, BallotChoice::Yes, &test_nonce(25), &test_nonce(46)).unwrap();
+        let b1 = ZkBlindedVoting::prepare_ballot(
+            a,
+            1,
+            BallotChoice::Yes,
+            &test_nonce(25),
+            &test_nonce(46),
+        )
+        .unwrap();
         v.commit(b1).unwrap();
-        let b2 = ZkBlindedVoting::prepare_ballot(a, 1, BallotChoice::No, &test_nonce(26), &test_nonce(47)).unwrap();
+        let b2 = ZkBlindedVoting::prepare_ballot(
+            a,
+            1,
+            BallotChoice::No,
+            &test_nonce(26),
+            &test_nonce(47),
+        )
+        .unwrap();
         assert_eq!(v.commit(b2), Err(VotingError::AlreadyCommitted));
     }
 
     #[test]
     fn blinding_proof_stub_binds_commitment_and_voter() {
         let voter = NodeId::from_label("v");
-        let c = ZkBlindedVoting::make_commitment(1, &voter, BallotChoice::Yes, &test_nonce(31), &test_nonce(46));
+        let c = ZkBlindedVoting::make_commitment(
+            1,
+            &voter,
+            BallotChoice::Yes,
+            &test_nonce(31),
+            &test_nonce(46),
+        );
         let proof = BlindingProof::stub(&c, &voter);
         assert!(proof.verify(&c, &voter));
         let other = NodeId::from_label("other");
@@ -495,39 +532,87 @@ mod tests {
         v.set_eligible(a, true);
         v.open_proposal(1);
         v.close_proposal(1);
-        let ballot =
-            ZkBlindedVoting::prepare_ballot(a, 1, BallotChoice::Abstain, &test_nonce(27), &test_nonce(46)).unwrap();
+        let ballot = ZkBlindedVoting::prepare_ballot(
+            a,
+            1,
+            BallotChoice::Abstain,
+            &test_nonce(27),
+            &test_nonce(46),
+        )
+        .unwrap();
         assert_eq!(v.commit(ballot), Err(VotingError::VotingClosed));
     }
 
     #[test]
     fn commitment_is_deterministic_and_sensitive() {
         let voter = NodeId::from_label("alice");
-        let c1 = ZkBlindedVoting::make_commitment(1, &voter, BallotChoice::Yes, &test_nonce(31), &test_nonce(46));
-        let c2 = ZkBlindedVoting::make_commitment(1, &voter, BallotChoice::Yes, &test_nonce(31), &test_nonce(46));
+        let c1 = ZkBlindedVoting::make_commitment(
+            1,
+            &voter,
+            BallotChoice::Yes,
+            &test_nonce(31),
+            &test_nonce(46),
+        );
+        let c2 = ZkBlindedVoting::make_commitment(
+            1,
+            &voter,
+            BallotChoice::Yes,
+            &test_nonce(31),
+            &test_nonce(46),
+        );
         assert_eq!(c1, c2);
 
         // Different inputs → different commits
         assert_ne!(
             c1,
-            ZkBlindedVoting::make_commitment(2, &voter, BallotChoice::Yes, &test_nonce(31), &test_nonce(46))
+            ZkBlindedVoting::make_commitment(
+                2,
+                &voter,
+                BallotChoice::Yes,
+                &test_nonce(31),
+                &test_nonce(46)
+            )
         );
         assert_ne!(
             c1,
-            ZkBlindedVoting::make_commitment(1, &voter, BallotChoice::No, &test_nonce(31), &test_nonce(46))
+            ZkBlindedVoting::make_commitment(
+                1,
+                &voter,
+                BallotChoice::No,
+                &test_nonce(31),
+                &test_nonce(46)
+            )
         );
         assert_ne!(
             c1,
-            ZkBlindedVoting::make_commitment(1, &voter, BallotChoice::Yes, &test_nonce(32), &test_nonce(46))
+            ZkBlindedVoting::make_commitment(
+                1,
+                &voter,
+                BallotChoice::Yes,
+                &test_nonce(32),
+                &test_nonce(46)
+            )
         );
         assert_ne!(
             c1,
-            ZkBlindedVoting::make_commitment(1, &voter, BallotChoice::Yes, &test_nonce(31), &test_nonce(48))
+            ZkBlindedVoting::make_commitment(
+                1,
+                &voter,
+                BallotChoice::Yes,
+                &test_nonce(31),
+                &test_nonce(48)
+            )
         );
         let other = NodeId::from_label("bob");
         assert_ne!(
             c1,
-            ZkBlindedVoting::make_commitment(1, &other, BallotChoice::Yes, &test_nonce(31), &test_nonce(46))
+            ZkBlindedVoting::make_commitment(
+                1,
+                &other,
+                BallotChoice::Yes,
+                &test_nonce(31),
+                &test_nonce(46)
+            )
         );
     }
 
@@ -536,17 +621,34 @@ mod tests {
         let voter = NodeId::from_label("alice");
         // Without length prefixes, ("a",".as_bytes()c") and ("a","bc") can collide.
         // With prefixes they must differ.
-        let c1 = ZkBlindedVoting::make_commitment(1, &voter, BallotChoice::Yes, &test_nonce(51)[..2], &test_nonce(52)[..1]);
-        let c2 = ZkBlindedVoting::make_commitment(1, &voter, BallotChoice::Yes, &test_nonce(51)[..1], &test_nonce(52)[..2]);
+        let c1 = ZkBlindedVoting::make_commitment(
+            1,
+            &voter,
+            BallotChoice::Yes,
+            &test_nonce(51)[..2],
+            &test_nonce(52)[..1],
+        );
+        let c2 = ZkBlindedVoting::make_commitment(
+            1,
+            &voter,
+            BallotChoice::Yes,
+            &test_nonce(51)[..1],
+            &test_nonce(52)[..2],
+        );
         assert_ne!(c1, c2);
     }
 
     #[test]
     fn invalid_proof_rejected_on_commit() {
         let (mut v, a, _, _) = setup_three_voters();
-        let mut ballot =
-            ZkBlindedVoting::prepare_ballot(a, 1, BallotChoice::Yes, &test_nonce(33), &test_nonce(46))
-                .unwrap();
+        let mut ballot = ZkBlindedVoting::prepare_ballot(
+            a,
+            1,
+            BallotChoice::Yes,
+            &test_nonce(33),
+            &test_nonce(46),
+        )
+        .unwrap();
         ballot.proof.proof_digest[0] ^= 0xff;
         assert_eq!(v.commit(ballot), Err(VotingError::InvalidProof));
     }
@@ -554,12 +656,18 @@ mod tests {
     #[test]
     fn double_reveal_rejected() {
         let (mut v, a, _, _) = setup_three_voters();
-        let ballot =
-            ZkBlindedVoting::prepare_ballot(a, 1, BallotChoice::Yes, &test_nonce(34), &test_nonce(46))
-                .unwrap();
+        let ballot = ZkBlindedVoting::prepare_ballot(
+            a,
+            1,
+            BallotChoice::Yes,
+            &test_nonce(34),
+            &test_nonce(46),
+        )
+        .unwrap();
         v.commit(ballot).unwrap();
         v.close_proposal(1);
-        v.reveal(a, 1, BallotChoice::Yes, &test_nonce(34), &test_nonce(46)).unwrap();
+        v.reveal(a, 1, BallotChoice::Yes, &test_nonce(34), &test_nonce(46))
+            .unwrap();
         assert!(v.is_revealed(1, &a));
         assert_eq!(
             v.reveal(a, 1, BallotChoice::Yes, &test_nonce(34), &test_nonce(46)),
@@ -572,7 +680,13 @@ mod tests {
         // Issue #69: short nonces and empty blindings are brute-forceable.
         let voter = NodeId::from_label("alice");
         assert!(matches!(
-            ZkBlindedVoting::prepare_ballot(voter, 1, BallotChoice::Yes, &test_short_nonce(), &test_nonce(50)),
+            ZkBlindedVoting::prepare_ballot(
+                voter,
+                1,
+                BallotChoice::Yes,
+                &test_short_nonce(),
+                &test_nonce(50)
+            ),
             Err(VotingError::WeakSecrets)
         ));
         assert!(matches!(
@@ -608,7 +722,13 @@ mod tests {
                 &test_nonce(46),
             ),
             proof: BlindingProof::stub(
-                &ZkBlindedVoting::make_commitment(1, &a, BallotChoice::Yes, &test_short_nonce(), &test_nonce(46)),
+                &ZkBlindedVoting::make_commitment(
+                    1,
+                    &a,
+                    BallotChoice::Yes,
+                    &test_short_nonce(),
+                    &test_nonce(46),
+                ),
                 &a,
             ),
         };
@@ -617,7 +737,13 @@ mod tests {
         // must still fire once the phase gate passes.
         v.close_proposal(1);
         assert_eq!(
-            v.reveal(a, 1, BallotChoice::Yes, &test_short_nonce(), &test_nonce(46)),
+            v.reveal(
+                a,
+                1,
+                BallotChoice::Yes,
+                &test_short_nonce(),
+                &test_nonce(46)
+            ),
             Err(VotingError::WeakSecrets)
         );
     }
@@ -636,9 +762,14 @@ mod tests {
     #[test]
     fn prepare_ballot_proof_matches_commitment() {
         let voter = NodeId::from_label("edge1");
-        let ballot =
-            ZkBlindedVoting::prepare_ballot(voter, 42, BallotChoice::Abstain, &test_nonce(35), &test_nonce(44))
-                .unwrap();
+        let ballot = ZkBlindedVoting::prepare_ballot(
+            voter,
+            42,
+            BallotChoice::Abstain,
+            &test_nonce(35),
+            &test_nonce(44),
+        )
+        .unwrap();
         assert!(ballot.proof.verify(&ballot.commitment, &ballot.voter));
         let expected = ZkBlindedVoting::make_commitment(
             42,
@@ -663,7 +794,10 @@ mod tests {
     fn blinding_proof_digest_is_deterministic() {
         let voter = NodeId::from_label("v");
         let c = [7u8; 32];
-        assert_eq!(BlindingProof::digest(&c, &voter), BlindingProof::digest(&c, &voter));
+        assert_eq!(
+            BlindingProof::digest(&c, &voter),
+            BlindingProof::digest(&c, &voter)
+        );
         let p1 = BlindingProof::stub(&c, &voter);
         let p2 = BlindingProof::stub(&c, &voter);
         assert_eq!(p1, p2);

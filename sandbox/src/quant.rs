@@ -82,7 +82,10 @@ pub fn dequantize_value(q: i8, scale: f32) -> f32 {
 }
 
 /// Quantize a tensor slice into INT8 using the provided static params.
-pub fn quantize_symmetric(data: &[f32], params: &SymmetricInt8Params) -> Result<Vec<i8>, QuantError> {
+pub fn quantize_symmetric(
+    data: &[f32],
+    params: &SymmetricInt8Params,
+) -> Result<Vec<i8>, QuantError> {
     if data.iter().any(|v| !v.is_finite()) {
         return Err(QuantError::NonFiniteValue);
     }
@@ -120,7 +123,9 @@ mod tests {
     fn roundtrip_stays_within_half_scale() {
         let data = vec![-3.5f32, -1.0, 0.0, 0.5, 2.25, 3.5];
         let (q, params) = quantize_tensor(&data).unwrap();
-        assert!(q.iter().all(|&v| v >= -INT8_ABS_MAX && v <= INT8_ABS_MAX));
+        // Upper bound is vacuous (INT8_ABS_MAX == i8::MAX); the real invariant is the
+        // symmetric lower bound (i8::MIN has no positive counterpart).
+        assert!(q.iter().all(|&v| v >= -INT8_ABS_MAX));
         let recon = dequantize_symmetric(&q, &params);
         let bound = max_roundtrip_error(&params) + f32::EPSILON;
         for (a, b) in data.iter().zip(recon.iter()) {

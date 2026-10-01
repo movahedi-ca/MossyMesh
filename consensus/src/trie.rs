@@ -86,7 +86,9 @@ impl MptNode {
                 let child_hash = child.compute_hash()?;
                 hash_extension(path, &child_hash)?
             }
-            MptNode::Branch { children, value, .. } => {
+            MptNode::Branch {
+                children, value, ..
+            } => {
                 let mut hashes: [Option<Hash32>; 16] = [None; 16];
                 for (i, c) in children.iter().enumerate() {
                     if let Some(node) = c {
@@ -169,9 +171,9 @@ impl MerklePatriciaTrie {
             // byte), and splitting a leaf/extension can net-create up to 4
             // nodes (branch + 2 leaves + extension) while the rebuilt path
             // replaces same-kind nodes 1:1.
-            None => self.size_bytes.saturating_add(
-                4 * NODE_OVERHEAD + 2 * key.len() + value.len(),
-            ),
+            None => self
+                .size_bytes
+                .saturating_add(4 * NODE_OVERHEAD + 2 * key.len() + value.len()),
         };
         if next_size > MAX_LEDGER_SIZE {
             return Err(ConsensusError::OutOfMemory);
@@ -308,7 +310,9 @@ fn estimate_node_size(node: Option<&MptNode>) -> usize {
         Some(MptNode::Extension { path, child, .. }) => {
             2 * path.len() + NODE_OVERHEAD + estimate_node_size(Some(child))
         }
-        Some(MptNode::Branch { children, value, .. }) => {
+        Some(MptNode::Branch {
+            children, value, ..
+        }) => {
             let mut s = NODE_OVERHEAD + 2 * value.as_ref().map(|v| v.len()).unwrap_or(0);
             for c in children.iter().flatten() {
                 s = s.saturating_add(estimate_node_size(Some(c)));
@@ -375,7 +379,9 @@ fn collect_leaves(node: &MptNode, prefix: &[u8]) -> Vec<(Vec<u8>, Vec<u8>)> {
             p.extend_from_slice(path);
             collect_leaves(child, &p)
         }
-        MptNode::Branch { children, value, .. } => {
+        MptNode::Branch {
+            children, value, ..
+        } => {
             let mut out = Vec::new();
             if let Some(v) = value {
                 out.push((prefix.to_vec(), v.clone()));
@@ -600,7 +606,9 @@ fn get_from(node: &MptNode, key: &[u8]) -> Option<Vec<u8>> {
                 None
             }
         }
-        MptNode::Branch { children, value, .. } => {
+        MptNode::Branch {
+            children, value, ..
+        } => {
             if key.is_empty() {
                 return value.clone();
             }
@@ -642,7 +650,9 @@ fn build_proof(
             steps.push(ProofStep::Extension { path: path.clone() });
             Ok((terminal, value))
         }
-        MptNode::Branch { children, value, .. } => {
+        MptNode::Branch {
+            children, value, ..
+        } => {
             if key.is_empty() {
                 // Value lives on this branch — terminal includes all child hashes.
                 let v = value.clone().ok_or(ConsensusError::NotFound)?;
@@ -654,7 +664,7 @@ fn build_proof(
                 }
                 return Ok((
                     ProofTerminal::BranchValue {
-                        children: child_hashes,
+                        children: Box::new(child_hashes),
                         value: v.clone(),
                     },
                     v,
@@ -682,7 +692,7 @@ fn build_proof(
 
             steps.push(ProofStep::Branch {
                 nibble,
-                children: child_hashes,
+                children: Box::new(child_hashes),
                 value: value.clone(),
             });
             Ok((terminal, val))
@@ -876,11 +886,7 @@ mod tests {
     fn root_hash_deterministic() {
         let mut a = MerklePatriciaTrie::new();
         let mut b = MerklePatriciaTrie::new();
-        for (k, v) in [
-            (b"x" as &[u8], b"1" as &[u8]),
-            (b"y", b"2"),
-            (b"z", b"3"),
-        ] {
+        for (k, v) in [(b"x" as &[u8], b"1" as &[u8]), (b"y", b"2"), (b"z", b"3")] {
             a.insert(k, v.to_vec()).unwrap();
             b.insert(k, v.to_vec()).unwrap();
         }
@@ -1042,9 +1048,7 @@ mod tests {
     fn insert_order_independent_root_with_memoization() {
         // Memoization must not change the canonical root: different insert
         // orders over the same key set converge to the same state root.
-        let keys: Vec<Vec<u8>> = (0..30)
-            .map(|i| format!("k-{i:02}").into_bytes())
-            .collect();
+        let keys: Vec<Vec<u8>> = (0..30).map(|i| format!("k-{i:02}").into_bytes()).collect();
         let mut a = MerklePatriciaTrie::new();
         let mut b = MerklePatriciaTrie::new();
         for k in &keys {

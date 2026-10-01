@@ -26,8 +26,8 @@
 //!   Nova-SNARK path structured but unwired)
 
 pub mod crdt;
-pub mod error;
 pub mod erasure;
+pub mod error;
 pub mod folding;
 pub mod ipld_codec;
 pub mod light_client;

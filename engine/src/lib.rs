@@ -25,9 +25,7 @@ pub mod tablebase;
 pub use benchmark::{benchmark_mnps, benchmark_mnps_detailed, BenchmarkReport};
 pub use eval::{evaluate_side_to_move, evaluate_white_perspective, MATE_SCORE};
 pub use search::{negamax_search, perft, SearchResult};
-pub use tablebase::{
-    open_tablebase, FileBackedTablebase, StubTablebase, TablebaseProbe, TbWdl,
-};
+pub use tablebase::{open_tablebase, FileBackedTablebase, StubTablebase, TablebaseProbe, TbWdl};
 
 /// DOC 44 / DOC 43: Hard depth cap prevents infinite search loops (battery / WASM safety).
 /// Practical callers may use much smaller depths; this is the absolute ceiling.
@@ -363,7 +361,10 @@ mod tests {
                     matches!(m, Move::Castle { king, rook } if *king == from && *rook == rook_from)
                 })
                 .unwrap_or_else(|| panic!("castle not legal: {from:?}->{king_to:?} in {fen}"));
-            assert!(matches!(mv, Move::Castle { .. }), "expected Castle, got {mv:?}");
+            assert!(
+                matches!(mv, Move::Castle { .. }),
+                "expected Castle, got {mv:?}"
+            );
             engine.make_move(&mv).unwrap();
             let mover = engine.turn().other();
             assert_eq!(
@@ -376,8 +377,14 @@ mod tests {
                 Some((PieceType::Rook, mover)),
                 "rook on {rook_to:?}"
             );
-            assert!(engine.piece_at(from).is_none(), "king origin {from:?} empty");
-            assert!(engine.piece_at(rook_from).is_none(), "rook origin {rook_from:?} empty");
+            assert!(
+                engine.piece_at(from).is_none(),
+                "king origin {from:?} empty"
+            );
+            assert!(
+                engine.piece_at(rook_from).is_none(),
+                "rook origin {rook_from:?} empty"
+            );
             engine.unmake_move().unwrap();
             assert_eq!(
                 engine.piece_at(from),

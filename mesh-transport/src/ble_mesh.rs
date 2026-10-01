@@ -227,11 +227,7 @@ impl BleMeshNode {
             battery_level,
             link_quality: quality,
             last_seen_ms: self.now_ms,
-            last_seq: self
-                .neighbors
-                .get(peer_id)
-                .map(|e| e.last_seq)
-                .unwrap_or(0),
+            last_seq: self.neighbors.get(peer_id).map(|e| e.last_seq).unwrap_or(0),
             cost,
         };
         self.insert_neighbor(entry);
@@ -295,12 +291,11 @@ impl BleMeshNode {
                 return false;
             }
         }
-        self.seen_seq
-            .insert(lsa.origin_id.clone(), lsa.sequence);
+        self.seen_seq.insert(lsa.origin_id.clone(), lsa.sequence);
 
         // Treat LSA origin as a one-hop neighbor if we received it over BLE.
         // Quality is derived from battery as a weak signal proxy when RSSI unknown.
-        let quality = lsa.battery_level.saturating_mul(2).min(255);
+        let quality = lsa.battery_level.saturating_mul(2);
         let cost = 1u32 + (255u32.saturating_sub(quality as u32)) / 16;
         let entry = NeighborEntry {
             node_id: lsa.origin_id.clone(),
@@ -317,8 +312,7 @@ impl BleMeshNode {
     pub fn prune_stale(&mut self) {
         let now = self.now_ms;
         let ttl = self.neighbor_ttl_ms;
-        self.neighbors
-            .retain(|_, e| !e.is_stale(now, ttl));
+        self.neighbors.retain(|_, e| !e.is_stale(now, ttl));
     }
 
     /// Snapshot of neighbor ids sorted for deterministic topology export.

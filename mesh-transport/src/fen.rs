@@ -239,8 +239,7 @@ pub fn fits_single_lora_frame() -> bool {
 mod tests {
     use super::*;
 
-    const STARTPOS: &str =
-        "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
+    const STARTPOS: &str = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
 
     #[test]
     fn startpos_roundtrip() {
@@ -286,9 +285,6 @@ mod tests {
             encode_fen("8/8/8/8/8/8/8/8 x - - 0 1"),
             Err(FenError::BadSide)
         );
-        assert_eq!(
-            decode_fen(&[0u8; 10]),
-            Err(FenError::BadLength(10))
-        );
+        assert_eq!(decode_fen(&[0u8; 10]), Err(FenError::BadLength(10)));
     }
 }
