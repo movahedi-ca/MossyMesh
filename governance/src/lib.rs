@@ -29,7 +29,7 @@ pub mod wot;
 pub use multisig::{AdminMultisig, MultisigError, MultisigProposal, Signature};
 pub use staking::{CollateralLock, QuadraticStaking, StakingError};
 pub use voting::{BallotChoice, BlindedBallot, BlindingProof, VotingError, ZkBlindedVoting};
-pub use wot::{NodeId, VoucherConsent, VoucherEdge, WotError, WotGraph};
+pub use wot::{NodeId, VoucherEdge, WotError, WotGraph};
 
 /// Days until admin multi-sig authority is fully extinguished.
 pub const ADMIN_DECAY_DAYS: u64 = 90;
