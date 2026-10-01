@@ -45,6 +45,10 @@ pub enum HtlcError {
     InvalidAmount,
     /// Payment hash must be a full 32-byte SHA-256 digest.
     InvalidPaymentHash,
+    /// Timeout height must be strictly after the funded height.
+    InvalidTimeout,
+    /// VDF step count must be greater than zero.
+    InvalidVdfSteps,
 }
 
 impl std::fmt::Display for HtlcError {
@@ -57,6 +61,10 @@ impl std::fmt::Display for HtlcError {
             HtlcError::AlreadySettled => write!(f, "htlc already settled"),
             HtlcError::InvalidAmount => write!(f, "amount must be > 0"),
             HtlcError::InvalidPaymentHash => write!(f, "payment hash must be 32 bytes"),
+            HtlcError::InvalidTimeout => {
+                write!(f, "timeout height must be after the funded height")
+            }
+            HtlcError::InvalidVdfSteps => write!(f, "vdf steps must be > 0"),
         }
     }
 }
@@ -189,6 +197,16 @@ impl Htlc {
         // under normal use, and marks an uninitialized / missing hashlock.
         if params.payment_hash == [0u8; 32] {
             return Err(HtlcError::InvalidPaymentHash);
+        }
+        // A timeout at or before the funded height makes the escrow instantly
+        // refundable, so the timeout semantic degenerates. Require a future timeout.
+        if params.timeout_height <= params.funded_height {
+            return Err(HtlcError::InvalidTimeout);
+        }
+        // vdf_steps = 0 makes MockVdf::is_complete() true at fund time, so the
+        // VDF-delayed cancel would succeed immediately with no sequential work.
+        if params.vdf_steps == 0 {
+            return Err(HtlcError::InvalidVdfSteps);
         }
         let seed = params.vdf_seed.unwrap_or_else(|| {
             let mut buf = [0u8; 8];
@@ -599,5 +617,41 @@ mod tests {
         })
         .unwrap_err();
         assert_eq!(err, HtlcError::InvalidPaymentHash);
+    }
+
+    /// Issue #163: degenerate fund parameters are rejected at fund time.
+    #[test]
+    fn fund_rejects_degenerate_timeout_and_vdf_steps() {
+        fn params(timeout: u64, funded: u64, vdf_steps: u64) -> HtlcParams {
+            let preimage = b"fund-guard";
+            HtlcParams {
+                id: sample_id(),
+                sender: "a".into(),
+                receiver: "b".into(),
+                amount: 100,
+                payment_hash: hash_preimage(preimage),
+                timeout_height: timeout,
+                funded_height: funded,
+                vdf_steps,
+                vdf_seed: None,
+            }
+        }
+        // Timeout at or before the funded height: instantly refundable.
+        assert_eq!(
+            Htlc::fund(params(50, 50, 4)).unwrap_err(),
+            HtlcError::InvalidTimeout
+        );
+        assert_eq!(
+            Htlc::fund(params(49, 50, 4)).unwrap_err(),
+            HtlcError::InvalidTimeout
+        );
+        // Zero VDF steps: is_complete() would be true at fund time.
+        assert_eq!(
+            Htlc::fund(params(100, 50, 0)).unwrap_err(),
+            HtlcError::InvalidVdfSteps
+        );
+        // Sane parameters still fund.
+        assert!(Htlc::fund(params(100, 50, 4)).is_ok());
+        assert!(Htlc::fund(params(51, 50, 1)).is_ok());
     }
 }

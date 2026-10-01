@@ -5,6 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::bytes_to_nibbles;
 use crate::error::ConsensusError;
 use crate::ipld_codec::{self, hash_branch, hash_extension, hash_leaf};
 use crate::Hash32;
@@ -43,14 +44,10 @@ pub struct MerkleProof {
     pub key: Vec<u8>,
     /// Value bound at the terminal.
     pub value: Vec<u8>,
-    /// Remaining leaf path nibbles (empty when terminal is a branch value).
-    pub leaf_path: Vec<u8>,
     /// Terminal node at the bottom of the proof.
     pub terminal: ProofTerminal,
     /// Ancestor steps ordered terminal→root (bottom-up application order).
     pub steps: Vec<ProofStep>,
-    /// DOC 32: flat sibling hash list collected from branch steps.
-    pub siblings: Vec<Hash32>,
 }
 
 impl MerkleProof {
@@ -75,6 +72,39 @@ pub fn verify_proof(proof: &MerkleProof, expected_root: &Hash32) -> Result<bool,
                 return Ok(false);
             }
         }
+    }
+
+    // Key binding (issue #190): accumulate the nibble path actually proven by
+    // the terminal + steps and require it to equal the nibbles of proof.key.
+    // Without this, a malicious node can take a valid proof for key K', rewrite
+    // the key field to K, and fool a light client into accepting K' value for K.
+    // Steps are ordered terminal->root, so walk them in reverse to build the
+    // root->terminal nibble path.
+    let mut proven: Vec<u8> = Vec::new();
+    for step in proof.steps.iter().rev() {
+        match step {
+            ProofStep::Extension { path } => {
+                if path.is_empty() {
+                    return Err(ConsensusError::InvalidInput(
+                        "empty extension path in proof",
+                    ));
+                }
+                proven.extend_from_slice(path);
+            }
+            ProofStep::Branch { nibble, .. } => {
+                if *nibble > 15 {
+                    return Err(ConsensusError::InvalidInput("branch nibble out of range"));
+                }
+                proven.push(*nibble);
+            }
+        }
+    }
+    match &proof.terminal {
+        ProofTerminal::Leaf { path, .. } => proven.extend_from_slice(path),
+        ProofTerminal::BranchValue { .. } => {}
+    }
+    if proven != bytes_to_nibbles(&proof.key) {
+        return Ok(false);
     }
 
     let mut current = match &proof.terminal {
@@ -123,6 +153,24 @@ mod tests {
     use crate::trie::MerklePatriciaTrie;
 
     #[test]
+    fn proof_cbor_roundtrip_after_field_removal() {
+        // Issue #196: MerkleProof no longer carries the redundant leaf_path /
+        // siblings fields. CBOR round-trip still works and the decoded proof
+        // verifies under the root.
+        let mut t = MerklePatriciaTrie::new();
+        t.insert(b"alice", b"100".to_vec()).unwrap();
+        t.insert(b"bob", b"200".to_vec()).unwrap();
+        t.insert(b"alice/payment", b"42".to_vec()).unwrap();
+
+        let root = t.root_hash();
+        let proof = t.prove(b"alice").unwrap();
+        let bytes = proof.to_cbor().unwrap();
+        let back = MerkleProof::from_cbor(&bytes).unwrap();
+        assert_eq!(back, proof);
+        assert!(verify_proof(&back, &root).unwrap());
+    }
+
+    #[test]
     fn proof_verifies_for_inserted_key() {
         let mut t = MerklePatriciaTrie::new();
         t.insert(b"alice", b"100".to_vec()).unwrap();
@@ -159,6 +207,49 @@ mod tests {
         assert!(!verify_proof(&proof, &bogus).unwrap());
     }
 
+    #[test]
+    fn relabelled_key_proof_fails() {
+        // Issue #190: a valid proof for key K' with the key field rewritten to K
+        // must not verify. Without key binding this is a key-substitution attack
+        // on light clients.
+        let mut t = MerklePatriciaTrie::new();
+        t.insert(b"alice", b"100".to_vec()).unwrap();
+        t.insert(b"bob", b"200".to_vec()).unwrap();
+        let root = t.root_hash();
+
+        let mut proof = t.prove(b"alice").unwrap();
+        assert!(verify_proof(&proof, &root).unwrap());
+
+        proof.key = b"bob".to_vec();
+        assert!(
+            !verify_proof(&proof, &root).unwrap(),
+            "relabelled proof must not verify"
+        );
+
+        // Same attack shape on a branch-value terminal (key ends at a branch).
+        let mut proof2 = t.prove(b"alice").unwrap();
+        proof2.key = b"aliceX".to_vec();
+        assert!(!verify_proof(&proof2, &root).unwrap());
+    }
+    #[test]
+    fn relabelled_branch_value_terminal_fails() {
+        // Key "a" ends at a branch node (value terminal, no leaf path).
+        let mut t = MerklePatriciaTrie::new();
+        t.insert(b"a", b"1".to_vec()).unwrap();
+        t.insert(b"ab", b"2".to_vec()).unwrap();
+        let root = t.root_hash();
+
+        let proof = t.prove(b"a").unwrap();
+        assert!(matches!(proof.terminal, ProofTerminal::BranchValue { .. }));
+        assert!(verify_proof(&proof, &root).unwrap());
+
+        let mut forged = proof.clone();
+        forged.key = b"ab".to_vec();
+        assert!(
+            !verify_proof(&forged, &root).unwrap(),
+            "relabelled branch-value proof must not verify"
+        );
+    }
     #[test]
     fn single_key_is_leaf_root() {
         let mut t = MerklePatriciaTrie::new();
