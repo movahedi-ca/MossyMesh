@@ -203,7 +203,12 @@ impl WotGraph {
         if self.malicious.contains(&voucher) {
             return Err(WotError::MaliciousInvitee);
         }
-        if !self.consumed_consents.insert(consent.nonce) {
+        // Freshness is checked before the lock, but the nonce is consumed
+        // only after the lock succeeds (fixes #165): a failed onboard
+        // (already-onboarded retry, staking error) must not burn the nonce,
+        // or the legitimate retry would fail with ConsentReplayed and the
+        // voucher would have to re-issue.
+        if self.consumed_consents.contains(&consent.nonce) {
             return Err(WotError::ConsentReplayed);
         }
         if self.nodes.contains(&invitee) {
@@ -211,6 +216,7 @@ impl WotGraph {
         }
 
         let lock = self.staking.lock(voucher, power_units)?;
+        self.consumed_consents.insert(consent.nonce);
         let edge = VoucherEdge {
             voucher,
             invitee,
@@ -226,24 +232,29 @@ impl WotGraph {
     /// Mark `invitee` as malicious and slash the voucher's locked collateral for that edge.
     ///
     /// Returns the slashed collateral amount (quadratic cost of the power units).
+    ///
+    /// The voucher edge is validated BEFORE the node is blacklisted (fixes
+    /// #164): a failed call (unknown invitee, missing edge, already slashed)
+    /// leaves no side effects, so a genesis node slashed on a bad edge lookup
+    /// is not permanently marked malicious.
     pub fn mark_malicious_and_slash(&mut self, invitee: NodeId) -> Result<u128, WotError> {
         if !self.nodes.contains(&invitee) && !self.by_invitee.contains_key(&invitee) {
             return Err(WotError::UnknownInvitee);
         }
+
+        let edge = self.by_invitee.get(&invitee).ok_or(WotError::EdgeNotFound)?;
+        if edge.slashed {
+            return Err(WotError::AlreadySlashed);
+        }
+        let voucher = edge.voucher;
+        let power = edge.power_units;
 
         self.malicious.insert(invitee);
 
         let edge = self
             .by_invitee
             .get_mut(&invitee)
-            .ok_or(WotError::EdgeNotFound)?;
-
-        if edge.slashed {
-            return Err(WotError::AlreadySlashed);
-        }
-
-        let voucher = edge.voucher;
-        let power = edge.power_units;
+            .expect("edge validated above");
         edge.slashed = true;
 
         let slashed = self.staking.slash(&voucher, power)?;
@@ -404,5 +415,87 @@ mod tests {
         // Test-only deterministic nonce.
         let c = consent(&bad_sk, bad, victim, 1, 9);
         assert_eq!(g.onboard(&c), Err(WotError::MaliciousInvitee));
+    }
+
+    // --- Issue #164 regression tests ---
+
+    #[test]
+    fn slash_without_edge_does_not_blacklist() {
+        // A genesis node is onboarded but has no voucher edge. Slashing it
+        // must fail with EdgeNotFound AND leave the node unmarked: the old
+        // code inserted into `malicious` first, permanently blacklisting a
+        // node that could never be slashed.
+        let (mut g, _sk, root) = vouching_graph();
+        assert!(g.is_onboarded(&root));
+        assert_eq!(
+            g.mark_malicious_and_slash(root),
+            Err(WotError::EdgeNotFound)
+        );
+        assert!(!g.is_malicious(&root));
+    }
+
+    #[test]
+    fn slash_unknown_invitee_leaves_no_trace() {
+        let (mut g, _sk, _root) = vouching_graph();
+        let stranger = NodeId::from_label("stranger");
+        assert_eq!(
+            g.mark_malicious_and_slash(stranger),
+            Err(WotError::UnknownInvitee)
+        );
+        assert!(!g.is_malicious(&stranger));
+    }
+
+    // --- Issue #165 regression tests ---
+
+    #[test]
+    fn failed_onboard_does_not_burn_nonce_already_onboarded() {
+        let (mut g, sk, root) = vouching_graph();
+        let bob = NodeId::from_label("bob");
+        let carol = NodeId::from_label("carol");
+
+        // First onboard succeeds and consumes its nonce.
+        // Test-only deterministic nonce.
+        g.onboard(&consent(&sk, root, bob, 2, 10)).unwrap();
+
+        // Retry for the already-onboarded invitee with a FRESH nonce: the
+        // failure must be AlreadyOnboarded, not ConsentReplayed, and the
+        // fresh nonce must stay usable afterwards.
+        // Test-only deterministic nonce.
+        let retry = consent(&sk, root, bob, 2, 11);
+        assert_eq!(g.onboard(&retry), Err(WotError::AlreadyOnboarded));
+
+        // The nonce from the failed attempt was not burned: it still works
+        // for a different invitee.
+        // Test-only deterministic nonce.
+        let reuse = consent(&sk, root, carol, 2, 11);
+        g.onboard(&reuse).expect("nonce from failed onboard must be reusable");
+        assert!(g.is_onboarded(&carol));
+    }
+
+    #[test]
+    fn failed_onboard_does_not_burn_nonce_staking_error() {
+        let (mut g, sk, root) = vouching_graph();
+        let dave = NodeId::from_label("dave");
+
+        // power_units = 0 makes staking.lock fail with ZeroPower after all
+        // checks pass. The nonce must survive so the voucher can re-issue
+        // with corrected terms instead of a fresh nonce.
+        // Test-only deterministic nonce.
+        let bad_terms = consent(&sk, root, dave, 0, 12);
+        assert_eq!(
+            g.onboard(&bad_terms),
+            Err(WotError::Staking(
+                crate::staking::StakingError::ZeroPower
+            ))
+        );
+
+        // Same consent again: still the staking error, not ConsentReplayed.
+        assert_eq!(
+            g.onboard(&bad_terms),
+            Err(WotError::Staking(
+                crate::staking::StakingError::ZeroPower
+            ))
+        );
+        assert!(!g.is_onboarded(&dave));
     }
 }
