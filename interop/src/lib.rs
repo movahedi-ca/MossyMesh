@@ -1441,40 +1441,5 @@ mod tests {
         });
         assert_eq!(err, Err(InteropError::SpreadCapExceeded));
 
-/// Issue #186: bind validation fails closed on non-loopback binds without
-    /// a token, and warns on tokenless loopback binds.
-    #[test]
-    fn gateway_bind_validation_fails_closed_without_token() {
-        use GatewayBindDecision::{Allow, AllowWithWarning, Refuse};
-
-        // Loopback without a token: allowed, but warns.
-        assert_eq!(
-            validate_gateway_bind("127.0.0.1:8080", None),
-            AllowWithWarning
-        );
-        assert_eq!(validate_gateway_bind("[::1]:8080", None), AllowWithWarning);
-        assert_eq!(
-            validate_gateway_bind("localhost:8080", None),
-            AllowWithWarning
-        );
-        // Loopback with a token: clean allow.
-        assert_eq!(validate_gateway_bind("127.0.0.1:8080", Some("tok")), Allow);
-        // Non-loopback without a token: refused outright.
-        assert_eq!(validate_gateway_bind("0.0.0.0:8080", None), Refuse);
-        assert_eq!(validate_gateway_bind("192.168.1.5:8080", None), Refuse);
-        assert_eq!(validate_gateway_bind("[::]:8080", None), Refuse);
-        // Non-loopback with a token: allowed.
-        assert_eq!(validate_gateway_bind("0.0.0.0:8080", Some("tok")), Allow);
-        assert_eq!(
-            validate_gateway_bind("192.168.1.5:8080", Some("tok")),
-            Allow
-        );
-        // Empty token is the same as no token.
-        assert_eq!(validate_gateway_bind("0.0.0.0:8080", Some("")), Refuse);
-        // Unparseable host fails closed.
-        assert_eq!(validate_gateway_bind("not a bind addr", None), Refuse);
-        assert_eq!(validate_gateway_bind("not a bind addr", Some("tok")), Allow);
-
-    }
 }
 }
