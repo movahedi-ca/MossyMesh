@@ -361,14 +361,14 @@ mod tests {
         let (mut v, a, b, c) = setup_three_voters();
 
         let ballots: [(NodeId, BallotChoice, &[u8], &[u8]); 3] = [
-            // codeql[rust/hard-coded-cryptographic-value]
             // Test-only deterministic nonce fixture.
+            // codeql[rust/hard-coded-cryptographic-value]
             (a, BallotChoice::Yes, b"alice-vote-nonce-01", b"blind-a"),
-            // codeql[rust/hard-coded-cryptographic-value]
             // Test-only deterministic nonce fixture.
+            // codeql[rust/hard-coded-cryptographic-value]
             (b, BallotChoice::Yes, b"bob-vote-nonce-0002", b"blind-b"),
-            // codeql[rust/hard-coded-cryptographic-value]
             // Test-only deterministic nonce fixture.
+            // codeql[rust/hard-coded-cryptographic-value]
             (c, BallotChoice::No, b"carol-vote-nonce-03", b"blind-c"),
         ];
 
@@ -407,8 +407,8 @@ mod tests {
     fn invalid_reveal_rejected() {
         let (mut v, a, _, _) = setup_three_voters();
         let ballot =
-            // codeql[rust/hard-coded-cryptographic-value]
             // Test-only deterministic nonce fixture.
+            // codeql[rust/hard-coded-cryptographic-value]
             ZkBlindedVoting::prepare_ballot(a, 1, BallotChoice::Yes, b"proper-test-nonce-1", b"blind").unwrap();
         v.commit(ballot).unwrap();
 
@@ -417,22 +417,22 @@ mod tests {
 
         // Wrong choice
         assert_eq!(
-            // codeql[rust/hard-coded-cryptographic-value]
             // Test-only deterministic nonce fixture.
+            // codeql[rust/hard-coded-cryptographic-value]
             v.reveal(a, 1, BallotChoice::No, b"proper-test-nonce-1", b"blind"),
             Err(VotingError::InvalidReveal)
         );
         // Wrong nonce
         assert_eq!(
-            // codeql[rust/hard-coded-cryptographic-value]
             // Test-only deterministic nonce fixture.
+            // codeql[rust/hard-coded-cryptographic-value]
             v.reveal(a, 1, BallotChoice::Yes, b"wrong-nonce-attempt!", b"blind"),
             Err(VotingError::InvalidReveal)
         );
         // Wrong blinding
         assert_eq!(
-            // codeql[rust/hard-coded-cryptographic-value]
             // Test-only deterministic nonce fixture.
+            // codeql[rust/hard-coded-cryptographic-value]
             v.reveal(a, 1, BallotChoice::Yes, b"proper-test-nonce-1", b"wrong"),
             Err(VotingError::InvalidReveal)
         );
@@ -442,15 +442,15 @@ mod tests {
     fn reveal_before_close_rejected() {
         let (mut v, a, _, _) = setup_three_voters();
         let ballot =
-            // codeql[rust/hard-coded-cryptographic-value]
             // Test-only deterministic nonce fixture.
+            // codeql[rust/hard-coded-cryptographic-value]
             ZkBlindedVoting::prepare_ballot(a, 1, BallotChoice::Yes, b"phase-test-nonce-1!", b"blind").unwrap();
         v.commit(ballot).unwrap();
 
         // Proposal still open: reveal must fail even with correct secrets.
         assert_eq!(
-            // codeql[rust/hard-coded-cryptographic-value]
             // Test-only deterministic nonce fixture.
+            // codeql[rust/hard-coded-cryptographic-value]
             v.reveal(a, 1, BallotChoice::Yes, b"phase-test-nonce-1!", b"blind"),
             Err(VotingError::RevealTooEarly)
         );
@@ -458,8 +458,8 @@ mod tests {
         // After close, the same reveal succeeds.
         v.close_proposal(1);
         let revealed = v
-            // codeql[rust/hard-coded-cryptographic-value]
             // Test-only deterministic nonce fixture.
+            // codeql[rust/hard-coded-cryptographic-value]
             .reveal(a, 1, BallotChoice::Yes, b"phase-test-nonce-1!", b"blind")
             .unwrap();
         assert_eq!(revealed.choice, BallotChoice::Yes);
@@ -471,8 +471,8 @@ mod tests {
         v.open_proposal(7);
         let stranger = NodeId::from_label("stranger");
         let ballot =
-            // codeql[rust/hard-coded-cryptographic-value]
             // Test-only deterministic nonce fixture.
+            // codeql[rust/hard-coded-cryptographic-value]
             ZkBlindedVoting::prepare_ballot(stranger, 7, BallotChoice::Yes, b"stranger-test-nonce!", b"b").unwrap();
         assert_eq!(v.commit(ballot), Err(VotingError::NotEligible));
     }
@@ -480,12 +480,12 @@ mod tests {
     #[test]
     fn double_commit_rejected() {
         let (mut v, a, _, _) = setup_three_voters();
-        // codeql[rust/hard-coded-cryptographic-value]
         // Test-only deterministic nonce fixture.
+        // codeql[rust/hard-coded-cryptographic-value]
         let b1 = ZkBlindedVoting::prepare_ballot(a, 1, BallotChoice::Yes, b"double-commit-nonce-a", b"b").unwrap();
         v.commit(b1).unwrap();
-        // codeql[rust/hard-coded-cryptographic-value]
         // Test-only deterministic nonce fixture.
+        // codeql[rust/hard-coded-cryptographic-value]
         let b2 = ZkBlindedVoting::prepare_ballot(a, 1, BallotChoice::No, b"double-commit-nonce-b", b"b2").unwrap();
         assert_eq!(v.commit(b2), Err(VotingError::AlreadyCommitted));
     }
@@ -512,8 +512,8 @@ mod tests {
         v.open_proposal(1);
         v.close_proposal(1);
         let ballot =
-            // codeql[rust/hard-coded-cryptographic-value]
             // Test-only deterministic nonce fixture.
+            // codeql[rust/hard-coded-cryptographic-value]
             ZkBlindedVoting::prepare_ballot(a, 1, BallotChoice::Abstain, b"closed-proposal-nonce", b"b").unwrap();
         assert_eq!(v.commit(ballot), Err(VotingError::VotingClosed));
     }
@@ -563,8 +563,8 @@ mod tests {
     fn invalid_proof_rejected_on_commit() {
         let (mut v, a, _, _) = setup_three_voters();
         let mut ballot =
-            // codeql[rust/hard-coded-cryptographic-value]
             // Test-only deterministic nonce fixture.
+            // codeql[rust/hard-coded-cryptographic-value]
             ZkBlindedVoting::prepare_ballot(a, 1, BallotChoice::Yes, b"invalid-proof-nonce!", b"b")
                 .unwrap();
         ballot.proof.proof_digest[0] ^= 0xff;
@@ -575,19 +575,19 @@ mod tests {
     fn double_reveal_rejected() {
         let (mut v, a, _, _) = setup_three_voters();
         let ballot =
-            // codeql[rust/hard-coded-cryptographic-value]
             // Test-only deterministic nonce fixture.
+            // codeql[rust/hard-coded-cryptographic-value]
             ZkBlindedVoting::prepare_ballot(a, 1, BallotChoice::Yes, b"double-reveal-nonce!", b"b")
                 .unwrap();
         v.commit(ballot).unwrap();
         v.close_proposal(1);
-        // codeql[rust/hard-coded-cryptographic-value]
         // Test-only deterministic nonce fixture.
+        // codeql[rust/hard-coded-cryptographic-value]
         v.reveal(a, 1, BallotChoice::Yes, b"double-reveal-nonce!", b"b").unwrap();
         assert!(v.is_revealed(1, &a));
         assert_eq!(
-            // codeql[rust/hard-coded-cryptographic-value]
             // Test-only deterministic nonce fixture.
+            // codeql[rust/hard-coded-cryptographic-value]
             v.reveal(a, 1, BallotChoice::Yes, b"double-reveal-nonce!", b"b"),
             Err(VotingError::AlreadyRevealed)
         );
@@ -598,6 +598,7 @@ mod tests {
         // Issue #69: short nonces and empty blindings are brute-forceable.
         let voter = NodeId::from_label("alice");
         assert!(matches!(
+            // codeql[rust/hard-coded-cryptographic-value]: test-only deterministic nonce
             ZkBlindedVoting::prepare_ballot(voter, 1, BallotChoice::Yes, b"short", b"blinding-ok"),
             Err(VotingError::WeakSecrets)
         ));
@@ -606,6 +607,7 @@ mod tests {
                 voter,
                 1,
                 BallotChoice::Yes,
+                // codeql[rust/hard-coded-cryptographic-value]: test-only deterministic nonce
                 b"0123456789abcdef",
                 b""
             ),
@@ -615,6 +617,7 @@ mod tests {
             voter,
             1,
             BallotChoice::Yes,
+            // codeql[rust/hard-coded-cryptographic-value]: test-only deterministic nonce
             b"0123456789abcdef",
             b"b"
         )
@@ -630,10 +633,12 @@ mod tests {
                 1,
                 &a,
                 BallotChoice::Yes,
+                // codeql[rust/hard-coded-cryptographic-value]: test-only deterministic nonce
                 b"n",
                 b"b",
             ),
             proof: BlindingProof::stub(
+                // codeql[rust/hard-coded-cryptographic-value]: test-only deterministic nonce
                 &ZkBlindedVoting::make_commitment(1, &a, BallotChoice::Yes, b"n", b"b"),
                 &a,
             ),
@@ -643,6 +648,7 @@ mod tests {
         // must still fire once the phase gate passes.
         v.close_proposal(1);
         assert_eq!(
+            // codeql[rust/hard-coded-cryptographic-value]: test-only deterministic nonce
             v.reveal(a, 1, BallotChoice::Yes, b"n", b"b"),
             Err(VotingError::WeakSecrets)
         );
@@ -663,8 +669,8 @@ mod tests {
     fn prepare_ballot_proof_matches_commitment() {
         let voter = NodeId::from_label("edge1");
         let ballot =
-            // codeql[rust/hard-coded-cryptographic-value]
             // Test-only deterministic nonce fixture.
+            // codeql[rust/hard-coded-cryptographic-value]
             ZkBlindedVoting::prepare_ballot(voter, 42, BallotChoice::Abstain, b"proof-match-nonce-1", b"blind")
                 .unwrap();
         assert!(ballot.proof.verify(&ballot.commitment, &ballot.voter));
@@ -672,8 +678,8 @@ mod tests {
             42,
             &voter,
             BallotChoice::Abstain,
-            // codeql[rust/hard-coded-cryptographic-value]
             // Test-only deterministic nonce fixture.
+            // codeql[rust/hard-coded-cryptographic-value]
             b"proof-match-nonce-1",
             b"blind",
         );
