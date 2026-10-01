@@ -20,8 +20,13 @@ use crate::ipld_codec::{
 use crate::proof::{MerkleProof, ProofStep, ProofTerminal};
 use crate::{Hash32, MAX_LEDGER_SIZE};
 
-/// Approximate per-node structural overhead counted toward the ledger size budget.
-const NODE_OVERHEAD: usize = 64;
+/// Conservative per-node structural overhead counted toward the ledger size
+/// budget (issue #33). This must be a strict upper bound on the real cost of
+/// one node: enum discriminant, the branch child-pointer array (16 pointers),
+/// `Vec` headers, the heap `Box` allocation, and allocator metadata plus
+/// size-class rounding. Undercounting here is what let the ledger spill to
+/// ~11 MB past the 10 MB cap before pruning.
+const NODE_OVERHEAD: usize = 256;
 
 /// Convert key bytes to a nibble path (two nibbles per byte, high nibble first).
 pub fn bytes_to_nibbles(key: &[u8]) -> Vec<u8> {
@@ -150,16 +155,24 @@ impl MerklePatriciaTrie {
     pub fn insert(&mut self, key: &[u8], value: Vec<u8>) -> Result<(), ConsensusError> {
         let nibbles = bytes_to_nibbles(key);
 
+        // Conservative accounting (issue #33): `size_bytes` must always be an
+        // upper bound on real memory so the cap below can never spill.
         let old_value = self.get(key);
-        let old_cost = match &old_value {
-            Some(v) => key.len() + v.len() + NODE_OVERHEAD,
-            None => 0,
+        let next_size = match &old_value {
+            // Update: the key already exists, so the node structure is
+            // unchanged and only the value bytes change.
+            Some(v) => self
+                .size_bytes
+                .saturating_sub(v.len())
+                .saturating_add(value.len()),
+            // New key: the key is stored as a nibble path (2 bytes per key
+            // byte), and splitting a leaf/extension can net-create up to 4
+            // nodes (branch + 2 leaves + extension) while the rebuilt path
+            // replaces same-kind nodes 1:1.
+            None => self.size_bytes.saturating_add(
+                4 * NODE_OVERHEAD + 2 * key.len() + value.len(),
+            ),
         };
-        let new_cost = key.len() + value.len() + NODE_OVERHEAD;
-        let next_size = self
-            .size_bytes
-            .saturating_sub(old_cost)
-            .saturating_add(new_cost);
         if next_size > MAX_LEDGER_SIZE {
             return Err(ConsensusError::OutOfMemory);
         }
@@ -286,14 +299,17 @@ impl StateMerge for MerklePatriciaTrie {
 }
 
 fn estimate_node_size(node: Option<&MptNode>) -> usize {
+    // Conservative upper bound (issue #33): paths are stored nibble-expanded
+    // and `Vec`s may be over-allocated, so variable-length data is counted
+    // twice to cover allocator size-class rounding.
     match node {
         None => 0,
-        Some(MptNode::Leaf { path, value, .. }) => path.len() + value.len() + NODE_OVERHEAD,
+        Some(MptNode::Leaf { path, value, .. }) => 2 * (path.len() + value.len()) + NODE_OVERHEAD,
         Some(MptNode::Extension { path, child, .. }) => {
-            path.len() + NODE_OVERHEAD + estimate_node_size(Some(child))
+            2 * path.len() + NODE_OVERHEAD + estimate_node_size(Some(child))
         }
         Some(MptNode::Branch { children, value, .. }) => {
-            let mut s = NODE_OVERHEAD + value.as_ref().map(|v| v.len()).unwrap_or(0);
+            let mut s = NODE_OVERHEAD + 2 * value.as_ref().map(|v| v.len()).unwrap_or(0);
             for c in children.iter().flatten() {
                 s = s.saturating_add(estimate_node_size(Some(c)));
             }
@@ -894,10 +910,30 @@ mod tests {
     #[test]
     fn out_of_memory_on_cap() {
         let mut t = MerklePatriciaTrie::new();
-        let big = vec![0u8; MAX_LEDGER_SIZE - NODE_OVERHEAD - 10];
+        // Fill to just under the cap under the conservative formula.
+        let big = vec![0u8; MAX_LEDGER_SIZE / 2];
         t.insert(b"big", big).unwrap();
-        let err = t.insert(b"more", vec![0u8; 100]).unwrap_err();
+        assert!(t.size_bytes() <= MAX_LEDGER_SIZE);
+        // The next insert would spill: rejected before mutating.
+        let err = t
+            .insert(b"more", vec![0u8; MAX_LEDGER_SIZE / 2])
+            .unwrap_err();
         assert_eq!(err, ConsensusError::OutOfMemory);
+        // Failed insert leaves the ledger untouched and under the cap.
+        assert!(t.size_bytes() <= MAX_LEDGER_SIZE);
+        assert!(t.get(b"more").is_none());
+    }
+
+    #[test]
+    fn size_estimate_covers_nibble_expansion() {
+        // Issue #33: the stored key path is nibble-expanded (2 bytes per key
+        // byte) and splits can add nodes; the estimate must cover both.
+        let mut t = MerklePatriciaTrie::new();
+        t.insert(b"ab", b"xy".to_vec()).unwrap();
+        assert_eq!(t.size_bytes(), 4 * NODE_OVERHEAD + 2 * 2 + 2);
+        // Updates only move the value bytes; the counter stays exact.
+        t.insert(b"ab", b"w".to_vec()).unwrap();
+        assert_eq!(t.size_bytes(), 4 * NODE_OVERHEAD + 2 * 2 + 1);
     }
 
     #[test]
