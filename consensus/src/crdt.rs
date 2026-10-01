@@ -55,6 +55,13 @@ pub struct SeqItem {
     pub deleted: bool,
 }
 
+/// Applied map ops between opportunistic tombstone collections (issue #194).
+///
+/// The integrate path calls [`Doc::gc_tombstones`] every this many applied
+/// map ops, amortizing the O(map) scan. The trigger counts *applied* ops
+/// (post-LWW-check), so retried/duplicate deliveries cannot inflate it.
+const GC_MAP_OP_INTERVAL: u64 = 64;
+
 /// Operations that can be exchanged as binary deltas between islands.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CrdtOp {
@@ -165,6 +172,9 @@ pub struct Doc {
     next_seq: Seq,
     /// Local wall-clock counter for LWW (monotone).
     next_wall: u64,
+    /// Applied map ops since the last opportunistic tombstone collection.
+    /// Drives [`Doc::maybe_gc_tombstones`] (issue #194).
+    map_ops_since_gc: u64,
 }
 
 impl Doc {
@@ -336,6 +346,55 @@ impl Doc {
         op
     }
 
+    /// Drop LWW-map tombstones that no future op can resurrect (issue #194).
+    ///
+    /// A tombstone whose wall time is at most the minimum of the map version
+    /// vector is dominated by every known replica: any map op that can still
+    /// arrive from a known agent carries a strictly larger wall time (its
+    /// agent's counter has advanced past the recorded max), so it wins LWW on
+    /// its own and the tombstone entry can never change an outcome. The op
+    /// log keeps the `MapDelete` op, so a cold-syncing replica still learns
+    /// the deletion; only the live map entry is freed. Collection order does
+    /// not affect the result (removal is by key), so the outcome is
+    /// deterministic.
+    ///
+    /// Run this after syncing with the replica set: `map_vector` is this
+    /// replica's view of who has advanced, so a tombstone ahead of a lagging
+    /// replica's entry is retained (safe: that replica may still send an op
+    /// the tombstone needs to beat).
+    pub fn gc_tombstones(&mut self) {
+        let horizon = self.map_vector.values().copied().min().unwrap_or(0);
+        let dead: Vec<String> = self
+            .map
+            .iter()
+            .filter(|(_, v)| v.value.is_none() && v.time.wall <= horizon)
+            .map(|(k, _)| k.clone())
+            .collect();
+        for k in dead {
+            self.map.remove(&k);
+        }
+    }
+
+    /// Opportunistic tombstone collection on the integrate path (issue #194).
+    ///
+    /// Called after every applied map op; runs [`Doc::gc_tombstones`] every
+    /// [`GC_MAP_OP_INTERVAL`] ops. Collection only removes tombstones that
+    /// can never change a visible LWW outcome for ops from known agents, so
+    /// replicas converge on visible state regardless of arrival order; the
+    /// exact internal map size may differ transiently between replicas and
+    /// converges as more map ops arrive. Inherits the caveat documented on
+    /// [`Doc::gc_tombstones`]: safest once the replica set is fully synced,
+    /// since an op from a previously-unknown agent carrying an older wall
+    /// time for a collected key is treated as live on replicas that already
+    /// collected it.
+    fn maybe_gc_tombstones(&mut self) {
+        self.map_ops_since_gc += 1;
+        if self.map_ops_since_gc >= GC_MAP_OP_INTERVAL {
+            self.map_ops_since_gc = 0;
+            self.gc_tombstones();
+        }
+    }
+
     /// Integrate a remote or local operation (idempotent).
     pub fn integrate(&mut self, op: CrdtOp) {
         match &op {
@@ -400,11 +459,13 @@ impl Doc {
                 );
                 self.adopt_remote_wall(time.wall);
                 self.note_map_time(time);
+                self.maybe_gc_tombstones();
             }
             CrdtOp::MapDelete { key, time } => {
                 self.map.insert(key, LwwValue { value: None, time });
                 self.adopt_remote_wall(time.wall);
                 self.note_map_time(time);
+                self.maybe_gc_tombstones();
             }
         }
 
@@ -557,6 +618,98 @@ mod tests {
         assert_eq!(d.text_len(), n as usize);
         assert_eq!(d.visible_ids().len(), n as usize);
         assert!(d.text().chars().all(|c| c == 'x'));
+    }
+
+    #[test]
+    fn tombstone_gc_removes_dominated_tombstones() {
+        // Issue #194: a tombstone dominated by every replica's map version
+        // vector can never change an LWW outcome, so gc_tombstones frees it.
+        let mut a = Doc::new(1);
+        let mut b = Doc::new(2);
+        let set = a.map_set("k", b"v");
+        b.integrate(set.clone());
+        let del = a.map_delete("k");
+        b.integrate(del.clone());
+        // Both replicas advance their own clocks past the tombstone's wall,
+        // so min(map_vector) dominates it on each side.
+        let b_op = b.map_set("other", b"x");
+        a.integrate(b_op.clone());
+        let b_op2 = b.map_set("other2", b"z");
+        a.integrate(b_op2.clone());
+        let a_op = a.map_set("another", b"y");
+        b.integrate(a_op.clone());
+
+        assert!(a.map.contains_key("k"));
+        assert!(b.map.contains_key("k"));
+        a.gc_tombstones();
+        b.gc_tombstones();
+        assert!(!a.map.contains_key("k"));
+        assert!(!b.map.contains_key("k"));
+
+        // The op log retains the MapDelete, so a cold-syncing third replica
+        // still converges with "k" absent.
+        let mut c = Doc::new(3);
+        for op in a.op_log.clone() {
+            c.integrate(op);
+        }
+        assert_eq!(c.map_get("k"), None);
+        assert_eq!(a.map_get("other"), c.map_get("other"));
+    }
+
+    #[test]
+    fn tombstone_gc_keeps_tombstones_ahead_of_lagging_replica() {
+        // Issue #194: gc_tombstones must retain a tombstone that a lagging
+        // replica has not yet dominated in this replica's map version vector.
+        // b's next op could still carry a wall time the tombstone needs to beat.
+        let mut a = Doc::new(1);
+        let mut b = Doc::new(2);
+        let set = a.map_set("k", b"v");
+        b.integrate(set.clone());
+        let b_op = b.map_set("bkey", b"1");
+        a.integrate(b_op.clone());
+        let del = a.map_delete("k"); // wall 2 on a; b's recorded max is wall 1
+        let _ = del;
+        assert!(a.map.contains_key("k"));
+        a.gc_tombstones();
+        // min(map_vector) == 1 (b is lagging) < tombstone wall 2: retained.
+        assert!(a.map.contains_key("k"));
+        assert_eq!(a.map_get("k"), None); // still a tombstone, not resurrected
+    }
+
+    #[test]
+    fn tombstone_gc_runs_automatically_on_integrate_path() {
+        // Issue #194 rework: gc_tombstones must be reachable without a manual
+        // call. The integrate path collects dominated tombstones
+        // opportunistically every GC_MAP_OP_INTERVAL applied map ops.
+        let mut doc = Doc::new(1);
+        let n_keys = 100u64;
+        for i in 0..n_keys {
+            doc.map_set(format!("auto-key-{i}"), vec![i as u8]);
+        }
+        for i in 0..n_keys {
+            doc.map_delete(format!("auto-key-{i}"));
+        }
+        // 200 applied map ops cross GC_MAP_OP_INTERVAL (64) at ops 64, 128
+        // and 192. Sets take walls 1..=100, deletes walls 101..=200, so the
+        // collection at op 192 (horizon 192) frees every tombstone with
+        // wall <= 192: exactly the last 8 deletes (walls 193..=200) remain.
+        // No manual gc_tombstones() call was made.
+        let remaining: Vec<u64> = (0..n_keys)
+            .filter(|i| doc.map.contains_key(&format!("auto-key-{i}")))
+            .collect();
+        assert_eq!(
+            remaining,
+            (92..n_keys).collect::<Vec<_>>(),
+            "automatic GC must have collected tombstones for keys 0..92"
+        );
+        for i in 0..92u64 {
+            assert_eq!(doc.map_get(&format!("auto-key-{i}")), None);
+        }
+        // A manual pass still clears the trailing partial window.
+        doc.gc_tombstones();
+        assert!((0..n_keys).all(|i| !doc.map.contains_key(&format!("auto-key-{i}"))));
+        // Op log is untouched: cold-syncing replicas still learn the deletes.
+        assert_eq!(doc.op_log_len(), 200);
     }
 
     #[test]
