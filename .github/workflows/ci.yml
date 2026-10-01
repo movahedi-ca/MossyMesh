@@ -99,6 +99,43 @@ jobs:
           name: engine-wasm
           path: sandbox/assets/engine.wasm
 
+  # The `bundled-engine` feature embeds sandbox/assets/engine.wasm via
+  # include_bytes! (issue #146). sandbox/build.rs gates the embed on the
+  # asset's presence at compile time, so this job proves both paths: the
+  # artifact download exercises the real embed, and the follow-up check
+  # with the asset removed proves the graceful degradation.
+  rust-bundled-engine:
+    name: cargo test sandbox (bundled-engine)
+    runs-on: ubuntu-latest
+    needs: [engine-wasm-artifact]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: '. -> target'
+          shared-key: workspace-bundled-engine
+
+      - name: Download engine.wasm artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: engine-wasm
+          path: sandbox/assets/
+
+      - name: Verify staged artifact
+        run: head -c 4 sandbox/assets/engine.wasm | od -An -tx1 | grep -q "00 61 73 6d"
+
+      - name: cargo test --locked -p sandbox --features bundled-engine
+        run: cargo test --locked -p sandbox --features bundled-engine
+
+      - name: Graceful degradation without the asset (issue #146)
+        run: |
+          rm sandbox/assets/engine.wasm
+          cargo check --locked -p sandbox --features bundled-engine
+
   rust-fmt:
     name: cargo fmt --check
     runs-on: ubuntu-latest
@@ -181,3 +218,39 @@ jobs:
 
       - name: Build captive-portal image
         run: docker build -f captive-portal/Dockerfile -t messymash/captive-portal:ci .
+
+  # Packages and boots the mesh-daemon against the real engine.wasm
+  # artifact (issue #149). The daemon image is built only after the
+  # artifact is staged into sandbox/assets/, so the runtime load path is
+  # exercised end to end; the health probe must answer before the job passes.
+  daemon-smoke:
+    name: Daemon smoke (docker)
+    runs-on: ubuntu-latest
+    needs: [engine-wasm-artifact]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download engine.wasm artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: engine-wasm
+          path: sandbox/assets/
+
+      - name: Build daemon image
+        run: docker build -f devops/Dockerfile.daemon -t mossymesh/daemon:ci .
+
+      - name: Boot daemon and probe health
+        run: |
+          docker run -d --name mm-daemon -p 127.0.0.1:8080:8080 mossymesh/daemon:ci
+          ok=0
+          for i in $(seq 1 30); do
+            sleep 2
+            if curl -sf http://127.0.0.1:8080/api/v1/health | grep -q "Mesh Island Active"; then ok=1; break; fi
+          done
+          if [ "$ok" = 0 ]; then echo "daemon never became healthy"; docker logs mm-daemon; exit 1; fi
+          echo "daemon healthy"
+
+      - name: Remove daemon container
+        if: always()
+        run: docker rm -f mm-daemon || true

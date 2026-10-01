@@ -12,7 +12,31 @@ ARM and ESP32, and captive-portal packaging.
 | `engine-wasm.md` | `engine` crate → `wasm32-wasip1` build notes + Mnps bench how-to |
 | `build-engine-wasm.sh` / `.ps1` | Optional helper: build `engine` for WASI (host defaults unchanged) |
 | `cargo-config-engine-wasm.toml` | Optional Cargo fragment (runner only; not auto-applied) |
+| `Dockerfile.daemon` | mesh-daemon container image (issue #149) |
 | `hostapd-dnsmasq.notes.md` | Optional Wi-Fi AP + DNS hijack for captive portal |
+
+## mesh-daemon packaging (issue #149)
+
+The edge-node binary is the `mesh-daemon` binary in the `mesh-transport`
+crate. It is packaged as a container and as a compose service:
+
+```bash
+# Stage the runtime engine.wasm first (gitignored; CI stages the
+# engine-wasm artifact automatically)
+./devops/build-engine-wasm.sh
+
+# Build and run the daemon image
+docker build -f devops/Dockerfile.daemon -t mossymesh/daemon:local .
+docker run -p 8080:8080 mossymesh/daemon:local
+
+# Or via compose (portal + daemon together)
+docker compose up daemon
+```
+
+The daemon serves the interop HTTP API on `MESH_GATEWAY_BIND`
+(`0.0.0.0:8080` in the image and compose service; the binary default is
+`127.0.0.1:8080`). Health: `GET /api/v1/health` returns "Mesh Island Active".
+CI boots the image against the staged artifact in the `daemon-smoke` job.
 
 ## Quick start (Pi)
 
