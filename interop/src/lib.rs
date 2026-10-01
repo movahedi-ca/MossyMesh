@@ -887,6 +887,13 @@ pub enum InteropError {
 mod tests {
     use super::*;
 
+    /// Serializes tests that flip the process-global miner/gateway
+    /// online/offline state. Rust runs tests in parallel, and without this
+    /// lock one test's `signal_internet_disconnect()` can land between
+    /// another test's `signal_internet_reconnect()` and its claim, flaking
+    /// with `GatewayDormant` (seen in CI on PR #261).
+    static NET_STATE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn health_and_submit_job_unchanged() {
         let health = handle_rest_call(&AsyncApiRequest {
@@ -925,6 +932,7 @@ mod tests {
 
     #[test]
     fn liquidity_endpoint_register_and_accrue() {
+        let _net_guard = NET_STATE_LOCK.lock().unwrap();
         let reg = handle_rest_call(&AsyncApiRequest {
             endpoint: "/api/v1/liquidity".into(),
             payload: "action=register,node_id=genesis-test-1".into(),
@@ -944,6 +952,7 @@ mod tests {
 
     #[test]
     fn liquidity_claim_is_idempotent_not_bad_request() {
+        let _net_guard = NET_STATE_LOCK.lock().unwrap();
         // Issue #46: a well-formed claim must never 400 just because there
         // is nothing (left) to claim.
         let node = "genesis-claim-idem-1";
