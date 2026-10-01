@@ -74,14 +74,24 @@ async fn main() {
     // 4. Mount Interop Bridging
     println!("\n[Interop] Mounting HTTP API endpoints...");
 
-    let server_handle = tokio::spawn(async {
-        interop::run_http_server().await;
-    });
+    let server_handle = tokio::spawn(async { interop::run_http_server().await });
 
     // Simulate persistent Websocket sync thread if external internet is available
     println!("\n[Daemon] Entering event loop...");
-    // We let the HTTP server run indefinitely
-    server_handle.await.unwrap();
+    // We let the HTTP server run indefinitely; a startup failure (e.g. the
+    // bind port is taken) is logged and exits non-zero instead of
+    // panic-unwinding an unlogged thread (issue #150).
+    match server_handle.await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            eprintln!("[Interop] HTTP gateway failed: {e}");
+            std::process::exit(1);
+        }
+        Err(join_err) => {
+            eprintln!("[Interop] HTTP gateway task panicked: {join_err}");
+            std::process::exit(1);
+        }
+    }
 
     println!("==================================================");
     println!("=          MOSSYMESH DAEMON TERMINATED           =");
