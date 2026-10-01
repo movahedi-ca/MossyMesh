@@ -95,16 +95,25 @@ pub struct GenericPayload {
     fen: String,
 }
 
+/// Build the HTTP router for the gateway.
+///
+/// Extracted so tests can construct the router without binding a socket.
+/// Issue #234: `/api-docs/openapi.json` was registered both explicitly and
+/// via `swagger_ui()`, which panicked axum at startup. The spec is now served
+/// exactly once, through the SwaggerUi registration.
+fn build_router() -> Router {
+    Router::new()
+        .route("/api/v1/health", get(health_handler).post(health_handler))
+        .route("/api/v1/submit_job", post(submit_job_handler))
+        .merge(api_docs::swagger_ui())
+}
+
 /// Starts an Axum HTTP server for the frontend.
 ///
 /// Binds loopback by default (override with `MESH_GATEWAY_BIND`); the old
 /// 0.0.0.0 bind exposed an unauthenticated remote surface on shared LANs.
 pub async fn run_http_server() {
-    let app = Router::new()
-        .route("/api/v1/health", get(health_handler).post(health_handler))
-        .route("/api/v1/submit_job", post(submit_job_handler))
-        .route("/api-docs/openapi.json", get(api_docs::serve_openapi_json))
-        .merge(api_docs::swagger_ui());
+    let app = build_router();
 
     let bind = std::env::var("MESH_GATEWAY_BIND").unwrap_or_else(|_| "127.0.0.1:8080".into());
     let listener = tokio::net::TcpListener::bind(&bind).await.unwrap();
@@ -1025,5 +1034,14 @@ mod tests {
         assert_eq!(sm.step(true), WsStep::Tick);
         assert_eq!(sm.consecutive_failures, 0);
         assert_eq!(sm.step(false), WsStep::Retry(Duration::from_secs(1)));
+    }
+
+    /// Issue #234: building the router must not panic on overlapping routes.
+    /// Axum panics at registration time when two handlers claim the same
+    /// path, which took the daemon down at boot; this test builds the exact
+    /// router run_http_server serves.
+    #[test]
+    fn router_builds_without_overlapping_routes() {
+        let _ = build_router();
     }
 }
