@@ -80,27 +80,69 @@ impl MptNode {
         if let Some(hash) = self.hash_cache().get() {
             return Ok(*hash);
         }
-        let hash = match self {
-            MptNode::Leaf { path, value, .. } => hash_leaf(path, value)?,
-            MptNode::Extension { path, child, .. } => {
-                let child_hash = child.compute_hash()?;
-                hash_extension(path, &child_hash)?
-            }
-            MptNode::Branch {
-                children, value, ..
-            } => {
-                let mut hashes: [Option<Hash32>; 16] = [None; 16];
-                for (i, c) in children.iter().enumerate() {
-                    if let Some(node) = c {
-                        hashes[i] = Some(node.compute_hash()?);
+        // Iterative post-order traversal with an explicit stack: deep tries
+        // cannot exhaust the call stack (issue #35). Memoized subtrees
+        // short-circuit through their `cached` cell, so unchanged subtrees
+        // are still skipped (issue #30).
+        enum Task<'a> {
+            Visit(&'a MptNode),
+            Emit(&'a MptNode),
+        }
+        let mut stack = vec![Task::Visit(self)];
+        // Node addresses are unique per allocation and the tree is not
+        // mutated during the walk, so raw pointers are safe keys here.
+        let mut done: HashMap<*const MptNode, Hash32> = HashMap::new();
+        while let Some(task) = stack.pop() {
+            match task {
+                Task::Visit(node) => {
+                    if let Some(hash) = node.hash_cache().get() {
+                        done.insert(node as *const MptNode, *hash);
+                        continue;
+                    }
+                    stack.push(Task::Emit(node));
+                    match node {
+                        MptNode::Leaf { .. } => {}
+                        MptNode::Extension { child, .. } => stack.push(Task::Visit(child)),
+                        MptNode::Branch { children, .. } => {
+                            for child in children.iter().flatten() {
+                                stack.push(Task::Visit(child));
+                            }
+                        }
                     }
                 }
-                hash_branch(&hashes, value.as_deref())?
+                Task::Emit(node) => {
+                    // Children were emitted before this node (post-order), so
+                    // their hashes are all in `done` or their `cached` cells.
+                    let hash = match node {
+                        MptNode::Leaf { path, value, .. } => hash_leaf(path, value)?,
+                        MptNode::Extension { path, child, .. } => {
+                            let child_hash = subtree_hash(child, &done)?;
+                            hash_extension(path, &child_hash)?
+                        }
+                        MptNode::Branch {
+                            children, value, ..
+                        } => {
+                            let mut hashes: [Option<Hash32>; 16] = [None; 16];
+                            for (i, child) in children.iter().enumerate() {
+                                if let Some(node) = child {
+                                    hashes[i] = Some(subtree_hash(node, &done)?);
+                                }
+                            }
+                            hash_branch(&hashes, value.as_deref())?
+                        }
+                    };
+                    // A lost `set` race only repeats hashing; both values are identical.
+                    let _ = node.hash_cache().set(hash);
+                    done.insert(node as *const MptNode, hash);
+                }
             }
-        };
-        // A lost `set` race only repeats hashing; both values are identical.
-        let _ = self.hash_cache().set(hash);
-        Ok(hash)
+        }
+        self.hash_cache()
+            .get()
+            .copied()
+            .ok_or(ConsensusError::InvalidInput(
+                "hash walk finished without a root hash",
+            ))
     }
 
     /// Memoized-hash cell for this node.
@@ -112,6 +154,27 @@ impl MptNode {
         }
     }
 }
+
+/// Look up an already-computed subtree hash for the iterative `compute_hash`
+/// walk: memoized cell first, then the in-progress post-order table.
+fn subtree_hash(
+    node: &MptNode,
+    done: &HashMap<*const MptNode, Hash32>,
+) -> Result<Hash32, ConsensusError> {
+    if let Some(hash) = node.hash_cache().get() {
+        return Ok(*hash);
+    }
+    done.get(&(node as *const MptNode))
+        .copied()
+        .ok_or(ConsensusError::InvalidInput(
+            "subtree hash missing from post-order table",
+        ))
+}
+
+/// Maximum key length accepted by the ledger, in bytes. Bounds recursion
+/// depth on the insert path: worst-case nibble depth is `2 * MAX_KEY_BYTES`.
+/// Read paths (`get`, `prove`, `compute_hash`) are iterative and unbounded.
+pub const MAX_KEY_BYTES: usize = 512;
 
 /// Top-level ledger: Merkle-Patricia Trie with size tracking.
 #[derive(Debug, Clone)]
@@ -155,6 +218,9 @@ impl MerklePatriciaTrie {
     /// Insert or update `key` → `value`. Updates root hash.
     /// Returns [`ConsensusError::OutOfMemory`] if the 10 MB cap would be exceeded.
     pub fn insert(&mut self, key: &[u8], value: Vec<u8>) -> Result<(), ConsensusError> {
+        if key.len() > MAX_KEY_BYTES {
+            return Err(ConsensusError::InvalidInput("key exceeds MAX_KEY_BYTES"));
+        }
         let nibbles = bytes_to_nibbles(key);
 
         // Conservative accounting (issue #33): `size_bytes` must always be an
@@ -196,6 +262,9 @@ impl MerklePatriciaTrie {
 
     /// Lookup value by key.
     pub fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
+        if key.len() > MAX_KEY_BYTES {
+            return None;
+        }
         let nibbles = bytes_to_nibbles(key);
         match &self.root {
             None => None,
@@ -205,6 +274,9 @@ impl MerklePatriciaTrie {
 
     /// Build a Merkle inclusion proof for `key`.
     pub fn prove(&self, key: &[u8]) -> Result<MerkleProof, ConsensusError> {
+        if key.len() > MAX_KEY_BYTES {
+            return Err(ConsensusError::InvalidInput("key exceeds MAX_KEY_BYTES"));
+        }
         let nibbles = bytes_to_nibbles(key);
         let root = self.root.as_ref().ok_or(ConsensusError::NotFound)?;
 
@@ -304,22 +376,34 @@ fn estimate_node_size(node: Option<&MptNode>) -> usize {
     // Conservative upper bound (issue #33): paths are stored nibble-expanded
     // and `Vec`s may be over-allocated, so variable-length data is counted
     // twice to cover allocator size-class rounding.
-    match node {
-        None => 0,
-        Some(MptNode::Leaf { path, value, .. }) => 2 * (path.len() + value.len()) + NODE_OVERHEAD,
-        Some(MptNode::Extension { path, child, .. }) => {
-            2 * path.len() + NODE_OVERHEAD + estimate_node_size(Some(child))
-        }
-        Some(MptNode::Branch {
-            children, value, ..
-        }) => {
-            let mut s = NODE_OVERHEAD + 2 * value.as_ref().map(|v| v.len()).unwrap_or(0);
-            for c in children.iter().flatten() {
-                s = s.saturating_add(estimate_node_size(Some(c)));
+    // Iterative pre-order walk with an explicit stack (issue #35).
+    let mut total = 0usize;
+    let mut stack: Vec<&MptNode> = Vec::new();
+    if let Some(n) = node {
+        stack.push(n);
+    }
+    while let Some(current) = stack.pop() {
+        match current {
+            MptNode::Leaf { path, value, .. } => {
+                total = total.saturating_add(2 * (path.len() + value.len()) + NODE_OVERHEAD);
             }
-            s
+            MptNode::Extension { path, child, .. } => {
+                total = total.saturating_add(2 * path.len() + NODE_OVERHEAD);
+                stack.push(child);
+            }
+            MptNode::Branch {
+                children, value, ..
+            } => {
+                total = total.saturating_add(
+                    NODE_OVERHEAD + 2 * value.as_ref().map(|v| v.len()).unwrap_or(0),
+                );
+                for child in children.iter().flatten() {
+                    stack.push(child);
+                }
+            }
         }
     }
+    total
 }
 
 fn merge_nodes(local: MptNode, remote: &MptNode) -> Result<MptNode, ConsensusError> {
@@ -368,34 +452,40 @@ fn merge_nodes(local: MptNode, remote: &MptNode) -> Result<MptNode, ConsensusErr
 }
 
 fn collect_leaves(node: &MptNode, prefix: &[u8]) -> Vec<(Vec<u8>, Vec<u8>)> {
-    match node {
-        MptNode::Leaf { path, value, .. } => {
-            let mut full = prefix.to_vec();
-            full.extend_from_slice(path);
-            vec![(full, value.clone())]
-        }
-        MptNode::Extension { path, child, .. } => {
-            let mut p = prefix.to_vec();
-            p.extend_from_slice(path);
-            collect_leaves(child, &p)
-        }
-        MptNode::Branch {
-            children, value, ..
-        } => {
-            let mut out = Vec::new();
-            if let Some(v) = value {
-                out.push((prefix.to_vec(), v.clone()));
+    // Iterative depth-first walk with an explicit stack (issue #35).
+    // Children are pushed in reverse so leaves come out in nibble order,
+    // matching the old recursive traversal.
+    let mut out = Vec::new();
+    let mut stack: Vec<(&MptNode, Vec<u8>)> = vec![(node, prefix.to_vec())];
+    while let Some((current, pref)) = stack.pop() {
+        match current {
+            MptNode::Leaf { path, value, .. } => {
+                let mut full = pref;
+                full.extend_from_slice(path);
+                out.push((full, value.clone()));
             }
-            for (i, c) in children.iter().enumerate() {
-                if let Some(child) = c {
-                    let mut p = prefix.to_vec();
-                    p.push(i as u8);
-                    out.extend(collect_leaves(child, &p));
+            MptNode::Extension { path, child, .. } => {
+                let mut p = pref;
+                p.extend_from_slice(path);
+                stack.push((child, p));
+            }
+            MptNode::Branch {
+                children, value, ..
+            } => {
+                if let Some(v) = value {
+                    out.push((pref.clone(), v.clone()));
+                }
+                for (i, child) in children.iter().enumerate().rev() {
+                    if let Some(c) = child {
+                        let mut p = pref.clone();
+                        p.push(i as u8);
+                        stack.push((c, p));
+                    }
                 }
             }
-            out
         }
     }
+    out
 }
 
 fn common_prefix_len(a: &[u8], b: &[u8]) -> usize {
@@ -591,113 +681,164 @@ fn insert_branch(
 }
 
 fn get_from(node: &MptNode, key: &[u8]) -> Option<Vec<u8>> {
-    match node {
-        MptNode::Leaf { path, value, .. } => {
-            if path.as_slice() == key {
-                Some(value.clone())
-            } else {
-                None
+    // Iterative descent: deep tries cannot exhaust the call stack (#35).
+    let mut current = node;
+    let mut rest = key;
+    loop {
+        match current {
+            MptNode::Leaf { path, value, .. } => {
+                return if path.as_slice() == rest {
+                    Some(value.clone())
+                } else {
+                    None
+                };
             }
-        }
-        MptNode::Extension { path, child, .. } => {
-            if key.starts_with(path) {
-                get_from(child, &key[path.len()..])
-            } else {
-                None
+            MptNode::Extension { path, child, .. } => {
+                if !rest.starts_with(path) {
+                    return None;
+                }
+                rest = &rest[path.len()..];
+                current = child;
             }
-        }
-        MptNode::Branch {
-            children, value, ..
-        } => {
-            if key.is_empty() {
-                return value.clone();
+            MptNode::Branch {
+                children, value, ..
+            } => {
+                if rest.is_empty() {
+                    return value.clone();
+                }
+                let nibble = rest[0] as usize;
+                if nibble > 15 {
+                    return None;
+                }
+                match children[nibble].as_ref() {
+                    Some(child) => {
+                        rest = &rest[1..];
+                        current = child;
+                    }
+                    None => return None,
+                }
             }
-            let nibble = key[0] as usize;
-            if nibble > 15 {
-                return None;
-            }
-            children[nibble]
-                .as_ref()
-                .and_then(|c| get_from(c, &key[1..]))
         }
     }
 }
 
 /// Walk the trie collecting terminal + ancestor steps (terminal→root order).
-fn build_proof(
-    node: &MptNode,
+///
+/// Iterative: descend with an explicit frame stack, then apply the frames
+/// bottom-up so `steps` come out terminal-first exactly like the old
+/// recursive version (issue #35).
+fn build_proof<'a>(
+    node: &'a MptNode,
     key: &[u8],
     steps: &mut Vec<ProofStep>,
 ) -> Result<(ProofTerminal, Vec<u8>), ConsensusError> {
-    match node {
-        MptNode::Leaf { path, value, .. } => {
-            if path.as_slice() != key {
-                return Err(ConsensusError::NotFound);
+    enum Frame<'a> {
+        Extension {
+            path: &'a Vec<u8>,
+        },
+        Branch {
+            nibble: u8,
+            children: &'a [Option<Box<MptNode>>; 16],
+            value: &'a Option<Vec<u8>>,
+        },
+    }
+
+    let mut current = node;
+    let mut rest = key;
+    let mut frames: Vec<Frame<'a>> = Vec::new();
+
+    let (terminal, value) = loop {
+        match current {
+            MptNode::Leaf { path, value, .. } => {
+                if path.as_slice() != rest {
+                    return Err(ConsensusError::NotFound);
+                }
+                break (
+                    ProofTerminal::Leaf {
+                        path: path.clone(),
+                        value: value.clone(),
+                    },
+                    value.clone(),
+                );
             }
-            Ok((
-                ProofTerminal::Leaf {
-                    path: path.clone(),
-                    value: value.clone(),
-                },
-                value.clone(),
-            ))
-        }
-        MptNode::Extension { path, child, .. } => {
-            if !key.starts_with(path) {
-                return Err(ConsensusError::NotFound);
+            MptNode::Extension { path, child, .. } => {
+                if !rest.starts_with(path) {
+                    return Err(ConsensusError::NotFound);
+                }
+                frames.push(Frame::Extension { path });
+                rest = &rest[path.len()..];
+                current = child;
             }
-            let (terminal, value) = build_proof(child, &key[path.len()..], steps)?;
-            steps.push(ProofStep::Extension { path: path.clone() });
-            Ok((terminal, value))
+            MptNode::Branch {
+                children, value, ..
+            } => {
+                if rest.is_empty() {
+                    // Value lives on this branch — terminal includes all child hashes.
+                    let v = value.clone().ok_or(ConsensusError::NotFound)?;
+                    let mut child_hashes: [Option<Hash32>; 16] = [None; 16];
+                    for (i, c) in children.iter().enumerate() {
+                        if let Some(node) = c {
+                            child_hashes[i] = Some(node.compute_hash()?);
+                        }
+                    }
+                    break (
+                        ProofTerminal::BranchValue {
+                            children: Box::new(child_hashes),
+                            value: v.clone(),
+                        },
+                        v,
+                    );
+                }
+                let nibble = rest[0];
+                if nibble > 15 {
+                    return Err(ConsensusError::InvalidInput("nibble out of range"));
+                }
+                let child = children[nibble as usize]
+                    .as_ref()
+                    .ok_or(ConsensusError::NotFound)?;
+                frames.push(Frame::Branch {
+                    nibble,
+                    children,
+                    value,
+                });
+                rest = &rest[1..];
+                current = child;
+            }
         }
-        MptNode::Branch {
-            children, value, ..
-        } => {
-            if key.is_empty() {
-                // Value lives on this branch — terminal includes all child hashes.
-                let v = value.clone().ok_or(ConsensusError::NotFound)?;
+    };
+
+    // Bottom-up: reverse of descent, so steps run terminal→root.
+    for frame in frames.iter().rev() {
+        match frame {
+            Frame::Extension { path } => {
+                steps.push(ProofStep::Extension {
+                    path: (*path).clone(),
+                });
+            }
+            Frame::Branch {
+                nibble,
+                children,
+                value,
+            } => {
                 let mut child_hashes: [Option<Hash32>; 16] = [None; 16];
                 for (i, c) in children.iter().enumerate() {
+                    if i == *nibble as usize {
+                        continue;
+                    }
                     if let Some(node) = c {
                         child_hashes[i] = Some(node.compute_hash()?);
                     }
                 }
-                return Ok((
-                    ProofTerminal::BranchValue {
-                        children: Box::new(child_hashes),
-                        value: v.clone(),
-                    },
-                    v,
-                ));
+                steps.push(ProofStep::Branch {
+                    nibble: *nibble,
+                    children: Box::new(child_hashes),
+                    value: (*value).clone(),
+                });
             }
-            let nibble = key[0];
-            if nibble > 15 {
-                return Err(ConsensusError::InvalidInput("nibble out of range"));
-            }
-            let child = children[nibble as usize]
-                .as_ref()
-                .ok_or(ConsensusError::NotFound)?;
-
-            let (terminal, val) = build_proof(child, &key[1..], steps)?;
-
-            let mut child_hashes: [Option<Hash32>; 16] = [None; 16];
-            for (i, c) in children.iter().enumerate() {
-                if i == nibble as usize {
-                    continue;
-                }
-                if let Some(node) = c {
-                    child_hashes[i] = Some(node.compute_hash()?);
-                }
-            }
-
-            steps.push(ProofStep::Branch {
-                nibble,
-                children: Box::new(child_hashes),
-                value: value.clone(),
-            });
-            Ok((terminal, val))
         }
     }
+
+    Ok((terminal, value))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -750,14 +891,18 @@ impl TrieNode {
         self.rehash();
     }
 
-    /// Lookup along a byte path.
+    /// Lookup along a byte path (iterative, issue #35).
     pub fn get_node(&self, key: &[u8]) -> Option<&[u8]> {
-        if key.is_empty() {
-            return self.value.as_deref();
+        let mut current = self;
+        let mut rest = key;
+        loop {
+            if rest.is_empty() {
+                return current.value.as_deref();
+            }
+            let child = current.children.get(&rest[0])?;
+            rest = &rest[1..];
+            current = child;
         }
-        self.children
-            .get(&key[0])
-            .and_then(|c| c.get_node(&key[1..]))
     }
 
     /// DOC 53: Deterministic merge when mesh islands reconnect.
@@ -1058,5 +1203,48 @@ mod tests {
             b.insert(k, b"v".to_vec()).unwrap();
         }
         assert_eq!(a.root_hash(), b.root_hash());
+    }
+
+    #[test]
+    fn deep_nested_trie_traverses_iteratively() {
+        // Issue #35: nested prefixes force a deep node chain; every read
+        // path (get, prove, hash, merge) must handle it without recursion.
+        let mut t = MerklePatriciaTrie::new();
+        for i in 1..=64u8 {
+            let key = vec![0xaa; i as usize];
+            t.insert(&key, vec![i]).unwrap();
+        }
+        for i in 1..=64u8 {
+            let key = vec![0xaa; i as usize];
+            assert_eq!(t.get(&key), Some(vec![i]));
+        }
+        let root = t.root_hash();
+        let deep = vec![0xaa; 64];
+        let proof = t.prove(&deep).unwrap();
+        assert!(verify_proof(&proof, &root).unwrap());
+        // merge exercises the iterative collect_leaves + estimate_node_size.
+        let mut u = MerklePatriciaTrie::new();
+        u.merge_with(&t).unwrap();
+        assert_eq!(u.root_hash(), root);
+    }
+
+    #[test]
+    fn key_length_bound_enforced() {
+        // Issue #35: over-long keys are rejected so insert recursion depth
+        // stays bounded by 2 * MAX_KEY_BYTES nibbles.
+        let mut t = MerklePatriciaTrie::new();
+        let long = vec![0u8; MAX_KEY_BYTES + 1];
+        assert!(matches!(
+            t.insert(&long, b"v".to_vec()),
+            Err(ConsensusError::InvalidInput(_))
+        ));
+        assert_eq!(t.get(&long), None);
+        assert!(matches!(
+            t.prove(&long),
+            Err(ConsensusError::InvalidInput(_))
+        ));
+        let max = vec![0xabu8; MAX_KEY_BYTES];
+        t.insert(&max, b"v".to_vec()).unwrap();
+        assert_eq!(t.get(&max).as_deref(), Some(b"v".as_ref()));
     }
 }
