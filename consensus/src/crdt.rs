@@ -522,7 +522,6 @@ mod tests {
     use super::*;
 
     #[test]
-    #[test]
     fn deep_chain_does_not_overflow_stack() {
         // Issue #193: insert_str parents each char to the previous one, so a
         // long document is a single chain N deep. The old recursive walk
@@ -545,6 +544,8 @@ mod tests {
         assert_eq!(d.visible_ids().len(), n as usize);
         assert!(d.text().chars().all(|c| c == 'x'));
     }
+
+    #[test]
     fn delete_before_insert_converges() {
         // Issue #31: a delete integrated before its target insert must
         // still take effect. Replicas must agree no matter which op
