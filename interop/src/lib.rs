@@ -531,8 +531,11 @@ mod tests {
         assert_eq!(err, Err(InteropError::SpreadCapExceeded));
     }
 
+    static GATEWAY_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn liquidity_endpoint_register_and_accrue() {
+        let _guard = GATEWAY_TEST_MUTEX.lock().unwrap();
         let reg = handle_rest_call(&AsyncApiRequest {
             endpoint: "/api/v1/liquidity".into(),
             payload: "action=register,node_id=genesis-test-1".into(),
@@ -552,6 +555,7 @@ mod tests {
 
     #[test]
     fn liquidity_claim_is_idempotent_not_bad_request() {
+        let _guard = GATEWAY_TEST_MUTEX.lock().unwrap();
         // Issue #46: a well-formed claim must never 400 just because there
         // is nothing (left) to claim.
         let node = "genesis-claim-idem-1";
