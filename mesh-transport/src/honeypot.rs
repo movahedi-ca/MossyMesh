@@ -5,6 +5,8 @@
 
 use std::collections::{HashMap, HashSet};
 
+use sha2::{Digest, Sha256};
+
 /// Default onion circuit hop count for honeypot job delivery.
 pub const DEFAULT_ONION_HOPS: usize = 3;
 
@@ -16,10 +18,32 @@ pub struct TrapPacket {
     pub decoy_payload: Vec<u8>,
     /// Historical job id whose correct result hash is known to the hub only.
     pub job_id: u64,
-    /// Expected honest result hash (never revealed to workers before completion).
-    pub expected_hash: [u8; 32],
+    /// Commitment to the expected honest result hash: SHA-256(expected_hash).
+    ///
+    /// The preimage never leaves the hub. Workers and relays see only this
+    /// commitment, so a malicious worker cannot read the expected hash off
+    /// the trap and submit it verbatim (fixes #197). The commitment binds the
+    /// trap to a specific expected hash for auditability.
+    pub expected_hash_commitment: [u8; 32],
     /// Layered onion routing path (outer → inner).
+    ///
+    /// NOTE: these layers are currently plaintext hop labels, not encrypted
+    /// onion layers (see `peel_onion`). Per-hop encryption is future work; the
+    /// trap's secrecy no longer depends on the path being opaque.
     pub onion_path: Vec<String>,
+}
+
+/// Commitment scheme for trap answers: SHA-256(preimage).
+///
+/// The hub publishes `hash_commitment(expected_hash)` in the [`TrapPacket`];
+/// the preimage stays in the hub's `traps` map. SHA-256 preimage resistance
+/// means a worker holding only the commitment cannot recover the expected
+/// hash to fake an honest submission.
+pub fn hash_commitment(expected_hash: &[u8; 32]) -> [u8; 32] {
+    let digest = Sha256::digest(expected_hash);
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&digest);
+    out
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,6 +91,9 @@ impl HoneypotHub {
     }
 
     /// Build an onion-routed trap from a historically verified job.
+    ///
+    /// The expected hash is stored hub-side only; the packet carries just its
+    /// SHA-256 commitment (fixes #197).
     pub fn craft_trap(
         &mut self,
         job_id: u64,
@@ -79,7 +106,7 @@ impl HoneypotHub {
         TrapPacket {
             decoy_payload,
             job_id,
-            expected_hash,
+            expected_hash_commitment: hash_commitment(&expected_hash),
             onion_path: relays,
         }
     }
@@ -279,7 +306,7 @@ mod tests {
         let packet = TrapPacket {
             decoy_payload: vec![],
             job_id: 1,
-            expected_hash: [0u8; 32],
+            expected_hash_commitment: [0u8; 32],
             onion_path: vec!["a".into(), "b".into(), "c".into()],
         };
         assert_eq!(HoneypotHub::onion_depth(&packet), DEFAULT_ONION_HOPS);
@@ -299,5 +326,49 @@ mod tests {
         let (empty, is_final) = HoneypotHub::peel_onion(&last);
         assert!(is_final);
         assert!(empty.is_empty());
+    }
+
+    /// Regression test for #197: a worker holding the trap packet must not be
+    /// able to recover the expected hash. The packet carries only the
+    /// SHA-256 commitment, and none of its fields equal the expected hash.
+    #[test]
+    fn trap_packet_never_reveals_expected_hash() {
+        let mut hub = HoneypotHub::new();
+        let expected = decoy_result_hash(197, 3);
+        let decoy = b"decoy-payload".to_vec();
+        let relays = vec!["relay-a".into(), "relay-b".into()];
+        let packet = hub.craft_trap(197, expected, decoy.clone(), relays.clone());
+
+        // The commitment is the SHA-256 of the expected hash, not the hash itself.
+        assert_ne!(packet.expected_hash_commitment, expected);
+        assert_eq!(packet.expected_hash_commitment, hash_commitment(&expected));
+
+        // Malicious worker's view: every byte it can read from the packet.
+        let mut readable: Vec<u8> = Vec::new();
+        readable.extend_from_slice(&packet.decoy_payload);
+        readable.extend_from_slice(&packet.job_id.to_le_bytes());
+        readable.extend_from_slice(&packet.expected_hash_commitment);
+        for relay in &packet.onion_path {
+            readable.extend_from_slice(relay.as_bytes());
+        }
+        assert!(
+            readable.windows(32).all(|w| w != expected),
+            "expected hash must not appear anywhere in the trap packet"
+        );
+
+        // The preimage is recoverable only hub-side, for verdict computation.
+        let verdict = hub.submit_result(197, "snooping-worker", expected);
+        assert_eq!(verdict, HoneypotVerdict::Honest);
+
+        // And a worker that guesses without the hash is still caught.
+        let mut hub2 = HoneypotHub::new();
+        hub2.craft_trap(198, expected, decoy, relays);
+        let fake = decoy_result_hash(198, 9);
+        assert_ne!(fake, expected);
+        assert_eq!(
+            hub2.submit_result(198, "guessing-worker", fake),
+            HoneypotVerdict::FakeHash
+        );
+        assert!(hub2.is_banned("guessing-worker"));
     }
 }
