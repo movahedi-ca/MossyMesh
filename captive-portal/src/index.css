@@ -13,26 +13,6 @@
   color-scheme: dark;
 }
 
-/* Light theme: same tokens, flipped surfaces. Toggled from App.tsx,
-   persisted in localStorage under "mossymesh-portal-theme". */
-[data-theme="light"] {
-  --bg-color: #eef1f6;
-  --surface-color: rgba(255, 255, 255, 0.78);
-  --surface-border: rgba(15, 23, 42, 0.12);
-  --primary-color: #0e9db5;
-  --secondary-color: #9333c9;
-  --text-main: #141824;
-  --text-muted: #5b6472;
-  color-scheme: light;
-}
-
-[data-theme="light"] h1 {
-  background: linear-gradient(135deg, #141824 0%, #5b6472 100%);
-  -webkit-background-clip: text;
-  background-clip: text;
-  -webkit-text-fill-color: transparent;
-}
-
 *,
 *::before,
 *::after {

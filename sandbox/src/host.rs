@@ -120,6 +120,15 @@ impl HostRuntime {
         Ok(handle.offset(self.pool.block_size()))
     }
 
+    /// Release all guest allocations, making the runtime reusable for the next
+    /// job (issue #37). Without a reset between jobs, sequential allocations
+    /// fill the fixed arena and later jobs OOM on logically dead memory.
+    /// Also clears any unbalanced call depth so a fresh job starts clean.
+    pub fn reset(&mut self) {
+        self.pool.reset();
+        self.call_depth = 0;
+    }
+
     /// Invoke an exported function by name with raw argument bytes.
     pub fn invoke(&mut self, export: &str, args: &[u8]) -> Result<Vec<u8>, HostError> {
         if !self.exports.iter().any(|e| e == export) {
@@ -221,4 +230,26 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         return None;
     }
     haystack.windows(needle.len()).position(|w| w == needle)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runtime_reset_reclaims_pool_between_sequential_jobs() {
+        // Issue #37: 100 sequential jobs on one runtime must not exhaust the
+        // fixed pool when the worker resets between jobs.
+        let mut rt = HostRuntime::load_with_config(b"\0asm".to_vec(), 64, 256).unwrap();
+        for _ in 0..100 {
+            let _ptr = rt.allocate(128).unwrap(); // 2 blocks per job
+            rt.reset();
+            assert_eq!(rt.used_memory(), 0);
+        }
+        // Without reset the same workload still OOMs deterministically.
+        let mut rt2 = HostRuntime::load_with_config(b"\0asm".to_vec(), 64, 256).unwrap();
+        rt2.allocate(128).unwrap();
+        rt2.allocate(128).unwrap();
+        assert_eq!(rt2.allocate(1).unwrap_err(), HostError::OutOfMemory);
+    }
 }

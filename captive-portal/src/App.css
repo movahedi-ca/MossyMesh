@@ -215,32 +215,3 @@ h1 {
 .portal-footer .sep {
   opacity: 0.5;
 }
-
-/* Theme toggle: dark/light switch for the captive portal (#18) */
-.theme-toggle {
-  position: absolute;
-  top: 1rem;
-  right: 1rem;
-  width: 2.5rem;
-  height: 2.5rem;
-  border-radius: 12px;
-  border: 1px solid var(--surface-border);
-  background: rgba(255, 255, 255, 0.04);
-  color: var(--text-main);
-  font-size: 1.1rem;
-  line-height: 1;
-  cursor: pointer;
-  display: grid;
-  place-items: center;
-  transition: transform 0.2s ease, border-color 0.2s ease;
-}
-
-.theme-toggle:hover {
-  transform: translateY(-2px);
-  border-color: var(--primary-color);
-}
-
-.theme-toggle:focus-visible {
-  outline: 2px solid var(--primary-color);
-  outline-offset: 3px;
-}

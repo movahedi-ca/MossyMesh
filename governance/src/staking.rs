@@ -24,7 +24,7 @@ pub fn power_from_collateral(collateral: u128) -> u64 {
         return 0;
     }
     let mut x = collateral;
-    let mut y = (x + 1) / 2;
+    let mut y = x.div_ceil(2);
     while y < x {
         x = y;
         y = (x + collateral / x) / 2;
@@ -64,7 +64,11 @@ impl QuadraticStaking {
     }
 
     /// Lock quadratic collateral for `power_units`. Returns the lock receipt.
-    pub fn lock(&mut self, staker: NodeId, power_units: u64) -> Result<CollateralLock, StakingError> {
+    pub fn lock(
+        &mut self,
+        staker: NodeId,
+        power_units: u64,
+    ) -> Result<CollateralLock, StakingError> {
         if power_units == 0 {
             return Err(StakingError::ZeroPower);
         }
@@ -84,7 +88,10 @@ impl QuadraticStaking {
             return Err(StakingError::ZeroPower);
         }
         let cost = quadratic_cost(power_units);
-        let locked = self.locked.get_mut(staker).ok_or(StakingError::NothingToSlash)?;
+        let locked = self
+            .locked
+            .get_mut(staker)
+            .ok_or(StakingError::NothingToSlash)?;
         if *locked < cost {
             return Err(StakingError::InsufficientLock);
         }
@@ -110,7 +117,10 @@ impl QuadraticStaking {
             return Err(StakingError::ZeroPower);
         }
         let cost = quadratic_cost(power_units);
-        let locked = self.locked.get_mut(staker).ok_or(StakingError::NothingToSlash)?;
+        let locked = self
+            .locked
+            .get_mut(staker)
+            .ok_or(StakingError::NothingToSlash)?;
         if *locked < cost {
             return Err(StakingError::InsufficientLock);
         }

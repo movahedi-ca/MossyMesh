@@ -16,7 +16,7 @@ pub enum ProofTerminal {
     Leaf { path: Vec<u8>, value: Vec<u8> },
     /// Value stored on a branch (key ends at this node). All 16 child hashes present.
     BranchValue {
-        children: [Option<Hash32>; 16],
+        children: Box<[Option<Hash32>; 16]>,
         value: Vec<u8>,
     },
 }
@@ -31,7 +31,7 @@ pub enum ProofStep {
         /// Nibble index (0..15) of the child we ascended from.
         nibble: u8,
         /// Full 16 slots; active child slot is `None` (filled during verify).
-        children: [Option<Hash32>; 16],
+        children: Box<[Option<Hash32>; 16]>,
         value: Option<Vec<u8>>,
     },
 }
@@ -88,7 +88,9 @@ pub fn verify_proof(proof: &MerkleProof, expected_root: &Hash32) -> Result<bool,
         match step {
             ProofStep::Extension { path } => {
                 if path.is_empty() {
-                    return Err(ConsensusError::InvalidInput("empty extension path in proof"));
+                    return Err(ConsensusError::InvalidInput(
+                        "empty extension path in proof",
+                    ));
                 }
                 current = hash_extension(path, &current)?;
             }
@@ -100,7 +102,7 @@ pub fn verify_proof(proof: &MerkleProof, expected_root: &Hash32) -> Result<bool,
                 if *nibble > 15 {
                     return Err(ConsensusError::InvalidInput("branch nibble out of range"));
                 }
-                let mut kids = *children;
+                let mut kids = **children;
                 kids[*nibble as usize] = Some(current);
                 current = hash_branch(&kids, value.as_deref())?;
             }

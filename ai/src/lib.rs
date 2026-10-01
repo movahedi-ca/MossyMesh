@@ -39,18 +39,18 @@
 //!
 //! No network or cloud calls. Hot-path ops avoid nondeterministic threading.
 
-pub mod sitf;
-pub mod paged_attention;
 pub mod compute;
+pub mod paged_attention;
+pub mod sitf;
 
-pub use sitf::{DType, SitfError, SitfTensor, MAX_RANK, SITF_MAGIC, SITF_VERSION};
-pub use paged_attention::{
-    PageBackendKind, PageId, PageTable, PagedAttention, PagedAttentionError,
-};
 pub use compute::{
     AttentionOp, ComputeBackend, ComputeError, CpuBackend, MatMulOp, PreferredBackend,
     VulkanBackend,
 };
+pub use paged_attention::{
+    PageBackendKind, PageId, PageTable, PagedAttention, PagedAttentionError,
+};
+pub use sitf::{DType, SitfError, SitfTensor, MAX_RANK, SITF_MAGIC, SITF_VERSION};
 
 /// Initialize the AI processing subsystem (offline, side-effect free for determinism).
 ///

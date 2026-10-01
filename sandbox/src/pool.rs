@@ -224,6 +224,20 @@ impl FixedBlockPool {
         Ok(())
     }
 
+    /// Release every allocation, restoring the pool to its freshly-constructed
+    /// state (all blocks free, arena zeroed).
+    ///
+    /// Issue #37: a long-lived [`HostRuntime`](crate::host::HostRuntime) serves
+    /// many sequential jobs; without a reset the fixed arena fills and later
+    /// jobs OOM even though the earlier allocations are logically dead.
+    /// Workers must call this (via [`HostRuntime::reset`](crate::host::HostRuntime::reset))
+    /// between jobs. The hard ceiling is unchanged: reset never grows the arena.
+    pub fn reset(&mut self) {
+        self.free.iter_mut().for_each(|f| *f = true);
+        self.used_blocks = 0;
+        self.storage.iter_mut().for_each(|b| *b = 0);
+    }
+
     /// Read-only view of the arena bytes for a handle.
     pub fn get(&self, handle: BlockHandle) -> Result<&[u8], PoolError> {
         self.validate(handle)?;
@@ -330,10 +344,7 @@ mod tests {
     fn multi_block_request_oom_when_fragmented_or_too_large() {
         let mut pool = FixedBlockPool::with_limit(64, 256).unwrap();
         // Ask for more than the entire arena.
-        assert_eq!(
-            pool.allocate(257).unwrap_err(),
-            PoolError::OutOfMemory
-        );
+        assert_eq!(pool.allocate(257).unwrap_err(), PoolError::OutOfMemory);
         // Fill with single blocks then free middle — first-fit still works for 1 block.
         let _h0 = pool.allocate(64).unwrap();
         let h1 = pool.allocate(64).unwrap();
@@ -343,5 +354,29 @@ mod tests {
         assert_eq!(pool.allocate(192).unwrap_err(), PoolError::OutOfMemory);
         // 1-block request reuses the hole.
         assert!(pool.allocate(64).is_ok());
+    }
+
+    #[test]
+    fn reset_makes_pool_reusable_across_sequential_jobs() {
+        // Issue #37: 100 sequential jobs on one pool must not exhaust it
+        // when the worker resets between jobs.
+        let mut pool = FixedBlockPool::with_limit(64, 256).unwrap();
+        for _ in 0..100 {
+            let _a = pool.allocate(64).unwrap();
+            let _b = pool.allocate(64).unwrap();
+            assert_eq!(pool.used_blocks(), 2);
+            pool.reset();
+            assert_eq!(pool.used_blocks(), 0);
+            assert_eq!(pool.free_blocks(), pool.total_blocks());
+        }
+        // Without reset the same arena still OOMs deterministically.
+        let mut tight = FixedBlockPool::with_limit(64, 256).unwrap();
+        for _ in 0..4 {
+            tight.allocate(64).unwrap();
+        }
+        assert_eq!(tight.allocate(1).unwrap_err(), PoolError::OutOfMemory);
+        // Reset also reclaims after exhaustion.
+        tight.reset();
+        assert!(tight.allocate(64).is_ok());
     }
 }

@@ -190,7 +190,7 @@ pub fn fragment_payload(
         return Err(TranslateError::EmptyPayload);
     }
     let mtu = LORA_FRAG_MTU;
-    let count = ((payload.len() + mtu - 1) / mtu) as u16;
+    let count = payload.len().div_ceil(mtu) as u16;
     if count == 0 {
         return Err(TranslateError::EmptyPayload);
     }
@@ -221,9 +221,7 @@ pub fn mesh_to_lora_frames(pkt: &ReticulumPacket) -> Result<Vec<LoraFrame>, Tran
 }
 
 /// Full Phase-1 path: smartphone packet → mesh → LoRa frames.
-pub fn smartphone_to_lora_frames(
-    pkt: &SmartphonePacket,
-) -> Result<Vec<LoraFrame>, TranslateError> {
+pub fn smartphone_to_lora_frames(pkt: &SmartphonePacket) -> Result<Vec<LoraFrame>, TranslateError> {
     let mesh = smartphone_to_mesh(pkt)?;
     mesh_to_lora_frames(&mesh)
 }
@@ -293,9 +291,7 @@ impl ReassemblyBuffer {
 }
 
 /// Reassemble ordered or unordered LoRa fragments into a mesh packet.
-pub fn reassemble_mesh_packet(
-    frames: &[LoraFrame],
-) -> Result<ReticulumPacket, TranslateError> {
+pub fn reassemble_mesh_packet(frames: &[LoraFrame]) -> Result<ReticulumPacket, TranslateError> {
     if frames.is_empty() {
         return Err(TranslateError::EmptyPayload);
     }
@@ -323,6 +319,84 @@ pub fn reassemble_mesh_packet(
         destination_hash,
         data,
     })
+}
+
+/// Maximum entries in the dedup cache. 256 u32 ids = 1 KiB, well under the
+/// 10 MB edge ledger RAM cap.
+pub const DEDUP_CACHE_CAPACITY: usize = 256;
+
+/// Bounded cache of recently seen message IDs for flood-fill deduplication.
+///
+/// In dense areas the same move packet can arrive multiple times via
+/// different relay paths. `should_process` returns false for duplicates so
+/// the node processes each packet exactly once. Fixes #27.
+///
+/// Eviction is simple ring overwrite (oldest evicted), keeping memory bounded
+/// and behavior deterministic.
+#[derive(Debug, Clone)]
+pub struct PacketDedupCache {
+    slots: Vec<u32>,
+    cursor: usize,
+}
+
+impl PacketDedupCache {
+    pub fn new() -> Self {
+        Self {
+            slots: Vec::with_capacity(DEDUP_CACHE_CAPACITY),
+            cursor: 0,
+        }
+    }
+
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            slots: Vec::with_capacity(capacity.max(1)),
+            cursor: 0,
+        }
+    }
+
+    /// Record `message_id`. Returns true if this packet was already seen
+    /// (caller should drop it), false if it is new and was recorded.
+    pub fn is_duplicate(&mut self, message_id: u32) -> bool {
+        if self.slots.contains(&message_id) {
+            return true;
+        }
+        if self.slots.len() < self.slots.capacity() {
+            self.slots.push(message_id);
+        } else {
+            self.slots[self.cursor] = message_id;
+            self.cursor = (self.cursor + 1) % self.slots.capacity();
+        }
+        false
+    }
+
+    /// Drop the cached id (e.g. when the packet expired before processing).
+    pub fn forget(&mut self, message_id: u32) -> bool {
+        if let Some(pos) = self.slots.iter().position(|&id| id == message_id) {
+            self.slots.swap_remove(pos);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.slots.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.slots.is_empty()
+    }
+
+    pub fn clear(&mut self) {
+        self.slots.clear();
+        self.cursor = 0;
+    }
+}
+
+impl Default for PacketDedupCache {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Round-trip helper used by tests and simulators.
@@ -377,7 +451,9 @@ mod tests {
     }
 
     fn frames_message_id(frames: &[LoraFrame]) -> u32 {
-        LoRaFragment::from_lora_frame(&frames[0]).unwrap().message_id
+        LoRaFragment::from_lora_frame(&frames[0])
+            .unwrap()
+            .message_id
     }
 
     #[test]
@@ -412,7 +488,13 @@ mod tests {
 
     #[test]
     fn roundtrip_small_and_exact_mtu_boundary() {
-        for len in [1usize, LORA_FRAG_MTU - 16, LORA_FRAG_MTU, LORA_FRAG_MTU + 1, 1000] {
+        for len in [
+            1usize,
+            LORA_FRAG_MTU - 16,
+            LORA_FRAG_MTU,
+            LORA_FRAG_MTU + 1,
+            1000,
+        ] {
             // mesh blob = 16 dest + data; fragmenter sees dest||data
             let data = vec![0xABu8; len];
             let phone = sample_phone(data.clone());
@@ -479,5 +561,38 @@ mod tests {
             reassemble_mesh_packet(partial),
             Err(TranslateError::IncompleteReassembly { .. })
         ));
+    }
+
+    #[test]
+    fn dedup_cache_drops_repeated_packets() {
+        let mut cache = PacketDedupCache::new();
+        assert!(!cache.is_duplicate(0xC0FFEE));
+        assert!(cache.is_duplicate(0xC0FFEE));
+        assert!(!cache.is_duplicate(0xDEAD));
+        assert_eq!(cache.len(), 2);
+    }
+
+    #[test]
+    fn dedup_cache_ring_evicts_oldest() {
+        let mut cache = PacketDedupCache::with_capacity(4);
+        for id in 0..4 {
+            assert!(!cache.is_duplicate(id));
+        }
+        // Full: new id evicts the oldest (0).
+        assert!(!cache.is_duplicate(4));
+        assert!(!cache.is_duplicate(0), "evicted id must be treated as new");
+        assert_eq!(cache.len(), 4, "capacity must stay bounded");
+    }
+
+    #[test]
+    fn dedup_cache_forget_releases_slot() {
+        let mut cache = PacketDedupCache::new();
+        assert!(!cache.is_duplicate(7));
+        assert!(cache.forget(7));
+        assert!(!cache.is_duplicate(7), "forgotten id is new again");
+        // 7 was re-added by is_duplicate above, so forget succeeds once more.
+        assert!(cache.forget(7));
+        // Now 7 is gone; forgetting again returns false.
+        assert!(!cache.forget(7));
     }
 }
