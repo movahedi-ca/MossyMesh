@@ -13,8 +13,10 @@
 //!
 //! Several hooks use **deterministic hash stubs** so tests stay offline and
 //! free of key material:
-//! - [`multisig::Signature`] — domain-separated SHA-256 “signatures”, not ed25519
 //! - [`voting::BlindingProof`] — commitment binding digest, not a SNARK
+//!
+//! The multi-sig and WoT voucher paths use real ed25519 signatures
+//! ([`multisig::Signature`], [`wot::VoucherConsent`]).
 //!
 //! Threshold counting, authority decay, proposal validation, and commit–reveal
 //! integrity are fully enforced. Replace stub crypto before production.
