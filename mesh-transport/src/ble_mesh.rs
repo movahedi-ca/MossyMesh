@@ -14,6 +14,25 @@ pub const DEFAULT_ADV_INTERVAL_MS: u64 = 2_000;
 /// Maximum neighbors retained (RAM ceiling friendly).
 pub const MAX_NEIGHBORS: usize = 32;
 
+/// Maximum neighbor entries an LSA may carry on the wire. Decodes with a
+/// larger count are rejected before any allocation (fixes #201: a
+/// wire-controlled `u16` count of 65535 must not drive `Vec::with_capacity`).
+pub const MAX_LSA_NEIGHBORS: usize = 64;
+
+/// Maximum plausible sequence jump between two accepted LSAs from one origin.
+///
+/// `process_lsa` drops any LSA whose sequence jumps further than this past
+/// the last seen sequence, *without* updating the seen watermark. A single
+/// spoofed packet with `sequence = u32::MAX` can therefore never permanently
+/// suppress a victim's real LSAs (fixes #205). Genuine jumps larger than this
+/// only occur after a node restart, which clears the in-memory watermark, so
+/// the window does not break legitimate rejoins.
+///
+/// Per-LSA signatures would remove the remaining spoofing window (an attacker
+/// inside the window can still ratchet the watermark with repeated packets);
+/// that is documented follow-up work.
+pub const MAX_LSA_SEQUENCE_JUMP: u32 = 4096;
+
 /// Compact BLE advertising beacon (discovery).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BleBeacon {
@@ -42,6 +61,10 @@ pub struct LinkStateAdvertisement {
     /// Simulated wall-clock when this LSA was generated (ms).
     pub generated_at_ms: u64,
     pub ttl_ms: u64,
+    /// Hops this advertisement has already traversed. The origin emits 0;
+    /// every re-flooding relay increments it (see `flood_relay_lsa`).
+    /// Only a 0-hop arrival proves the origin is in radio range (fixes #198).
+    pub hops_traversed: u8,
 }
 
 impl LinkStateAdvertisement {
@@ -59,6 +82,7 @@ impl LinkStateAdvertisement {
             neighbors,
             generated_at_ms,
             ttl_ms: DEFAULT_LSA_TTL_MS,
+            hops_traversed: 0,
         }
     }
 
@@ -67,6 +91,9 @@ impl LinkStateAdvertisement {
     }
 
     /// Deterministic binary encoding for sim/tests (length-prefixed UTF-8 ids).
+    ///
+    /// Wire layout: origin_id || sequence || battery || generated_at_ms ||
+    /// ttl_ms || hops_traversed || neighbor_count(u16) || neighbors…
     pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::new();
         encode_str(&mut out, &self.origin_id);
@@ -74,8 +101,9 @@ impl LinkStateAdvertisement {
         out.push(self.battery_level);
         out.extend_from_slice(&self.generated_at_ms.to_be_bytes());
         out.extend_from_slice(&self.ttl_ms.to_be_bytes());
-        out.extend_from_slice(&(self.neighbors.len() as u16).to_be_bytes());
-        for (id, cost) in &self.neighbors {
+        out.push(self.hops_traversed);
+        out.extend_from_slice(&(self.neighbors.len().min(MAX_LSA_NEIGHBORS) as u16).to_be_bytes());
+        for (id, cost) in self.neighbors.iter().take(MAX_LSA_NEIGHBORS) {
             encode_str(&mut out, id);
             out.extend_from_slice(&cost.to_be_bytes());
         }
@@ -85,7 +113,7 @@ impl LinkStateAdvertisement {
     pub fn decode(bytes: &[u8]) -> Option<Self> {
         let mut i = 0usize;
         let origin_id = decode_str(bytes, &mut i)?;
-        if i + 4 + 1 + 8 + 8 + 2 > bytes.len() {
+        if i + 4 + 1 + 8 + 8 + 1 + 2 > bytes.len() {
             return None;
         }
         let sequence = u32::from_be_bytes(bytes[i..i + 4].try_into().ok()?);
@@ -96,8 +124,14 @@ impl LinkStateAdvertisement {
         i += 8;
         let ttl_ms = u64::from_be_bytes(bytes[i..i + 8].try_into().ok()?);
         i += 8;
+        let hops_traversed = bytes[i];
+        i += 1;
         let n = u16::from_be_bytes(bytes[i..i + 2].try_into().ok()?) as usize;
         i += 2;
+        // Fix #201: never pre-allocate from an unbounded wire count.
+        if n > MAX_LSA_NEIGHBORS {
+            return None;
+        }
         let mut neighbors = Vec::with_capacity(n);
         for _ in 0..n {
             let id = decode_str(bytes, &mut i)?;
@@ -115,8 +149,19 @@ impl LinkStateAdvertisement {
             neighbors,
             generated_at_ms,
             ttl_ms,
+            hops_traversed,
         })
     }
+}
+
+/// Prepare an LSA for re-flooding by a relay: bump the hop count (saturating).
+///
+/// Receiving nodes use `hops_traversed` to tell a directly-heard origin
+/// (`0`) from a multi-hop flood (`> 0`); see `BleMeshNode::process_lsa`.
+pub fn flood_relay_lsa(lsa: &LinkStateAdvertisement) -> LinkStateAdvertisement {
+    let mut out = lsa.clone();
+    out.hops_traversed = out.hops_traversed.saturating_add(1);
+    out
 }
 
 fn encode_str(out: &mut Vec<u8>, s: &str) {
@@ -171,6 +216,8 @@ pub struct BleMeshNode {
     neighbors: BTreeMap<String, NeighborEntry>,
     /// Highest LSA sequence seen per origin (loop / replay suppression).
     seen_seq: BTreeMap<String, u32>,
+    /// Wall-clock of the newest accepted LSA per origin (wrap tie-break).
+    seen_lsa_time: BTreeMap<String, u64>,
 }
 
 impl BleMeshNode {
@@ -183,6 +230,7 @@ impl BleMeshNode {
             neighbor_ttl_ms: DEFAULT_LSA_TTL_MS,
             neighbors: BTreeMap::new(),
             seen_seq: BTreeMap::new(),
+            seen_lsa_time: BTreeMap::new(),
         }
     }
 
@@ -278,7 +326,21 @@ impl BleMeshNode {
         )
     }
 
-    /// Process an inbound LSA. Returns true if the table was updated / should re-flood.
+    /// Process an inbound LSA. Returns true if the LSA was new and should re-flood.
+    ///
+    /// Sequence handling (fixes #205):
+    /// - Jumps beyond [`MAX_LSA_SEQUENCE_JUMP`] are dropped *without* updating
+    ///   the watermark, so a spoofed maxed-out sequence cannot permanently
+    ///   suppress the victim's real LSAs.
+    /// - `wrapping_add` self-suppression after 2^32 LSAs is handled by a
+    ///   wall-clock tie-break: a sequence near 0 is accepted after a watermark
+    ///   near u32::MAX only when the LSA is not older than the newest accepted
+    ///   one from that origin.
+    ///
+    /// Neighbor handling (fixes #198): only an LSA that arrived directly from
+    /// its origin (`hops_traversed == 0`) proves radio adjacency. Flooded
+    /// copies (`hops_traversed > 0`) update the link-state view but never enter
+    /// the one-hop neighbor table, keeping Dijkstra honest.
     pub fn process_lsa(&mut self, lsa: &LinkStateAdvertisement) -> bool {
         if lsa.origin_id == self.node_id {
             return false;
@@ -287,25 +349,41 @@ impl BleMeshNode {
             return false;
         }
         if let Some(&seen) = self.seen_seq.get(&lsa.origin_id) {
-            if lsa.sequence <= seen {
-                return false;
+            if lsa.sequence > seen {
+                if lsa.sequence - seen > MAX_LSA_SEQUENCE_JUMP {
+                    return false;
+                }
+            } else {
+                // sequence <= seen: replay, duplicate, or the origin's own
+                // counter wrapped past 2^32. Accept only the wrap case.
+                let near_max = u32::MAX - seen <= MAX_LSA_SEQUENCE_JUMP;
+                let near_zero = lsa.sequence <= MAX_LSA_SEQUENCE_JUMP;
+                let last_gen = self.seen_lsa_time.get(&lsa.origin_id).copied().unwrap_or(0);
+                let not_older = lsa.generated_at_ms >= last_gen;
+                if !(near_max && near_zero && not_older) {
+                    return false;
+                }
             }
         }
         self.seen_seq.insert(lsa.origin_id.clone(), lsa.sequence);
+        self.seen_lsa_time
+            .insert(lsa.origin_id.clone(), lsa.generated_at_ms);
 
-        // Treat LSA origin as a one-hop neighbor if we received it over BLE.
-        // Quality is derived from battery as a weak signal proxy when RSSI unknown.
-        let quality = lsa.battery_level.saturating_mul(2);
-        let cost = 1u32 + (255u32.saturating_sub(quality as u32)) / 16;
-        let entry = NeighborEntry {
-            node_id: lsa.origin_id.clone(),
-            battery_level: lsa.battery_level,
-            link_quality: quality,
-            last_seen_ms: self.now_ms,
-            last_seq: lsa.sequence,
-            cost,
-        };
-        self.insert_neighbor(entry);
+        // Only a directly-heard origin becomes a one-hop neighbor.
+        if lsa.hops_traversed == 0 {
+            // Quality is derived from battery as a weak signal proxy when RSSI unknown.
+            let quality = lsa.battery_level.saturating_mul(2);
+            let cost = 1u32 + (255u32.saturating_sub(quality as u32)) / 16;
+            let entry = NeighborEntry {
+                node_id: lsa.origin_id.clone(),
+                battery_level: lsa.battery_level,
+                link_quality: quality,
+                last_seen_ms: self.now_ms,
+                last_seq: lsa.sequence,
+                cost,
+            };
+            self.insert_neighbor(entry);
+        }
         true
     }
 
@@ -560,5 +638,120 @@ mod tests {
     #[test]
     fn empty_payload_produces_no_fragments() {
         assert!(fragment_ble_payload(1, &[]).is_empty());
+    }
+
+    /// Regression test for #198: an LSA that arrived via flood relay
+    /// (hops_traversed > 0) must not poison the one-hop neighbor table.
+    #[test]
+    fn flooded_lsa_does_not_become_neighbor() {
+        let mut node = BleMeshNode::new("A", 80);
+
+        // Directly-heard origin (0 hops): neighbor entry created.
+        let direct = LinkStateAdvertisement::new("B", 1, 60, vec![], 0);
+        assert_eq!(direct.hops_traversed, 0);
+        assert!(node.process_lsa(&direct));
+        assert!(node.get_neighbor("B").is_some());
+
+        // Same origin re-flooded through a relay: accepted for re-flood, but
+        // the origin is three relays away and must not be a direct neighbor.
+        let mut relayed = LinkStateAdvertisement::new("C", 1, 60, vec![], 10);
+        relayed.hops_traversed = 3;
+        assert!(node.process_lsa(&relayed));
+        assert!(
+            node.get_neighbor("C").is_none(),
+            "flooded LSA origin must not enter the neighbor table"
+        );
+
+        // 1-hop flood: still not a direct neighbor.
+        let relayed_once = flood_relay_lsa(&direct);
+        assert_eq!(relayed_once.hops_traversed, 1);
+        let mut node2 = BleMeshNode::new("X", 80);
+        assert!(node2.process_lsa(&relayed_once));
+        assert!(node2.get_neighbor("B").is_none());
+    }
+
+    /// Regression test for #205: a spoofed maxed-out sequence must not
+    /// permanently suppress the victim's real LSAs.
+    #[test]
+    fn spoofed_max_sequence_does_not_suppress_victim() {
+        let mut node = BleMeshNode::new("A", 80);
+        let legit = LinkStateAdvertisement::new("B", 10, 60, vec![], 0);
+        assert!(node.process_lsa(&legit));
+
+        // Attacker forges victim's LSA with sequence = u32::MAX.
+        let spoof = LinkStateAdvertisement::new("B", u32::MAX, 60, vec![], 5);
+        assert!(
+            !node.process_lsa(&spoof),
+            "jump beyond the plausible window must be dropped"
+        );
+        // The watermark must be untouched: the victim's next real LSA lands.
+        let next = LinkStateAdvertisement::new("B", 11, 61, vec![], 10);
+        assert!(node.process_lsa(&next));
+        assert_eq!(node.get_neighbor("B").unwrap().battery_level, 61);
+
+        // Small genuine jumps still pass.
+        let jumpy = LinkStateAdvertisement::new("B", 11 + MAX_LSA_SEQUENCE_JUMP, 62, vec![], 20);
+        assert!(node.process_lsa(&jumpy));
+        // One step past the window is rejected.
+        let too_far = LinkStateAdvertisement::new(
+            "B",
+            11 + MAX_LSA_SEQUENCE_JUMP + MAX_LSA_SEQUENCE_JUMP + 1,
+            62,
+            vec![],
+            30,
+        );
+        assert!(!node.process_lsa(&too_far));
+    }
+
+    /// The origin's own counter wraps after 2^32 LSAs (wrapping_add); peers
+    /// must not self-suppress the wrapped advertisements.
+    #[test]
+    fn sequence_wrap_accepted_via_wall_clock_tie_break() {
+        let mut node = BleMeshNode::new("A", 80);
+        // Simulate a long-lived mesh: watermark near u32::MAX.
+        node.seen_seq.insert("B".into(), u32::MAX - 5);
+        node.seen_lsa_time.insert("B".into(), 1000);
+
+        // Wrapped sequence with newer wall-clock: accepted (not self-suppressed).
+        let wrapped = LinkStateAdvertisement::new("B", 3, 60, vec![], 2000);
+        assert!(node.process_lsa(&wrapped));
+
+        // Same wrapped epoch, but an older sequence and older wall-clock: replay.
+        let stale = LinkStateAdvertisement::new("B", 2, 60, vec![], 500);
+        assert!(!node.process_lsa(&stale));
+
+        // Plain replay of an old sequence without a wrap in progress: rejected.
+        let mut node2 = BleMeshNode::new("A", 80);
+        node2.seen_seq.insert("B".into(), 100);
+        node2.seen_lsa_time.insert("B".into(), 1000);
+        let replay = LinkStateAdvertisement::new("B", 50, 60, vec![], 2000);
+        assert!(!node2.process_lsa(&replay));
+    }
+
+    /// Regression test for #201: a wire-controlled neighbor count of 65535
+    /// must be rejected before any allocation.
+    #[test]
+    fn decode_rejects_huge_neighbor_count() {
+        let lsa = LinkStateAdvertisement::new("peer-x", 1, 90, vec![], 0);
+        let mut bytes = lsa.encode();
+        // Patch the u16 neighbor count to 65535 (last two bytes of the header).
+        let n = bytes.len() - 2;
+        bytes[n] = 0xFF;
+        bytes[n + 1] = 0xFF;
+        assert!(
+            LinkStateAdvertisement::decode(&bytes).is_none(),
+            "count=65535 must be rejected, not pre-allocated"
+        );
+    }
+
+    /// The hop count survives an encode/decode round trip.
+    #[test]
+    fn lsa_hop_count_roundtrip() {
+        let mut lsa = LinkStateAdvertisement::new("peer-alpha", 7, 90, vec![], 12_345);
+        lsa = flood_relay_lsa(&lsa);
+        lsa = flood_relay_lsa(&lsa);
+        assert_eq!(lsa.hops_traversed, 2);
+        let decoded = LinkStateAdvertisement::decode(&lsa.encode()).unwrap();
+        assert_eq!(decoded, lsa);
     }
 }
