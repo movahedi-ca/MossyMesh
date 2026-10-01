@@ -6,6 +6,7 @@ pub mod identity_manager;
 pub mod network;
 pub mod wifi_direct;
 pub mod packet_translator;
+pub mod fen;
 pub mod encryption_layer;
 pub mod thermal_aware;
 pub mod vrf_assigner;

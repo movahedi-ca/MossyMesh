@@ -11,6 +11,7 @@
 //! [`crate::MAX_LEDGER_SIZE`].
 
 use std::collections::HashMap;
+use std::sync::OnceLock;
 
 use crate::error::ConsensusError;
 use crate::ipld_codec::{
@@ -19,8 +20,13 @@ use crate::ipld_codec::{
 use crate::proof::{MerkleProof, ProofStep, ProofTerminal};
 use crate::{Hash32, MAX_LEDGER_SIZE};
 
-/// Approximate per-node structural overhead counted toward the ledger size budget.
-const NODE_OVERHEAD: usize = 64;
+/// Conservative per-node structural overhead counted toward the ledger size
+/// budget (issue #33). This must be a strict upper bound on the real cost of
+/// one node: enum discriminant, the branch child-pointer array (16 pointers),
+/// `Vec` headers, the heap `Box` allocation, and allocator metadata plus
+/// size-class rounding. Undercounting here is what let the ledger spill to
+/// ~11 MB past the 10 MB cap before pruning.
+const NODE_OVERHEAD: usize = 256;
 
 /// Convert key bytes to a nibble path (two nibbles per byte, high nibble first).
 pub fn bytes_to_nibbles(key: &[u8]) -> Vec<u8> {
@@ -40,34 +46,67 @@ pub fn bytes_to_nibbles(key: &[u8]) -> Vec<u8> {
 #[derive(Debug, Clone)]
 pub enum MptNode {
     /// Terminal node: remaining nibble path + value.
-    Leaf { path: Vec<u8>, value: Vec<u8> },
+    Leaf {
+        path: Vec<u8>,
+        value: Vec<u8>,
+        /// Memoized Blake3 content hash. Nodes are built by value and never
+        /// mutated in place, so the cache stays valid for the node's lifetime.
+        cached: OnceLock<Hash32>,
+    },
     /// Shared path compressed before a single child.
-    Extension { path: Vec<u8>, child: Box<MptNode> },
+    Extension {
+        path: Vec<u8>,
+        child: Box<MptNode>,
+        /// Memoized Blake3 content hash (see `Leaf`).
+        cached: OnceLock<Hash32>,
+    },
     /// Hex-nibble branch: up to 16 children + optional value at this node.
     Branch {
         children: [Option<Box<MptNode>>; 16],
         value: Option<Vec<u8>>,
+        /// Memoized Blake3 content hash (see `Leaf`).
+        cached: OnceLock<Hash32>,
     },
 }
 
 impl MptNode {
-    /// Recompute this node's Blake3 content hash from children (bottom-up).
+    /// This node's Blake3 content hash (bottom-up), memoized per node.
+    ///
+    /// Unchanged subtrees keep their cached hash across inserts, so the
+    /// per-insert root recompute in [`MerklePatriciaTrie::insert`] costs
+    /// O(trie depth) instead of O(trie size). Hashing the whole tree on
+    /// every insert was the dominant cost on ARM edge devices.
     pub fn compute_hash(&self) -> Result<Hash32, ConsensusError> {
-        match self {
-            MptNode::Leaf { path, value } => hash_leaf(path, value),
-            MptNode::Extension { path, child } => {
+        if let Some(hash) = self.hash_cache().get() {
+            return Ok(*hash);
+        }
+        let hash = match self {
+            MptNode::Leaf { path, value, .. } => hash_leaf(path, value)?,
+            MptNode::Extension { path, child, .. } => {
                 let child_hash = child.compute_hash()?;
-                hash_extension(path, &child_hash)
+                hash_extension(path, &child_hash)?
             }
-            MptNode::Branch { children, value } => {
+            MptNode::Branch { children, value, .. } => {
                 let mut hashes: [Option<Hash32>; 16] = [None; 16];
                 for (i, c) in children.iter().enumerate() {
                     if let Some(node) = c {
                         hashes[i] = Some(node.compute_hash()?);
                     }
                 }
-                hash_branch(&hashes, value.as_deref())
+                hash_branch(&hashes, value.as_deref())?
             }
+        };
+        // A lost `set` race only repeats hashing; both values are identical.
+        let _ = self.hash_cache().set(hash);
+        Ok(hash)
+    }
+
+    /// Memoized-hash cell for this node.
+    fn hash_cache(&self) -> &OnceLock<Hash32> {
+        match self {
+            MptNode::Leaf { cached, .. } => cached,
+            MptNode::Extension { cached, .. } => cached,
+            MptNode::Branch { cached, .. } => cached,
         }
     }
 }
@@ -116,16 +155,24 @@ impl MerklePatriciaTrie {
     pub fn insert(&mut self, key: &[u8], value: Vec<u8>) -> Result<(), ConsensusError> {
         let nibbles = bytes_to_nibbles(key);
 
+        // Conservative accounting (issue #33): `size_bytes` must always be an
+        // upper bound on real memory so the cap below can never spill.
         let old_value = self.get(key);
-        let old_cost = match &old_value {
-            Some(v) => key.len() + v.len() + NODE_OVERHEAD,
-            None => 0,
+        let next_size = match &old_value {
+            // Update: the key already exists, so the node structure is
+            // unchanged and only the value bytes change.
+            Some(v) => self
+                .size_bytes
+                .saturating_sub(v.len())
+                .saturating_add(value.len()),
+            // New key: the key is stored as a nibble path (2 bytes per key
+            // byte), and splitting a leaf/extension can net-create up to 4
+            // nodes (branch + 2 leaves + extension) while the rebuilt path
+            // replaces same-kind nodes 1:1.
+            None => self.size_bytes.saturating_add(
+                4 * NODE_OVERHEAD + 2 * key.len() + value.len(),
+            ),
         };
-        let new_cost = key.len() + value.len() + NODE_OVERHEAD;
-        let next_size = self
-            .size_bytes
-            .saturating_sub(old_cost)
-            .saturating_add(new_cost);
         if next_size > MAX_LEDGER_SIZE {
             return Err(ConsensusError::OutOfMemory);
         }
@@ -134,6 +181,7 @@ impl MerklePatriciaTrie {
             None => MptNode::Leaf {
                 path: nibbles,
                 value,
+                cached: OnceLock::new(),
             },
             Some(node) => insert_into(node, &nibbles, value)?,
         };
@@ -251,14 +299,17 @@ impl StateMerge for MerklePatriciaTrie {
 }
 
 fn estimate_node_size(node: Option<&MptNode>) -> usize {
+    // Conservative upper bound (issue #33): paths are stored nibble-expanded
+    // and `Vec`s may be over-allocated, so variable-length data is counted
+    // twice to cover allocator size-class rounding.
     match node {
         None => 0,
-        Some(MptNode::Leaf { path, value }) => path.len() + value.len() + NODE_OVERHEAD,
-        Some(MptNode::Extension { path, child }) => {
-            path.len() + NODE_OVERHEAD + estimate_node_size(Some(child))
+        Some(MptNode::Leaf { path, value, .. }) => 2 * (path.len() + value.len()) + NODE_OVERHEAD,
+        Some(MptNode::Extension { path, child, .. }) => {
+            2 * path.len() + NODE_OVERHEAD + estimate_node_size(Some(child))
         }
-        Some(MptNode::Branch { children, value }) => {
-            let mut s = NODE_OVERHEAD + value.as_ref().map(|v| v.len()).unwrap_or(0);
+        Some(MptNode::Branch { children, value, .. }) => {
+            let mut s = NODE_OVERHEAD + 2 * value.as_ref().map(|v| v.len()).unwrap_or(0);
             for c in children.iter().flatten() {
                 s = s.saturating_add(estimate_node_size(Some(c)));
             }
@@ -277,19 +328,26 @@ fn merge_nodes(local: MptNode, remote: &MptNode) -> Result<MptNode, ConsensusErr
             MptNode::Leaf {
                 path: lp,
                 value: lv,
+                ..
             },
             MptNode::Leaf {
                 path: rp,
                 value: rv,
+                ..
             },
         ) => {
             if lp == *rp {
                 let value = if rv > &lv { rv.clone() } else { lv };
-                Ok(MptNode::Leaf { path: lp, value })
+                Ok(MptNode::Leaf {
+                    path: lp,
+                    value,
+                    cached: OnceLock::new(),
+                })
             } else {
                 let mut node = MptNode::Leaf {
                     path: lp,
                     value: lv,
+                    cached: OnceLock::new(),
                 };
                 node = insert_into(node, rp, rv.clone())?;
                 Ok(node)
@@ -307,17 +365,17 @@ fn merge_nodes(local: MptNode, remote: &MptNode) -> Result<MptNode, ConsensusErr
 
 fn collect_leaves(node: &MptNode, prefix: &[u8]) -> Vec<(Vec<u8>, Vec<u8>)> {
     match node {
-        MptNode::Leaf { path, value } => {
+        MptNode::Leaf { path, value, .. } => {
             let mut full = prefix.to_vec();
             full.extend_from_slice(path);
             vec![(full, value.clone())]
         }
-        MptNode::Extension { path, child } => {
+        MptNode::Extension { path, child, .. } => {
             let mut p = prefix.to_vec();
             p.extend_from_slice(path);
             collect_leaves(child, &p)
         }
-        MptNode::Branch { children, value } => {
+        MptNode::Branch { children, value, .. } => {
             let mut out = Vec::new();
             if let Some(v) = value {
                 out.push((prefix.to_vec(), v.clone()));
@@ -343,11 +401,13 @@ fn insert_into(node: MptNode, key: &[u8], value: Vec<u8>) -> Result<MptNode, Con
         MptNode::Leaf {
             path: leaf_path,
             value: leaf_value,
+            ..
         } => insert_leaf(leaf_path, leaf_value, key, value),
-        MptNode::Extension { path, child } => insert_extension(path, *child, key, value),
+        MptNode::Extension { path, child, .. } => insert_extension(path, *child, key, value),
         MptNode::Branch {
             children,
             value: branch_val,
+            ..
         } => insert_branch(children, branch_val, key, value),
     }
 }
@@ -362,6 +422,7 @@ fn insert_leaf(
         return Ok(MptNode::Leaf {
             path: leaf_path,
             value,
+            cached: OnceLock::new(),
         });
     }
 
@@ -381,6 +442,7 @@ fn insert_leaf(
         children[nibble] = Some(Box::new(MptNode::Leaf {
             path: rem,
             value: leaf_value,
+            cached: OnceLock::new(),
         }));
     }
 
@@ -392,12 +454,17 @@ fn insert_leaf(
             return Err(ConsensusError::InvalidInput("nibble out of range"));
         }
         let rem = key[shared + 1..].to_vec();
-        children[nibble] = Some(Box::new(MptNode::Leaf { path: rem, value }));
+        children[nibble] = Some(Box::new(MptNode::Leaf {
+            path: rem,
+            value,
+            cached: OnceLock::new(),
+        }));
     }
 
     let branch = MptNode::Branch {
         children,
         value: branch_value,
+        cached: OnceLock::new(),
     };
 
     if shared == 0 {
@@ -406,6 +473,7 @@ fn insert_leaf(
         Ok(MptNode::Extension {
             path: leaf_path[..shared].to_vec(),
             child: Box::new(branch),
+            cached: OnceLock::new(),
         })
     }
 }
@@ -423,6 +491,7 @@ fn insert_extension(
         return Ok(MptNode::Extension {
             path,
             child: Box::new(new_child),
+            cached: OnceLock::new(),
         });
     }
 
@@ -430,6 +499,9 @@ fn insert_extension(
     let mut branch_value: Option<Vec<u8>> = None;
 
     let ext_nibble = path[shared] as usize;
+    if ext_nibble > 15 {
+        return Err(ConsensusError::InvalidInput("nibble out of range"));
+    }
     let ext_rem = path[shared + 1..].to_vec();
     let existing_child = if ext_rem.is_empty() {
         child
@@ -437,6 +509,7 @@ fn insert_extension(
         MptNode::Extension {
             path: ext_rem,
             child: Box::new(child),
+            cached: OnceLock::new(),
         }
     };
     children[ext_nibble] = Some(Box::new(existing_child));
@@ -445,16 +518,21 @@ fn insert_extension(
         branch_value = Some(value);
     } else {
         let k_nibble = key[shared] as usize;
+        if k_nibble > 15 {
+            return Err(ConsensusError::InvalidInput("nibble out of range"));
+        }
         let k_rem = key[shared + 1..].to_vec();
         children[k_nibble] = Some(Box::new(MptNode::Leaf {
             path: k_rem,
             value,
+            cached: OnceLock::new(),
         }));
     }
 
     let branch = MptNode::Branch {
         children,
         value: branch_value,
+        cached: OnceLock::new(),
     };
 
     if shared == 0 {
@@ -463,6 +541,7 @@ fn insert_extension(
         Ok(MptNode::Extension {
             path: path[..shared].to_vec(),
             child: Box::new(branch),
+            cached: OnceLock::new(),
         })
     }
 }
@@ -478,6 +557,7 @@ fn insert_branch(
         return Ok(MptNode::Branch {
             children,
             value: branch_value,
+            cached: OnceLock::new(),
         });
     }
 
@@ -491,6 +571,7 @@ fn insert_branch(
         None => MptNode::Leaf {
             path: rem.to_vec(),
             value,
+            cached: OnceLock::new(),
         },
         Some(child) => insert_into(*child, rem, value)?,
     };
@@ -499,26 +580,27 @@ fn insert_branch(
     Ok(MptNode::Branch {
         children,
         value: branch_value,
+        cached: OnceLock::new(),
     })
 }
 
 fn get_from(node: &MptNode, key: &[u8]) -> Option<Vec<u8>> {
     match node {
-        MptNode::Leaf { path, value } => {
+        MptNode::Leaf { path, value, .. } => {
             if path.as_slice() == key {
                 Some(value.clone())
             } else {
                 None
             }
         }
-        MptNode::Extension { path, child } => {
+        MptNode::Extension { path, child, .. } => {
             if key.starts_with(path) {
                 get_from(child, &key[path.len()..])
             } else {
                 None
             }
         }
-        MptNode::Branch { children, value } => {
+        MptNode::Branch { children, value, .. } => {
             if key.is_empty() {
                 return value.clone();
             }
@@ -540,7 +622,7 @@ fn build_proof(
     steps: &mut Vec<ProofStep>,
 ) -> Result<(ProofTerminal, Vec<u8>), ConsensusError> {
     match node {
-        MptNode::Leaf { path, value } => {
+        MptNode::Leaf { path, value, .. } => {
             if path.as_slice() != key {
                 return Err(ConsensusError::NotFound);
             }
@@ -552,7 +634,7 @@ fn build_proof(
                 value.clone(),
             ))
         }
-        MptNode::Extension { path, child } => {
+        MptNode::Extension { path, child, .. } => {
             if !key.starts_with(path) {
                 return Err(ConsensusError::NotFound);
             }
@@ -560,7 +642,7 @@ fn build_proof(
             steps.push(ProofStep::Extension { path: path.clone() });
             Ok((terminal, value))
         }
-        MptNode::Branch { children, value } => {
+        MptNode::Branch { children, value, .. } => {
             if key.is_empty() {
                 // Value lives on this branch — terminal includes all child hashes.
                 let v = value.clone().ok_or(ConsensusError::NotFound)?;
@@ -751,6 +833,19 @@ mod tests {
     use crate::proof::verify_proof;
 
     #[test]
+    fn insert_extension_rejects_out_of_range_nibble() {
+        // Direct internal call with a raw nibble of 16 must fail with
+        // InvalidInput, like split_leaf and insert_branch, not panic.
+        let child = MptNode::Leaf {
+            path: vec![],
+            value: b"v".to_vec(),
+            cached: OnceLock::new(),
+        };
+        let err = insert_extension(vec![16], child, &[1], b"w".to_vec()).unwrap_err();
+        assert!(matches!(err, ConsensusError::InvalidInput(_)));
+    }
+
+    #[test]
     fn insert_get_roundtrip() {
         let mut t = MerklePatriciaTrie::new();
         t.insert(b"foo", b"bar".to_vec()).unwrap();
@@ -815,10 +910,30 @@ mod tests {
     #[test]
     fn out_of_memory_on_cap() {
         let mut t = MerklePatriciaTrie::new();
-        let big = vec![0u8; MAX_LEDGER_SIZE - NODE_OVERHEAD - 10];
+        // Fill to just under the cap under the conservative formula.
+        let big = vec![0u8; MAX_LEDGER_SIZE / 2];
         t.insert(b"big", big).unwrap();
-        let err = t.insert(b"more", vec![0u8; 100]).unwrap_err();
+        assert!(t.size_bytes() <= MAX_LEDGER_SIZE);
+        // The next insert would spill: rejected before mutating.
+        let err = t
+            .insert(b"more", vec![0u8; MAX_LEDGER_SIZE / 2])
+            .unwrap_err();
         assert_eq!(err, ConsensusError::OutOfMemory);
+        // Failed insert leaves the ledger untouched and under the cap.
+        assert!(t.size_bytes() <= MAX_LEDGER_SIZE);
+        assert!(t.get(b"more").is_none());
+    }
+
+    #[test]
+    fn size_estimate_covers_nibble_expansion() {
+        // Issue #33: the stored key path is nibble-expanded (2 bytes per key
+        // byte) and splits can add nodes; the estimate must cover both.
+        let mut t = MerklePatriciaTrie::new();
+        t.insert(b"ab", b"xy".to_vec()).unwrap();
+        assert_eq!(t.size_bytes(), 4 * NODE_OVERHEAD + 2 * 2 + 2);
+        // Updates only move the value bytes; the counter stays exact.
+        t.insert(b"ab", b"w".to_vec()).unwrap();
+        assert_eq!(t.size_bytes(), 4 * NODE_OVERHEAD + 2 * 2 + 1);
     }
 
     #[test]
@@ -894,5 +1009,50 @@ mod tests {
         a.insert_node(b"key", b"val".to_vec());
         b.insert_node(b"key", b"val".to_vec());
         assert_eq!(a.hash, b.hash);
+    }
+
+    #[test]
+    fn node_hashes_memoized_after_insert() {
+        // Issue #30: every node must carry a memoized hash after the
+        // per-insert root recompute, so later inserts only rehash the path.
+        let mut t = MerklePatriciaTrie::new();
+        t.insert(b"alpha", b"1".to_vec()).unwrap();
+        t.insert(b"beta", b"2".to_vec()).unwrap();
+        t.insert(b"alphabet", b"3".to_vec()).unwrap();
+
+        fn all_cached(node: &MptNode) -> bool {
+            if node.hash_cache().get().is_none() {
+                return false;
+            }
+            match node {
+                MptNode::Leaf { .. } => true,
+                MptNode::Extension { child, .. } => all_cached(child),
+                MptNode::Branch { children, .. } => {
+                    children.iter().flatten().all(|c| all_cached(c))
+                }
+            }
+        }
+        assert!(all_cached(t.root.as_ref().unwrap()));
+        // A pure recompute must agree with the cached root.
+        let mut t2 = t.clone();
+        assert_eq!(t2.recompute_root().unwrap(), t.root_hash());
+    }
+
+    #[test]
+    fn insert_order_independent_root_with_memoization() {
+        // Memoization must not change the canonical root: different insert
+        // orders over the same key set converge to the same state root.
+        let keys: Vec<Vec<u8>> = (0..30)
+            .map(|i| format!("k-{i:02}").into_bytes())
+            .collect();
+        let mut a = MerklePatriciaTrie::new();
+        let mut b = MerklePatriciaTrie::new();
+        for k in &keys {
+            a.insert(k, b"v".to_vec()).unwrap();
+        }
+        for k in keys.iter().rev() {
+            b.insert(k, b"v".to_vec()).unwrap();
+        }
+        assert_eq!(a.root_hash(), b.root_hash());
     }
 }

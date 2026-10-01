@@ -180,6 +180,13 @@ impl Job {
         self.runtime.allocate(size).map_err(JobError::from)
     }
 
+    /// Release all guest allocations so the job's runtime can serve the next
+    /// unit of work without leaking the fixed pool (issue #37). Call between
+    /// sequential jobs on a reused [`Job`].
+    pub fn reset(&mut self) {
+        self.runtime.reset();
+    }
+
     pub fn used_memory(&self) -> usize {
         self.runtime.used_memory()
     }
@@ -261,5 +268,17 @@ mod tests {
         assert_eq!(job.job_did(), Some(receipt.job_did));
         let out = job.invoke_admitted("get_best_move", &[]).unwrap();
         assert_eq!(out, vec![0xE2, 0xE4]);
+    }
+
+    #[test]
+    fn job_reset_reclaims_pool_for_next_job() {
+        // Issue #37: a reused Job must not OOM after many sequential jobs
+        // when reset is called between them.
+        let mut job = Job::load_with_config(b"\0asm".to_vec(), 64, 256).unwrap();
+        for _ in 0..100 {
+            job.allocate(128).unwrap();
+            job.reset();
+            assert_eq!(job.used_memory(), 0);
+        }
     }
 }

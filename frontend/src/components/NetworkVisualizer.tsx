@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import { useMeshNetwork, type MeshNode } from "../hooks/useMeshNetwork";
+import { useMeshNetwork, rssiBars, type MeshNode } from "../hooks/useMeshNetwork";
 
 const getIcon = (type: MeshNode["type"]) => {
   switch (type) {
@@ -70,6 +70,26 @@ export const NetworkVisualizer = () => {
                       {node.status.toUpperCase()}
                     </p>
                     <p>Ping: {node.latency}ms · {node.hops} hop{node.hops === 1 ? "" : "s"}</p>
+                    <p
+                      className="node-rssi"
+                      title={`Signal strength ${node.rssi} dBm`}
+                      aria-label={`Signal strength ${node.rssi} dBm, ${rssiBars(node.rssi)} of 4 bars`}
+                    >
+                      <span aria-hidden="true" style={{ display: "inline-flex", gap: 2, marginRight: 6, alignItems: "flex-end" }}>
+                        {[0, 1, 2, 3].map((i) => (
+                          <span
+                            key={i}
+                            style={{
+                              width: 3,
+                              height: 4 + i * 3,
+                              borderRadius: 1,
+                              backgroundColor: i < rssiBars(node.rssi) ? "#45f3ff" : "#3a3d4a",
+                            }}
+                          />
+                        ))}
+                      </span>
+                      {node.rssi} dBm
+                    </p>
                     <p className="node-type-tag">{node.type}</p>
                   </div>
                 ))}

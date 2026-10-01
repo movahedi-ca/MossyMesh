@@ -74,6 +74,51 @@ impl TablebaseProbe for StubTablebase {
     }
 }
 
+/// Deterministic 64-bit FNV-1a hash (stable across processes and nodes,
+/// unlike the randomized DefaultHasher).
+fn fnv1a_64(bytes: &[u8], mut h: u64) -> u64 {
+    for b in bytes {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
+}
+
+fn collect_table_files(dir: &std::path::Path, out: &mut Vec<(String, u64)>) {
+    let rd = match std::fs::read_dir(dir) {
+        Ok(rd) => rd,
+        Err(_) => return,
+    };
+    for entry in rd.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_table_files(&path, out);
+        } else if let Ok(md) = entry.metadata() {
+            out.push((path.to_string_lossy().into_owned(), md.len()));
+        }
+    }
+}
+
+/// Fingerprint the table corpus from sorted (path, size) entries.
+///
+/// Nodes compare fingerprints before treating probe results as
+/// deterministic across the mesh: a mismatch means the corpora differ and
+/// outputs must not be compared. This does not prevent external mutation
+/// after open (still caller responsibility), it makes divergence detectable.
+fn fingerprint_corpus(paths: &[String]) -> u64 {
+    let mut entries: Vec<(String, u64)> = Vec::new();
+    for p in paths {
+        collect_table_files(std::path::Path::new(p), &mut entries);
+    }
+    entries.sort();
+    let mut h: u64 = 0xcbf29ce484222325;
+    for (name, len) in &entries {
+        h = fnv1a_64(name.as_bytes(), h);
+        h = fnv1a_64(&len.to_le_bytes(), h);
+    }
+    h
+}
+
 /// File-backed tablebase handle.
 ///
 /// - Without `syzygy` feature: behaves as a path-aware stub (no I/O, always miss).
@@ -81,6 +126,8 @@ impl TablebaseProbe for StubTablebase {
 /// - With `syzygy-mmap`: prefers mmap filesystem when the dependency enables it.
 pub struct FileBackedTablebase {
     paths: Vec<String>,
+    /// Corpus fingerprint at open time; see [`fingerprint_corpus`].
+    corpus_fingerprint: u64,
     #[cfg(feature = "syzygy")]
     inner: Option<shakmaty_syzygy::Tablebase<Chess>>,
 }
@@ -98,14 +145,23 @@ impl FileBackedTablebase {
     pub fn empty() -> Self {
         Self {
             paths: Vec::new(),
+            corpus_fingerprint: 0xcbf29ce484222325,
             #[cfg(feature = "syzygy")]
             inner: None,
         }
     }
 
+    /// Corpus fingerprint captured at open time. Two nodes with different
+    /// fingerprints hold different table files and must not treat probe
+    /// results as mutually deterministic.
+    pub fn corpus_fingerprint(&self) -> u64 {
+        self.corpus_fingerprint
+    }
+
     /// Open tablebase directories. If none can be opened (missing files), remains a stub-like miss.
     pub fn open(paths: impl IntoIterator<Item = impl Into<String>>) -> Self {
         let paths: Vec<String> = paths.into_iter().map(Into::into).collect();
+        let corpus_fingerprint = fingerprint_corpus(&paths);
 
         #[cfg(feature = "syzygy")]
         {
@@ -129,14 +185,17 @@ impl FileBackedTablebase {
             }
             return Self {
                 paths,
+                corpus_fingerprint,
                 inner: if any { Some(tb) } else { None },
             };
         }
 
         #[cfg(not(feature = "syzygy"))]
         {
-            let _ = &paths;
-            Self { paths }
+            Self {
+                paths,
+                corpus_fingerprint,
+            }
         }
     }
 }
@@ -214,5 +273,27 @@ mod tests {
     fn open_tablebase_empty_stub() {
         let tb = open_tablebase(&[]);
         assert!(!tb.is_available());
+    }
+
+    #[test]
+    fn corpus_fingerprint_detects_divergent_tables() {
+        let base = std::env::temp_dir().join("mossymesh-tb-fp-test");
+        let d1 = base.join("node-a");
+        let d2 = base.join("node-b");
+        std::fs::create_dir_all(&d1).unwrap();
+        std::fs::create_dir_all(&d2).unwrap();
+        // Same file name, different sizes: divergent corpora.
+        std::fs::write(d1.join("kpk.rtbw"), vec![0u8; 64]).unwrap();
+        std::fs::write(d2.join("kpk.rtbw"), vec![0u8; 128]).unwrap();
+
+        let a = FileBackedTablebase::open([d1.to_str().unwrap()]);
+        let b = FileBackedTablebase::open([d2.to_str().unwrap()]);
+        assert_ne!(a.corpus_fingerprint(), b.corpus_fingerprint());
+
+        // Same corpus re-opened: stable fingerprint.
+        let a2 = FileBackedTablebase::open([d1.to_str().unwrap()]);
+        assert_eq!(a.corpus_fingerprint(), a2.corpus_fingerprint());
+
+        std::fs::remove_dir_all(&base).ok();
     }
 }
