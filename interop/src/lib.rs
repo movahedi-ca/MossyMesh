@@ -8,18 +8,18 @@ pub mod liquidity;
 pub mod openapi_gateway;
 pub mod twamm;
 
-use std::sync::{Mutex, OnceLock};
-use std::collections::HashMap;
-use std::net::{IpAddr, SocketAddr};
-use std::time::{Duration, Instant};
 use axum::{
-    extract::{ConnectInfo, State},
+    extract::ConnectInfo,
     http::{header, HeaderMap, StatusCode},
     routing::{get, post},
-    Router, Json,
+    Router,
 };
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
+use std::net::{IpAddr, SocketAddr};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use liquidity::LiquidityMiner;
 use openapi_gateway::OpenApiGateway;
@@ -47,9 +47,7 @@ pub mod credits;
 pub mod htlc;
 
 pub use credits::{Account, CreditError, CreditLedger};
-pub use htlc::{
-    hash_preimage, verify_preimage, Htlc, HtlcError, HtlcParams, HtlcState, MockVdf,
-};
+pub use htlc::{hash_preimage, verify_preimage, Htlc, HtlcError, HtlcParams, HtlcState, MockVdf};
 
 pub fn init_interop() {
     println!(
@@ -126,7 +124,9 @@ async fn health_handler() -> &'static str {
 /// Bearer <redacted> for the job API. Read from `MESH_GATEWAY_TOKEN`; when unset,
 /// the loopback-only bind is the access control (local daemon and UI only).
 fn gateway_token() -> Option<String> {
-    std::env::var("MESH_GATEWAY_TOKEN").ok().filter(|t| !t.is_empty())
+    std::env::var("MESH_GATEWAY_TOKEN")
+        .ok()
+        .filter(|t| !t.is_empty())
 }
 
 fn check_auth(headers: &HeaderMap) -> bool {
@@ -326,17 +326,13 @@ pub fn handle_rest_call(req: &AsyncApiRequest) -> Result<String, InteropError> {
 fn handle_twamm(req: &AsyncApiRequest) -> Result<String, InteropError> {
     let payload = req.payload.trim();
     if payload.is_empty() || payload.eq_ignore_ascii_case("status") {
-        let book = twamm_book()
-            .lock()
-            .map_err(|_| InteropError::Timeout)?;
+        let book = twamm_book().lock().map_err(|_| InteropError::Timeout)?;
         return Ok(book.status_json());
     }
 
     // action=stream|submit + order fields
     if let Some((side, amount, slices, ref_price, exec_price)) = parse_order_payload(payload) {
-        let mut book = twamm_book()
-            .lock()
-            .map_err(|_| InteropError::Timeout)?;
+        let mut book = twamm_book().lock().map_err(|_| InteropError::Timeout)?;
         let id = book
             .submit_order(side, amount, slices, ref_price)
             .map_err(|e| {
@@ -389,12 +385,14 @@ fn handle_liquidity(req: &AsyncApiRequest) -> Result<String, InteropError> {
     let mut node_id = String::new();
     let mut epochs: u64 = 1;
 
-    for part in payload.split(|c| c == ',' || c == '&' || c == ';') {
-        let part = part.trim().trim_matches(|c| c == '{' || c == '}' || c == '"');
+    for part in payload.split([',', '&', ';']) {
+        let part = part
+            .trim()
+            .trim_matches(|c| c == '{' || c == '}' || c == '"');
         if part.is_empty() {
             continue;
         }
-        let mut kv = part.splitn(2, |c| c == '=' || c == ':');
+        let mut kv = part.splitn(2, ['=', ':']);
         let key = kv
             .next()
             .unwrap_or("")
@@ -427,7 +425,8 @@ fn handle_liquidity(req: &AsyncApiRequest) -> Result<String, InteropError> {
                 return Err(InteropError::BadRequest);
             }
             m.register_genesis(&node_id);
-            m.account_json(&node_id).map_err(|_| InteropError::BadRequest)
+            m.account_json(&node_id)
+                .map_err(|_| InteropError::BadRequest)
         }
         "accrue" => {
             if node_id.is_empty() {
@@ -469,7 +468,8 @@ fn handle_liquidity(req: &AsyncApiRequest) -> Result<String, InteropError> {
             if node_id.is_empty() {
                 return Err(InteropError::BadRequest);
             }
-            m.account_json(&node_id).map_err(|_| InteropError::BadRequest)
+            m.account_json(&node_id)
+                .map_err(|_| InteropError::BadRequest)
         }
         _ => Err(InteropError::BadRequest),
     }
@@ -500,9 +500,11 @@ fn handle_gateway(req: &AsyncApiRequest) -> Result<String, InteropError> {
     let mut slices: u32 = 1;
     let mut action = String::new();
 
-    for part in req.payload.split(|c| c == ',' || c == '&' || c == ';') {
-        let part = part.trim().trim_matches(|c| c == '{' || c == '}' || c == '"');
-        let mut kv = part.splitn(2, |c| c == '=' || c == ':');
+    for part in req.payload.split([',', '&', ';']) {
+        let part = part
+            .trim()
+            .trim_matches(|c| c == '{' || c == '}' || c == '"');
+        let mut kv = part.splitn(2, ['=', ':']);
         let key = kv
             .next()
             .unwrap_or("")
@@ -543,9 +545,9 @@ fn handle_gateway(req: &AsyncApiRequest) -> Result<String, InteropError> {
         match gw.bridge_local_to_global(&account, amount, slices) {
             Ok(receipt) => Ok(receipt.to_json()),
             Err(openapi_gateway::GatewayError::GatewayDormant) => Err(InteropError::GatewayDormant),
-            Err(openapi_gateway::GatewayError::Twamm(twamm::TwammError::SpreadExceeded { .. })) => {
-                Err(InteropError::SpreadCapExceeded)
-            }
+            Err(openapi_gateway::GatewayError::Twamm(twamm::TwammError::SpreadExceeded {
+                ..
+            })) => Err(InteropError::SpreadCapExceeded),
             Err(e) => {
                 println!("Gateway bridge error: {e}");
                 Err(InteropError::BadRequest)
@@ -796,7 +798,10 @@ mod tests {
         .unwrap();
         assert_eq!(job.route_key, again.route_key);
         // Different payload -> different route key.
-        let other = dispatch_job(r#"{"action":"move","from":"alice","to":"carol","fen":"8/8/8/8/8/8/8/8 w - - 0 1"}"#).unwrap();
+        let other = dispatch_job(
+            r#"{"action":"move","from":"alice","to":"carol","fen":"8/8/8/8/8/8/8/8 w - - 0 1"}"#,
+        )
+        .unwrap();
         assert_ne!(job.route_key, other.route_key);
         // Queued for the DHT publisher drain (superset check: tests share
         // the process-wide outbox and run in parallel).

@@ -1,22 +1,22 @@
-pub mod lora_mac;
-pub mod ble_mesh;
-pub mod kademlia_routing;
-pub mod stun_hole_punch;
-pub mod identity_manager;
-pub mod network;
-pub mod wifi_direct;
-pub mod packet_translator;
-pub mod fen;
-pub mod encryption_layer;
-pub mod thermal_aware;
-pub mod vrf_assigner;
 pub mod battery_tracker;
-pub mod quarantine;
-pub mod honeypot;
+pub mod ble_mesh;
+pub mod encryption_layer;
+pub mod fen;
 pub mod hash_chain;
-pub mod vdf_sybil;
-pub mod topology;
+pub mod honeypot;
+pub mod identity_manager;
+pub mod kademlia_routing;
+pub mod lora_mac;
+pub mod network;
+pub mod packet_translator;
+pub mod quarantine;
 pub mod simulation;
+pub mod stun_hole_punch;
+pub mod thermal_aware;
+pub mod topology;
+pub mod vdf_sybil;
+pub mod vrf_assigner;
+pub mod wifi_direct;
 
 pub fn init_mesh_transport() {
     // Placeholder for reticulum-rs initialization (libp2p Kademlia used instead)

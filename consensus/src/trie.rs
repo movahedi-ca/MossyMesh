@@ -119,7 +119,9 @@ impl MptNode {
                             let child_hash = subtree_hash(child, &done)?;
                             hash_extension(path, &child_hash)?
                         }
-                        MptNode::Branch { children, value, .. } => {
+                        MptNode::Branch {
+                            children, value, ..
+                        } => {
                             let mut hashes: [Option<Hash32>; 16] = [None; 16];
                             for (i, child) in children.iter().enumerate() {
                                 if let Some(node) = child {
@@ -135,9 +137,12 @@ impl MptNode {
                 }
             }
         }
-        self.hash_cache().get().copied().ok_or(
-            ConsensusError::InvalidInput("hash walk finished without a root hash"),
-        )
+        self.hash_cache()
+            .get()
+            .copied()
+            .ok_or(ConsensusError::InvalidInput(
+                "hash walk finished without a root hash",
+            ))
     }
 
     /// Memoized-hash cell for this node.
@@ -232,9 +237,9 @@ impl MerklePatriciaTrie {
             // byte), and splitting a leaf/extension can net-create up to 4
             // nodes (branch + 2 leaves + extension) while the rebuilt path
             // replaces same-kind nodes 1:1.
-            None => self.size_bytes.saturating_add(
-                4 * NODE_OVERHEAD + 2 * key.len() + value.len(),
-            ),
+            None => self
+                .size_bytes
+                .saturating_add(4 * NODE_OVERHEAD + 2 * key.len() + value.len()),
         };
         if next_size > MAX_LEDGER_SIZE {
             return Err(ConsensusError::OutOfMemory);
@@ -386,9 +391,12 @@ fn estimate_node_size(node: Option<&MptNode>) -> usize {
                 total = total.saturating_add(2 * path.len() + NODE_OVERHEAD);
                 stack.push(child);
             }
-            MptNode::Branch { children, value, .. } => {
-                total = total
-                    .saturating_add(NODE_OVERHEAD + 2 * value.as_ref().map(|v| v.len()).unwrap_or(0));
+            MptNode::Branch {
+                children, value, ..
+            } => {
+                total = total.saturating_add(
+                    NODE_OVERHEAD + 2 * value.as_ref().map(|v| v.len()).unwrap_or(0),
+                );
                 for child in children.iter().flatten() {
                     stack.push(child);
                 }
@@ -461,7 +469,9 @@ fn collect_leaves(node: &MptNode, prefix: &[u8]) -> Vec<(Vec<u8>, Vec<u8>)> {
                 p.extend_from_slice(path);
                 stack.push((child, p));
             }
-            MptNode::Branch { children, value, .. } => {
+            MptNode::Branch {
+                children, value, ..
+            } => {
                 if let Some(v) = value {
                     out.push((pref.clone(), v.clone()));
                 }
@@ -690,7 +700,9 @@ fn get_from(node: &MptNode, key: &[u8]) -> Option<Vec<u8>> {
                 rest = &rest[path.len()..];
                 current = child;
             }
-            MptNode::Branch { children, value, .. } => {
+            MptNode::Branch {
+                children, value, ..
+            } => {
                 if rest.is_empty() {
                     return value.clone();
                 }
@@ -721,7 +733,9 @@ fn build_proof<'a>(
     steps: &mut Vec<ProofStep>,
 ) -> Result<(ProofTerminal, Vec<u8>), ConsensusError> {
     enum Frame<'a> {
-        Extension { path: &'a Vec<u8> },
+        Extension {
+            path: &'a Vec<u8>,
+        },
         Branch {
             nibble: u8,
             children: &'a [Option<Box<MptNode>>; 16],
@@ -755,7 +769,9 @@ fn build_proof<'a>(
                 rest = &rest[path.len()..];
                 current = child;
             }
-            MptNode::Branch { children, value, .. } => {
+            MptNode::Branch {
+                children, value, ..
+            } => {
                 if rest.is_empty() {
                     // Value lives on this branch — terminal includes all child hashes.
                     let v = value.clone().ok_or(ConsensusError::NotFound)?;
@@ -767,7 +783,7 @@ fn build_proof<'a>(
                     }
                     break (
                         ProofTerminal::BranchValue {
-                            children: child_hashes,
+                            children: Box::new(child_hashes),
                             value: v.clone(),
                         },
                         v,
@@ -815,7 +831,7 @@ fn build_proof<'a>(
                 }
                 steps.push(ProofStep::Branch {
                     nibble: *nibble,
-                    children: child_hashes,
+                    children: Box::new(child_hashes),
                     value: (*value).clone(),
                 });
             }
@@ -1015,11 +1031,7 @@ mod tests {
     fn root_hash_deterministic() {
         let mut a = MerklePatriciaTrie::new();
         let mut b = MerklePatriciaTrie::new();
-        for (k, v) in [
-            (b"x" as &[u8], b"1" as &[u8]),
-            (b"y", b"2"),
-            (b"z", b"3"),
-        ] {
+        for (k, v) in [(b"x" as &[u8], b"1" as &[u8]), (b"y", b"2"), (b"z", b"3")] {
             a.insert(k, v.to_vec()).unwrap();
             b.insert(k, v.to_vec()).unwrap();
         }
@@ -1181,9 +1193,7 @@ mod tests {
     fn insert_order_independent_root_with_memoization() {
         // Memoization must not change the canonical root: different insert
         // orders over the same key set converge to the same state root.
-        let keys: Vec<Vec<u8>> = (0..30)
-            .map(|i| format!("k-{i:02}").into_bytes())
-            .collect();
+        let keys: Vec<Vec<u8>> = (0..30).map(|i| format!("k-{i:02}").into_bytes()).collect();
         let mut a = MerklePatriciaTrie::new();
         let mut b = MerklePatriciaTrie::new();
         for k in &keys {

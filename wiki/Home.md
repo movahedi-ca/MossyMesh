@@ -23,3 +23,4 @@ We achieve this by embedding a full WebAssembly sandboxed engine (`shakmaty`) in
 - **[DeFi & Interop Bridging](DeFi_and_Interop.md)**
 - **[Developer Guide](Developer_Guide.md)**
 - **[Agent Grid & Collaboration](Agent_Grid.md)**
+- **[Planning Notes](../../u/plan.md)** ([info](../../u/info.md), [full info](../../u/full-info.md))

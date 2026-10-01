@@ -271,10 +271,7 @@ mod tests {
         miner.register_genesis("g1");
         assert!(!miner.is_online());
         assert_eq!(miner.accrue_offline_epochs("g1", 4).unwrap(), 400);
-        assert_eq!(
-            miner.claim_airdrop("g1"),
-            Err(LiquidityError::StillOffline)
-        );
+        assert_eq!(miner.claim_airdrop("g1"), Err(LiquidityError::StillOffline));
 
         miner.on_internet_reconnect();
         assert_eq!(miner.accrue_offline_epochs("g1", 2).unwrap(), 0);
@@ -335,9 +332,7 @@ mod tests {
             .sum();
         assert_eq!(sum_claimed, miner.total_tokens_airdropped);
         assert_eq!(miner.total_tokens_airdropped, 200 * TOKENS_PER_POINT);
-        assert!(
-            miner.total_tokens_airdropped <= TOKENS_PER_POINT * miner.total_points_issued
-        );
+        assert!(miner.total_tokens_airdropped <= TOKENS_PER_POINT * miner.total_points_issued);
     }
 
     #[test]

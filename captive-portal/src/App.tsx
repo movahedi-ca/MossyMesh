@@ -14,7 +14,34 @@ import {
  * Shown when devices join the offline mesh Wi-Fi AP and OS connectivity
  * checks are redirected by nginx (see nginx.conf).
  */
+
+const THEME_KEY = 'mossymesh-portal-theme'
+type Theme = 'dark' | 'light'
+
+function initialTheme(): Theme {
+  try {
+    const saved = window.localStorage.getItem(THEME_KEY)
+    if (saved === 'light' || saved === 'dark') return saved
+  } catch {
+    // Storage unavailable (private mode); fall back to dark.
+  }
+  return 'dark'
+}
+
 function App() {
+  const [theme, setTheme] = useState<Theme>(initialTheme)
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme
+    try {
+      window.localStorage.setItem(THEME_KEY, theme)
+    } catch {
+      // Storage unavailable; theme still applies for this session.
+    }
+  }, [theme])
+
+  const toggleTheme = () => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))
+
   const [lang, setLang] = useState<PortalLang>(initialLang)
   const t = getStrings(lang)
 
@@ -32,21 +59,35 @@ function App() {
     <div className="shell">
       <div className="glass-panel">
         <div
-          className="lang-picker"
-          style={{ alignSelf: "flex-end", display: "flex", gap: 8, alignItems: "center", fontSize: 12, opacity: 0.9 }}
+          className="portal-controls"
+          style={{ alignSelf: "flex-end", display: "flex", gap: 8, alignItems: "center" }}
         >
-          <label htmlFor="portal-lang">{t.languageLabel}</label>
-          <select
-            id="portal-lang"
-            value={lang}
-            onChange={(e) => changeLang(e.target.value as PortalLang)}
+          <button
+            type="button"
+            className="theme-toggle"
+            onClick={toggleTheme}
+            aria-label={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
+            title={theme === 'dark' ? 'Light theme' : 'Dark theme'}
           >
-            {PORTAL_LANGS.map((l) => (
-              <option key={l} value={l}>
-                {LANG_LABEL[l]}
-              </option>
-            ))}
-          </select>
+            <span aria-hidden="true">{theme === 'dark' ? '☀' : '☾'}</span>
+          </button>
+          <div
+            className="lang-picker"
+            style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 12, opacity: 0.9 }}
+          >
+            <label htmlFor="portal-lang">{t.languageLabel}</label>
+            <select
+              id="portal-lang"
+              value={lang}
+              onChange={(e) => changeLang(e.target.value as PortalLang)}
+            >
+              {PORTAL_LANGS.map((l) => (
+                <option key={l} value={l}>
+                  {LANG_LABEL[l]}
+                </option>
+              ))}
+            </select>
+          </div>
         </div>
 
         <div className="status-badge" role="status">

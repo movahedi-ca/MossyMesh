@@ -115,7 +115,13 @@ impl Job {
         verifier: &impl VdfVerifier,
         module_bytes: impl Into<Vec<u8>>,
     ) -> Result<Self, JobError> {
-        Self::admit_and_load_with_config(receipt, verifier, module_bytes, DEFAULT_BLOCK_SIZE, MEM_LIMIT)
+        Self::admit_and_load_with_config(
+            receipt,
+            verifier,
+            module_bytes,
+            DEFAULT_BLOCK_SIZE,
+            MEM_LIMIT,
+        )
     }
 
     /// Admit when a receipt may be absent: `None` → [`AdmitError::MissingVdf`].

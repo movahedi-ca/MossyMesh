@@ -25,7 +25,8 @@ pub trait FoldingVerifier {
     fn backend_name(&self) -> &'static str;
 
     /// Fold one new step into an accumulator proof.
-    fn fold(&self, old: &SnarkProof, new_step: &StepInstance) -> Result<SnarkProof, ConsensusError>;
+    fn fold(&self, old: &SnarkProof, new_step: &StepInstance)
+        -> Result<SnarkProof, ConsensusError>;
 
     /// Verify a folded proof against public inputs.
     fn verify(&self, proof: &SnarkProof, public_input: &PublicInput) -> Result<(), ConsensusError>;
@@ -167,7 +168,9 @@ mod tests {
     fn trait_object_is_swappable() {
         let backends: Vec<Box<dyn FoldingVerifier>> = vec![
             Box::new(MockFoldingVerifier),
-            Box::new(NovaSnarkVerifier::new(MicroSpartanPreprocessing::preprocess(b"swap"))),
+            Box::new(NovaSnarkVerifier::new(
+                MicroSpartanPreprocessing::preprocess(b"swap"),
+            )),
         ];
         let (proof, pi) = chain();
         assert!(backends[0].verify(&proof, &pi).is_ok());

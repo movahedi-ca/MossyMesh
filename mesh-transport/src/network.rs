@@ -69,7 +69,10 @@ pub async fn build_swarm(
 }
 
 /// Listen on an ephemeral TCP port; returns the bound multiaddr if available.
-pub fn listen_on_tcp(swarm: &mut Swarm<MeshBehaviour>, port: u16) -> Result<Multiaddr, Box<dyn Error>> {
+pub fn listen_on_tcp(
+    swarm: &mut Swarm<MeshBehaviour>,
+    port: u16,
+) -> Result<Multiaddr, Box<dyn Error>> {
     let addr: Multiaddr = format!("/ip4/0.0.0.0/tcp/{port}").parse()?;
     swarm.listen_on(addr.clone())?;
     Ok(addr)
@@ -81,7 +84,10 @@ pub fn dial_and_add_address(
     peer: PeerId,
     addr: Multiaddr,
 ) -> Result<(), Box<dyn Error>> {
-    swarm.behaviour_mut().kademlia.add_address(&peer, addr.clone());
+    swarm
+        .behaviour_mut()
+        .kademlia
+        .add_address(&peer, addr.clone());
     swarm.dial(addr)?;
     Ok(())
 }
@@ -137,8 +143,7 @@ impl MeshNode {
     }
 
     pub fn insert_peer(&mut self, id: NodeId, endpoint: impl Into<String>) -> bool {
-        self.routing
-            .insert(NodeContact::new(id, endpoint.into()))
+        self.routing.insert(NodeContact::new(id, endpoint.into()))
     }
 
     pub fn closest_peers(&self, target: &NodeId, count: usize) -> Vec<NodeContact> {
@@ -146,11 +151,7 @@ impl MeshNode {
     }
 
     /// Deterministic multi-table iterative lookup using only local knowledge maps.
-    pub fn find_node_iterative(
-        &self,
-        target: &NodeId,
-        rpc: &LocalTableRpc<'_>,
-    ) -> FindNodeResult {
+    pub fn find_node_iterative(&self, target: &NodeId, rpc: &LocalTableRpc<'_>) -> FindNodeResult {
         iterative_find_node(&self.routing, target, rpc)
     }
 
@@ -201,9 +202,7 @@ pub fn init_network() {
         "MeshNode online: peer={}… contacts={} dest={}…",
         hex_short(&local),
         node.routing.len(),
-        dest
-            .map(|h| hex_short(&h))
-            .unwrap_or_else(|| "none".into())
+        dest.map(|h| hex_short(&h)).unwrap_or_else(|| "none".into())
     );
 }
 

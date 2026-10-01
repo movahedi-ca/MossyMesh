@@ -323,7 +323,9 @@ mod tests {
         // Eval is stable (no RNG / wall clock).
         assert_eq!(eng.evaluate_position(), eng.evaluate_position());
         assert_eq!(engine::MAX_DEPTH, 64);
-        assert!(engine::DEFAULT_SEARCH_DEPTH <= engine::MAX_DEPTH);
+        const {
+            assert!(engine::DEFAULT_SEARCH_DEPTH <= engine::MAX_DEPTH);
+        }
     }
 
     // --- SMK-04 ---
@@ -503,7 +505,9 @@ mod tests {
             sandbox::JobError::Admit(sandbox::AdmitError::InvalidVdf)
         ));
         // Test constants stay separated from production delay.
-        assert!(sandbox::DEFAULT_TEST_ITERATIONS < sandbox::PRODUCTION_ITERATIONS);
+        const {
+            assert!(sandbox::DEFAULT_TEST_ITERATIONS < sandbox::PRODUCTION_ITERATIONS);
+        }
         assert_eq!(sandbox::PRODUCTION_ITERATIONS, 50_000_000);
     }
 
@@ -555,7 +559,7 @@ mod tests {
     // --- NET-26: network partition and merge simulation ---
     #[cfg(feature = "transport")]
     mod partition_sim {
-        use mesh_transport::kademlia_routing::{NodeContact, RoutingTable, node_id_from_u8};
+        use mesh_transport::kademlia_routing::{node_id_from_u8, NodeContact, RoutingTable};
         use mesh_transport::simulation::SimNode;
 
         /// 8 nodes with fully meshed routing tables (every node knows all 7 others).

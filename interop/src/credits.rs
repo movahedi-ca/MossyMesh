@@ -82,16 +82,9 @@ impl CreditLedger {
 
     /// Credit free balance (e.g. job payout or genesis mint). Creates account if needed.
     /// Returns [`CreditError::Overflow`] instead of silently clamping at u64::MAX.
-    pub fn mint(
-        &mut self,
-        account: impl Into<String>,
-        amount: u64,
-    ) -> Result<(), CreditError> {
+    pub fn mint(&mut self, account: impl Into<String>, amount: u64) -> Result<(), CreditError> {
         let acct = self.accounts.entry(account.into()).or_default();
-        acct.free = acct
-            .free
-            .checked_add(amount)
-            .ok_or(CreditError::Overflow)?;
+        acct.free = acct.free.checked_add(amount).ok_or(CreditError::Overflow)?;
         Ok(())
     }
 
@@ -190,10 +183,7 @@ impl CreditLedger {
 
     fn credit_free(&mut self, account: &str, amount: u64) -> Result<(), CreditError> {
         let acct = self.accounts.entry(account.to_string()).or_default();
-        acct.free = acct
-            .free
-            .checked_add(amount)
-            .ok_or(CreditError::Overflow)?;
+        acct.free = acct.free.checked_add(amount).ok_or(CreditError::Overflow)?;
         Ok(())
     }
 
@@ -434,10 +424,7 @@ mod tests {
         assert_eq!(ledger.free_balance("bob"), 400);
 
         let err = ledger.claim_escrow(&id, preimage).unwrap_err();
-        assert!(matches!(
-            err,
-            CreditError::Htlc(HtlcError::AlreadySettled)
-        ));
+        assert!(matches!(err, CreditError::Htlc(HtlcError::AlreadySettled)));
         assert_eq!(ledger.free_balance("bob"), 400);
         assert_eq!(ledger.conserved_supply(), 1_000);
     }
@@ -490,10 +477,7 @@ mod tests {
     fn mint_overflow_returns_error_not_clamp() {
         let mut ledger = CreditLedger::new();
         ledger.mint("alice", u64::MAX).unwrap();
-        assert_eq!(
-            ledger.mint("alice", 1).unwrap_err(),
-            CreditError::Overflow
-        );
+        assert_eq!(ledger.mint("alice", 1).unwrap_err(), CreditError::Overflow);
         // Balance unchanged after the failed mint.
         assert_eq!(ledger.free_balance("alice"), u64::MAX);
     }

@@ -15,6 +15,12 @@ license = "MIT OR Apache-2.0"
 # Aspirational native throughput ~836 Mnps on strong hosts; measured via benchmark_mnps()
 # — never hard-coded. WASM will be lower.
 
+# cdylib so wasm32-wasip1 builds emit engine.wasm (consumed by the sandbox
+# loader and staged by devops/build-engine-wasm.sh); rlib keeps host builds
+# and dependent crates working as before.
+[lib]
+crate-type = ["cdylib", "rlib"]
+
 [features]
 default = []
 # Optional real Syzygy probing via shakmaty-syzygy (native-friendly; not default for WASI).

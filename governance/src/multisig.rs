@@ -165,7 +165,10 @@ pub struct AdminMultisig {
 
 impl AdminMultisig {
     /// Create a multi-sig with exactly [`MULTISIG_SIGNERS`] distinct admin keys.
-    pub fn new(admins: Vec<(NodeId, VerifyingKey)>, genesis_day: u64) -> Result<Self, MultisigError> {
+    pub fn new(
+        admins: Vec<(NodeId, VerifyingKey)>,
+        genesis_day: u64,
+    ) -> Result<Self, MultisigError> {
         if admins.len() != MULTISIG_SIGNERS {
             return Err(MultisigError::WrongSignerCount);
         }
@@ -368,7 +371,8 @@ mod tests {
     fn sign_n(ms: &mut AdminMultisig, keys: &[(NodeId, SigningKey)], id: u64, n: usize) {
         let desc = ms.proposal(id).unwrap().description.clone();
         for (node, sk) in keys.iter().take(n) {
-            ms.sign(Signature::sign_proposal(sk, *node, id, &desc)).unwrap();
+            ms.sign(Signature::sign_proposal(sk, *node, id, &desc))
+                .unwrap();
         }
     }
 
@@ -379,10 +383,7 @@ mod tests {
         // Day 45: half remaining → 50%
         assert_eq!(authority_weight_at(45), WEIGHT_SCALE / 2);
         // Day 89: 1/90 remaining
-        assert_eq!(
-            authority_weight_at(89),
-            (WEIGHT_SCALE as u128 * 1 / 90) as u64
-        );
+        assert_eq!(authority_weight_at(89), (WEIGHT_SCALE as u128 / 90) as u64);
         // Day 90 and beyond: zero
         assert_eq!(authority_weight_at(90), 0);
         assert_eq!(authority_weight_at(1000), 0);
@@ -412,14 +413,10 @@ mod tests {
             (30, (WEIGHT_SCALE as u128 * 60 / 90) as u64),
             (45, WEIGHT_SCALE / 2),
             (60, (WEIGHT_SCALE as u128 * 30 / 90) as u64),
-            (89, (WEIGHT_SCALE as u128 * 1 / 90) as u64),
+            (89, (WEIGHT_SCALE as u128 / 90) as u64),
         ];
         for (day, expected) in samples {
-            assert_eq!(
-                authority_weight_at(day),
-                expected,
-                "mismatch at day {day}"
-            );
+            assert_eq!(authority_weight_at(day), expected, "mismatch at day {day}");
         }
         // Last non-zero day still has authority; day 90 does not.
         let ms = AdminMultisig::new(five_admins(), 0).unwrap();
@@ -486,10 +483,7 @@ mod tests {
         let (node0, sk0) = &keys[0];
         let s0 = Signature::sign_proposal(sk0, *node0, id, &desc);
         ms.sign(s0.clone()).unwrap();
-        assert_eq!(
-            ms.sign(s0),
-            Err(MultisigError::DuplicateSigner)
-        );
+        assert_eq!(ms.sign(s0), Err(MultisigError::DuplicateSigner));
         assert_eq!(ms.signature_count(id), 1);
         assert!(!ms.threshold_met(id));
     }
@@ -589,10 +583,7 @@ mod tests {
         let mut ms = AdminMultisig::new(five_admins(), 0).unwrap();
         assert_eq!(ms.propose(""), Err(MultisigError::InvalidProposal));
         let too_long = "x".repeat(MAX_PROPOSAL_DESCRIPTION_LEN + 1);
-        assert_eq!(
-            ms.propose(too_long),
-            Err(MultisigError::InvalidProposal)
-        );
+        assert_eq!(ms.propose(too_long), Err(MultisigError::InvalidProposal));
         // Boundary: exactly max length is ok
         let ok = "y".repeat(MAX_PROPOSAL_DESCRIPTION_LEN);
         let id = ms.propose(ok).unwrap();
@@ -606,10 +597,7 @@ mod tests {
         let (node0, sk0) = &keys[0];
         let sig = Signature::sign_proposal(sk0, *node0, 99, "ghost");
         assert_eq!(ms.sign(sig), Err(MultisigError::UnknownProposal));
-        assert_eq!(
-            ms.execute(99, 0),
-            Err(MultisigError::UnknownProposal)
-        );
+        assert_eq!(ms.execute(99, 0), Err(MultisigError::UnknownProposal));
 
         let id = ms.propose("live").unwrap();
         sign_n(&mut ms, &keys, id, 3);
@@ -636,7 +624,7 @@ mod tests {
             Some(MultisigError::WrongSignerCount)
         );
         let mut dup = five_admins();
-        dup[4] = dup[0].clone();
+        dup[4] = dup[0];
         assert_eq!(
             AdminMultisig::new(dup, 0).err(),
             Some(MultisigError::DuplicateSigner)
@@ -672,7 +660,10 @@ mod tests {
         let desc = ms.proposal(id).unwrap().description.clone();
         let admin0 = NodeId::from_label("admin0");
         let forged = Signature::forge(admin0, id, &desc);
-        assert_eq!(ms.sign(forged.clone()), Err(MultisigError::InvalidSignature));
+        assert_eq!(
+            ms.sign(forged.clone()),
+            Err(MultisigError::InvalidSignature)
+        );
         // Three forged "signatures" cannot reach threshold either.
         for i in 0..3 {
             let f = Signature::forge(NodeId::from_label(&format!("admin{i}")), id, &desc);
@@ -695,9 +686,6 @@ mod tests {
         let attacker_sk = SigningKey::from_bytes(&[0xBB; 32]);
         let admin0 = NodeId::from_label("admin0");
         let impersonated = Signature::sign_proposal(&attacker_sk, admin0, id, &desc);
-        assert_eq!(
-            ms.sign(impersonated),
-            Err(MultisigError::InvalidSignature)
-        );
+        assert_eq!(ms.sign(impersonated), Err(MultisigError::InvalidSignature));
     }
 }
