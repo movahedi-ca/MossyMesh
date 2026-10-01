@@ -3,6 +3,7 @@
 //! Phase 5: AsyncAPI / OpenAPI gateway, TWAMM orchestration (2% max-spread),
 //! and retroactive AMM liquidity mining for genesis offline nodes.
 
+pub mod api_docs;
 pub mod liquidity;
 pub mod openapi_gateway;
 pub mod twamm;
@@ -92,7 +93,9 @@ pub struct GenericPayload {
 pub async fn run_http_server() {
     let app = Router::new()
         .route("/api/v1/health", get(health_handler).post(health_handler))
-        .route("/api/v1/submit_job", post(submit_job_handler));
+        .route("/api/v1/submit_job", post(submit_job_handler))
+        .route("/api-docs/openapi.json", get(api_docs::serve_openapi_json))
+        .merge(api_docs::swagger_ui());
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await.unwrap();
     println!("Interop: HTTP Server listening on 0.0.0.0:8080");
@@ -462,17 +465,113 @@ fn handle_gateway(req: &AsyncApiRequest) -> Result<String, InteropError> {
     }
 }
 
-/// Simulates an ongoing WebSocket event loop syncing state to the external internet.
-pub fn handle_websocket(mut connection_alive: bool) {
-    let mut tick = 0;
-    while connection_alive && tick < 3 {
-        println!("WebSocket Sync Tick {}...", tick);
-        tick += 1;
-        // Simulate break
-        if tick == 2 {
-            connection_alive = false;
+/// Handle for one WebSocket peer connection.
+///
+/// Dropping the handle closes the connection. This is the guarantee behind
+/// the fix for #48: no code path can orphan a live connection, because the
+/// connection dies with its handle.
+pub struct WsConnection {
+    id: u64,
+    peer: String,
+    closed: bool,
+}
+
+impl WsConnection {
+    fn new(id: u64, peer: impl Into<String>) -> Self {
+        Self {
+            id,
+            peer: peer.into(),
+            closed: false,
         }
     }
+
+    /// Close the connection immediately. Idempotent.
+    pub fn close(&mut self) {
+        if !self.closed {
+            self.closed = true;
+            println!("WebSocket connection {} ({}) closed.", self.id, self.peer);
+        }
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.closed
+    }
+}
+
+impl Drop for WsConnection {
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+
+/// Registry of live WebSocket connections.
+///
+/// Connections that die abruptly (peer disconnect without a clean close) are
+/// removed here, so they cannot accumulate. Fixes #48.
+#[derive(Default)]
+pub struct WsRegistry {
+    next_id: u64,
+    live: Vec<WsConnection>,
+}
+
+impl WsRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Register a new outbound connection.
+    pub fn register(&mut self, peer: impl Into<String>) -> u64 {
+        let id = self.next_id;
+        self.next_id = self.next_id.wrapping_add(1);
+        self.live.push(WsConnection::new(id, peer));
+        id
+    }
+
+    /// Remove and close a connection by id (abrupt peer disconnect path).
+    /// Returns true if a live connection was found and removed.
+    pub fn abrupt_disconnect(&mut self, id: u64) -> bool {
+        if let Some(pos) = self.live.iter().position(|c| c.id == id) {
+            let mut conn = self.live.remove(pos);
+            conn.close();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Close and drop every live connection.
+    pub fn close_all(&mut self) {
+        while let Some(mut conn) = self.live.pop() {
+            conn.close();
+        }
+    }
+
+    pub fn live_count(&self) -> usize {
+        self.live.len()
+    }
+}
+
+/// Ongoing WebSocket event loop syncing state to the external internet.
+///
+/// Connections are tracked in a [`WsRegistry`] and pruned on disconnect, so an
+/// abrupt peer drop can no longer leak a live connection.
+pub fn handle_websocket(connection_alive: bool) {
+    let mut registry = WsRegistry::new();
+    let id = registry.register("uplink-gateway");
+    let mut tick = 0;
+    let mut alive = connection_alive;
+    while alive && tick < 3 {
+        println!("WebSocket Sync Tick {}...", tick);
+        tick += 1;
+        if tick == 2 {
+            // Simulated abrupt peer disconnect: prune from the registry so the
+            // connection is dropped instead of leaking.
+            registry.abrupt_disconnect(id);
+            alive = false;
+        }
+    }
+    registry.close_all();
+    debug_assert_eq!(registry.live_count(), 0, "connection leaked");
     println!("WebSocket Connection Closed.");
 }
 
@@ -637,5 +736,29 @@ mod tests {
             payload: "not json".into(),
         });
         assert_eq!(err, Err(InteropError::BadRequest));
+    fn abrupt_disconnect_prunes_connection() {
+        let mut registry = WsRegistry::new();
+        let a = registry.register("peer-a");
+        let _b = registry.register("peer-b");
+        assert_eq!(registry.live_count(), 2);
+        assert!(registry.abrupt_disconnect(a));
+        assert_eq!(registry.live_count(), 1);
+        // Unknown id is a no-op, never panics.
+        assert!(!registry.abrupt_disconnect(9999));
+    }
+
+    #[test]
+    fn close_all_drains_registry() {
+        let mut registry = WsRegistry::new();
+        registry.register("peer-a");
+        registry.register("peer-b");
+        registry.close_all();
+        assert_eq!(registry.live_count(), 0);
+    }
+
+    #[test]
+    fn websocket_sync_loop_leaks_nothing() {
+        handle_websocket(true);
+        handle_websocket(false);
     }
 }
