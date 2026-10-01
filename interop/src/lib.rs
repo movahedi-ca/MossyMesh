@@ -171,6 +171,7 @@ fn map_interop_error(e: InteropError) -> StatusCode {
         InteropError::Timeout => StatusCode::GATEWAY_TIMEOUT,
         InteropError::SpreadCapExceeded => StatusCode::UNPROCESSABLE_ENTITY,
         InteropError::GatewayDormant => StatusCode::SERVICE_UNAVAILABLE,
+        InteropError::TooManyRequests => StatusCode::TOO_MANY_REQUESTS,
     }
 }
 
@@ -331,7 +332,11 @@ async fn submit_job_handler(
         }
         Err(e) => {
             println!("Job rejected: {e:?}");
-            Err(StatusCode::BAD_REQUEST)
+            Err(match e {
+                // Issue #162: backpressure surfaces as HTTP 429.
+                JobDispatchError::OutboxFull => StatusCode::TOO_MANY_REQUESTS,
+                _ => StatusCode::BAD_REQUEST,
+            })
         }
     }
 }
@@ -358,6 +363,8 @@ pub enum JobDispatchError {
     MissingAction,
     /// `move` jobs require a `fen` position.
     MissingFen,
+    /// The outbox is full: the job was NOT accepted; back off and retry.
+    OutboxFull,
 }
 
 /// Bounded outbox between the HTTP gateway and the mesh-transport DHT
@@ -372,6 +379,22 @@ fn job_outbox() -> &'static Mutex<std::collections::VecDeque<MeshJob>> {
 /// Maximum jobs buffered for the DHT publisher.
 pub const JOB_OUTBOX_CAP: usize = 1024;
 
+/// Push a validated job into the outbox.
+///
+/// Issue #162: when the outbox is full this returns
+/// [`JobDispatchError::OutboxFull`] (HTTP 429 upstream) instead of silently
+/// evicting the oldest pending job. The caller was never told a job vanished;
+/// now the rejection is explicit and the queued jobs are untouched.
+fn enqueue_job(
+    outbox: &mut std::collections::VecDeque<MeshJob>,
+    job: MeshJob,
+) -> Result<(), JobDispatchError> {
+    if outbox.len() >= JOB_OUTBOX_CAP {
+        return Err(JobDispatchError::OutboxFull);
+    }
+    outbox.push_back(job);
+    Ok(())
+}
 /// Parse, validate, and route a `/api/v1/submit_job` body (issue #14).
 ///
 /// The payload is decoded into the [`GenericPayload`] job struct, validated,
@@ -403,10 +426,7 @@ pub fn dispatch_job(body: &str) -> Result<MeshJob, JobDispatchError> {
     };
 
     if let Ok(mut outbox) = job_outbox().lock() {
-        if outbox.len() >= JOB_OUTBOX_CAP {
-            outbox.pop_front();
-        }
-        outbox.push_back(job.clone());
+        enqueue_job(&mut outbox, job.clone())?;
     }
     Ok(job)
 }
@@ -437,6 +457,8 @@ pub fn handle_rest_call(req: &AsyncApiRequest) -> Result<String, InteropError> {
         "/api/v1/health" => Ok("Mesh Island Active".to_string()),
         "/api/v1/submit_job" => match dispatch_job(&req.payload) {
             Ok(_) => Ok("Job Accepted".to_string()),
+            // Issue #162: backpressure is explicit, not a silent drop.
+            Err(JobDispatchError::OutboxFull) => Err(InteropError::TooManyRequests),
             Err(_) => Err(InteropError::BadRequest),
         },
         "/api/v1/twamm" => handle_twamm(req),
@@ -959,6 +981,8 @@ pub enum InteropError {
     SpreadCapExceeded,
     /// OpenAPI gateway is offline / internet not reconnected.
     GatewayDormant,
+    /// Job outbox is full: backpressure, the client should retry later.
+    TooManyRequests,
 }
 
 #[cfg(test)]
