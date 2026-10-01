@@ -5,6 +5,7 @@ use consensus::init_consensus;
 use engine::init_engine;
 use interop::init_interop;
 use mesh_transport::ble_mesh::init_ble_mesh;
+use mesh_transport::honeypot::init_honeypot;
 use mesh_transport::identity_manager::init_identity_manager;
 use mesh_transport::kademlia_routing::{
     find_node_local, init_kademlia_routing, node_id_from_u8, NodeContact, RoutingTable,
@@ -33,6 +34,9 @@ async fn main() {
     init_stun_hole_punch();
     init_network();
     init_ble_mesh();
+    // Agent-13 security: onion-routed honeypots for anti-cartel enforcement
+    // (issue #168: the last remaining agent-13 module, now initialized).
+    init_honeypot();
 
     // 2b. Minimal live API exercise (pure-Rust, no async executor required)
     let mut node = MeshNode::bootstrap(b"mossymesh-daemon-node");
