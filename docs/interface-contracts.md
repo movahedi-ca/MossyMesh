@@ -28,7 +28,7 @@ All cross-crate messages SHOULD be `serde`-serializable (CBOR preferred on mesh;
         │ ExecuteRequest                │ CommitReceipt
 ┌───────▼──────────────┐                │
 │  sandbox (WAMR)      ├────────────────┘
-│  MEM_LIMIT 10 MiB     │
+│  MEM_LIMIT 10MB      │
 └───────┬──────────────┘
         │ FFI: evaluate_move / get_best_move / …
 ┌───────▼──────────────┐
@@ -98,7 +98,7 @@ TraceHash     = 32-byte hash-chain link of WASM execution trace
 | --- | --- | --- |
 | `root_hash` | `[u8;32]` | Trie root after insert/merge |
 | `proof` | Merkle and/or SNARK bytes | Prefer constant-size SNARK |
-| `ledger_bytes` | `u32` | **must be ≤ 10_485_760** |
+| `ledger_bytes` | `u32` | **must be ≤ 10_000_000** |
 
 ### `EscrowEvent` (interop)
 
@@ -149,7 +149,7 @@ TraceHash     = 32-byte hash-chain link of WASM execution trace
 | Merge islands | `TrieNode::merge_state(remote)` |
 | Verify | `verify_proof() -> bool` |
 | Compress | `fold_snarks()` / `verify_snark()` |
-| Bound | `MAX_LEDGER_SIZE = 10_485_760` |
+| Bound | `MAX_LEDGER_SIZE = 10_000_000` |
 
 Transport must not store full historical ledger on edge; only active roots + proofs + ring buffers.
 

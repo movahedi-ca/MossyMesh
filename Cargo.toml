@@ -5,6 +5,7 @@ members = [
     "engine",
     "sandbox",
     "interop",
+    "governance",
     "ai",
     "integration",
 ]

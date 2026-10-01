@@ -1,32 +1,26 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   connectBleRelay,
-  isBleRelayAvailable,
+  isBleSupported,
   type BleRelay,
   type BleRelayState,
 } from "../lib/bleRelay";
-import { getStrings, initialLang, type AppLang, type AppStrings } from "../i18n";
 
-const LABEL = (t: AppStrings["ble"]): Record<BleRelayState, string> => ({
-  unsupported: t.unavailable,
-  idle: t.enable,
-  scanning: t.scanning,
-  connected: t.on,
-  error: t.failed,
-});
+const LABEL: Record<BleRelayState, string> = {
+  unsupported: "BLE unavailable",
+  idle: "Enable BLE relay",
+  scanning: "Scanning…",
+  connected: "BLE relay on",
+  error: "BLE failed — retry",
+};
 
 /**
  * Lets the browser act as a mesh relay over Web Bluetooth when the native
- * daemon is unreachable. EXPERIMENTAL: no peer implementation ships yet,
- * and the toggle renders only in a secure context (Web Bluetooth refuses
- * plain HTTP, so it stays hidden on the real portal deployment).
+ * daemon is unreachable. Renders nothing on browsers without Web Bluetooth.
  */
 export const BleRelayToggle = () => {
-  const [lang] = useState<AppLang>(initialLang);
-  const t = getStrings(lang);
-  const label = LABEL(t.ble);
   const [state, setState] = useState<BleRelayState>(
-    isBleRelayAvailable() ? "idle" : "unsupported",
+    isBleSupported() ? "idle" : "unsupported",
   );
   const [peer, setPeer] = useState<string | null>(null);
   const [frames, setFrames] = useState(0);
@@ -62,9 +56,8 @@ export const BleRelayToggle = () => {
       setPeer(relay.deviceName);
       setState("connected");
     } catch {
-      // User cancelled the picker, auth failed, or the link dropped:
-      // stay idle, not stuck.
-      setState(isBleRelayAvailable() ? "idle" : "unsupported");
+      // User cancelled the picker or the link dropped: stay idle, not stuck.
+      setState(isBleSupported() ? "idle" : "unsupported");
     }
   }, [state]);
 
@@ -78,8 +71,8 @@ export const BleRelayToggle = () => {
       disabled={state === "scanning"}
       title={
         state === "connected"
-          ? t.ble.relayingVia(peer ?? "BLE peer", frames)
-          : t.ble.useAsRelay
+          ? `Relaying via ${peer ?? "BLE peer"} · ${frames} frames`
+          : "Use this browser as a BLE mesh relay"
       }
       aria-pressed={state === "connected"}
       style={{
@@ -94,7 +87,7 @@ export const BleRelayToggle = () => {
       }}
     >
       <span aria-hidden="true">📡 </span>
-      {label[state]}
+      {LABEL[state]}
       {state === "connected" && frames > 0 ? ` · ${frames}` : ""}
     </button>
   );

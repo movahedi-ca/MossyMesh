@@ -8,7 +8,6 @@ interface BluetoothRemoteGATTCharacteristic {
   startNotifications(): Promise<BluetoothRemoteGATTCharacteristic>;
   stopNotifications(): Promise<BluetoothRemoteGATTCharacteristic>;
   writeValue(value: BufferSource): Promise<void>;
-  readValue(): Promise<DataView>;
   addEventListener(
     type: "characteristicvaluechanged",
     listener: (event: Event) => void,

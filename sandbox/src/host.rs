@@ -15,6 +15,14 @@ use crate::{DEFAULT_BLOCK_SIZE, MEM_LIMIT};
 /// Aligns with the blueprint's "bounded aux stack (`-z stack-size=N`)" guardrail.
 pub const AUX_STACK_SIZE: usize = 64 * 1024; // 64 KiB
 
+/// Filesystem location of the staged engine artifact, resolved at compile
+/// time against this crate's manifest dir. `./devops/build-engine-wasm.sh`
+/// stages the `wasm32-wasip1` artifact here; the file is gitignored
+/// (`sandbox/assets/.gitignore`) and rebuilt by CI, never committed.
+/// Note: this is the dev-checkout path. Packaged deployments should enable
+/// `bundled-engine` instead so no disk read happens at all.
+const ENGINE_WASM_DISK_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/engine.wasm");
+
 /// Errors raised by the simulated host / guest boundary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HostError {
@@ -22,6 +30,10 @@ pub enum HostError {
     ExportNotFound,
     InvalidModule,
     AuxStackOverflow,
+    /// No engine module available: nothing embedded via `bundled-engine`
+    /// and `assets/engine.wasm` is missing or unreadable on disk
+    /// (see [`HostRuntime::load_engine`]).
+    EngineNotFound,
     Pool(PoolError),
 }
 
@@ -33,6 +45,9 @@ impl HostError {
             HostError::ExportNotFound => "FFI Error: Exported function not found in WASM module.",
             HostError::InvalidModule => "Host Error: Invalid or empty WASM module bytes.",
             HostError::AuxStackOverflow => "Host Error: Bounded aux stack overflow.",
+            HostError::EngineNotFound => {
+                "Host Error: Engine WASM not found (no bundle embedded and assets/engine.wasm missing)."
+            }
             HostError::Pool(e) => e.as_str(),
         }
     }
@@ -74,6 +89,26 @@ impl HostRuntime {
     /// Load module bytes into a new host with default block size and MEM_LIMIT.
     pub fn load(module_bytes: Vec<u8>) -> Result<Self, HostError> {
         Self::load_with_config(module_bytes, DEFAULT_BLOCK_SIZE, MEM_LIMIT)
+    }
+
+    /// Load the chess engine module for the sandbox (issues #38, #146, #171).
+    ///
+    /// Resolution order, no panics:
+    /// 1. **Embedded bundle** — with `bundled-engine` and the asset embedded
+    ///    at compile time (see [`crate::engine_bundle`]), the bytes come from
+    ///    [`crate::engine_wasm_bytes`] and no disk I/O happens on startup.
+    /// 2. **Disk fallback** — reads [`ENGINE_WASM_DISK_PATH`]
+    ///    (`sandbox/assets/engine.wasm` as staged by
+    ///    `./devops/build-engine-wasm.sh`); the pre-bundle path.
+    /// 3. [`HostError::EngineNotFound`] when neither leg yields bytes.
+    pub fn load_engine() -> Result<Self, HostError> {
+        if let Some(bundled) = crate::engine_wasm_bytes() {
+            return Self::load(bundled.to_vec());
+        }
+        match std::fs::read(ENGINE_WASM_DISK_PATH) {
+            Ok(bytes) => Self::load(bytes),
+            Err(_) => Err(HostError::EngineNotFound),
+        }
     }
 
     /// Load with configurable fixed-block size and memory ceiling.
@@ -251,5 +286,32 @@ mod tests {
         rt2.allocate(128).unwrap();
         rt2.allocate(128).unwrap();
         assert_eq!(rt2.allocate(1).unwrap_err(), HostError::OutOfMemory);
+    }
+
+    #[test]
+    fn load_engine_wires_bundle_into_loader_path() {
+        // Issue #171 regression: engine_wasm_bytes() must feed the loader,
+        // not sit uncalled behind a re-export.
+        #[cfg(all(feature = "bundled-engine", mossymesh_engine_wasm_bundled))]
+        {
+            let bundled = crate::engine_wasm_bytes().expect("bundled engine.wasm");
+            assert!(bundled.starts_with(b"\0asm"), "must be a WASM module");
+            // The loader takes the embedded bytes: no disk read involved.
+            let rt = HostRuntime::load_engine().expect("loader accepts bundled bytes");
+            assert_eq!(rt.module_bytes, bundled);
+        }
+        #[cfg(not(all(feature = "bundled-engine", mossymesh_engine_wasm_bundled)))]
+        {
+            // No bundle embedded in this build and no staged asset on disk
+            // (CI/dev without ./devops/build-engine-wasm.sh): the loader
+            // reports the miss deterministically instead of panicking.
+            // (If sandbox/assets/engine.wasm exists, this leg loads from disk.)
+            if !std::path::Path::new(ENGINE_WASM_DISK_PATH).is_file() {
+                assert_eq!(
+                    HostRuntime::load_engine().unwrap_err(),
+                    HostError::EngineNotFound
+                );
+            }
+        }
     }
 }

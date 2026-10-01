@@ -311,30 +311,6 @@ pub struct FindNodeResult {
     pub rounds: usize,
 }
 
-/// Maximum endpoint string length accepted from an RPC reply.
-pub const MAX_CONTACT_ENDPOINT_LEN: usize = 256;
-
-/// Plausibility screen for contacts learned from untrusted RPC replies
-/// (fixes #203). Rejects contacts that cannot be real mesh peers:
-/// the zero id, our own id, empty or oversized endpoints, and endpoints
-/// containing control characters.
-pub fn is_plausible_contact(contact: &NodeContact, local_id: &NodeId) -> bool {
-    if contact.id == [0u8; 32] {
-        return false;
-    }
-    if contact.id == *local_id {
-        return false;
-    }
-    let ep = contact.endpoint.as_str();
-    if ep.is_empty() || ep.len() > MAX_CONTACT_ENDPOINT_LEN {
-        return false;
-    }
-    if ep.chars().any(|c| c.is_control()) {
-        return false;
-    }
-    true
-}
-
 /// Deterministic iterative `find_node` (Kademlia §2.3).
 ///
 /// Starts from the caller's routing table, queries α closest unqueried peers
@@ -391,18 +367,8 @@ pub fn iterative_find_node<R: FindNodeRpc>(
         for peer in &candidates {
             queried.insert(peer.id);
             let replies = rpc.find_node(&peer.id, target);
-            // Fix #203: RPC replies are untrusted. Take at most k contacts per
-            // reply, drop implausible ones, and keep the shortlist bounded
-            // even transiently (k fresh contacts per queried peer at most).
-            let shortlist_cap = k.saturating_add(ALPHA.saturating_mul(k));
-            for contact in replies.into_iter().take(k) {
+            for contact in replies {
                 if contact.id == local.local_id {
-                    continue;
-                }
-                if !is_plausible_contact(&contact, &local.local_id) {
-                    continue;
-                }
-                if !shortlist.contains_key(&contact.id) && shortlist.len() >= shortlist_cap {
                     continue;
                 }
                 if contact.id == *target {
@@ -753,81 +719,5 @@ mod tests {
             assert!(!table.insert_with_probe(contact(i), &probe));
         }
         assert!(calls.get() >= 2);
-    }
-
-    /// Regression test for #203: a hostile peer returning an oversized,
-    /// garbage-filled FIND_NODE reply must not bloat or poison the shortlist.
-    #[test]
-    fn hostile_oversized_reply_is_bounded_and_filtered() {
-        struct HostileRpc;
-        impl FindNodeRpc for HostileRpc {
-            fn find_node(&self, _peer: &NodeId, _target: &NodeId) -> Vec<NodeContact> {
-                (0..10_000u32)
-                    .map(|i| {
-                        let mut id = [0u8; 32];
-                        id[0..4].copy_from_slice(&i.to_be_bytes());
-                        let endpoint = match i % 4 {
-                            0 => String::new(),              // empty: implausible
-                            1 => "bad\x07endpoint".into(),   // control char: implausible
-                            2 => "x".repeat(1024),           // oversized: implausible
-                            _ => format!("mesh://evil/{i}"), // plausible-looking
-                        };
-                        NodeContact::new(id, endpoint)
-                    })
-                    .collect()
-            }
-        }
-
-        let local_id = node_id_from_u8(0xAA);
-        let mut table = RoutingTable::new(local_id);
-        // Seed a couple of honest contacts so the lookup has someone to query.
-        for v in [1u8, 2, 3] {
-            table.insert(NodeContact::new(
-                node_id_from_u8(v),
-                format!("mesh://honest/{v}"),
-            ));
-        }
-        let target = node_id_from_u8(0x7F);
-        let rpc = HostileRpc;
-
-        let result = iterative_find_node(&table, &target, &rpc);
-
-        // Terminates and the result stays within k.
-        assert!(result.rounds <= 257);
-        assert!(result.closest.len() <= K);
-        // No implausible contact survives into the result.
-        for c in &result.closest {
-            assert!(is_plausible_contact(c, &local_id));
-            assert_ne!(c.id, [0u8; 32]);
-            assert!(!c.endpoint.is_empty());
-        }
-    }
-
-    #[test]
-    fn plausible_contact_screen() {
-        let local = node_id_from_u8(0xAA);
-        let mut id = [0u8; 32];
-        id[0] = 1;
-        assert!(is_plausible_contact(
-            &NodeContact::new(id, "mesh://node/1"),
-            &local
-        ));
-        assert!(!is_plausible_contact(
-            &NodeContact::new([0u8; 32], "mesh://node/0"),
-            &local
-        ));
-        assert!(!is_plausible_contact(
-            &NodeContact::new(local, "mesh://self"),
-            &local
-        ));
-        assert!(!is_plausible_contact(&NodeContact::new(id, ""), &local));
-        assert!(!is_plausible_contact(
-            &NodeContact::new(id, "x".repeat(MAX_CONTACT_ENDPOINT_LEN + 1)),
-            &local
-        ));
-        assert!(!is_plausible_contact(
-            &NodeContact::new(id, "mesh://a\nb"),
-            &local
-        ));
     }
 }

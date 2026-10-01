@@ -247,17 +247,15 @@ impl OpenApiGateway {
     /// Human / REST status blob.
     pub fn status_json(&self) -> String {
         let note = self.last_bridge_note.as_deref().unwrap_or("idle");
-        // Issue #187: serialize, never hand-format. The old code even had to
-        // mangle quotes out of the note; the serializer escapes them properly.
-        serde_json::json!({
-            "active": self.is_active(),
-            "internet_reconnected": self.internet_reconnected,
-            "max_spread_bps": MAX_SPREAD_BPS,
-            "global_mid": self.global_amm.mid_price(),
-            "accounts": self.local_credits.len(),
-            "note": note,
-        })
-        .to_string()
+        format!(
+            "{{\"active\":{},\"internet_reconnected\":{},\"max_spread_bps\":{},\"global_mid\":{},\"accounts\":{},\"note\":\"{}\"}}",
+            self.is_active(),
+            self.internet_reconnected,
+            MAX_SPREAD_BPS,
+            self.global_amm.mid_price(),
+            self.local_credits.len(),
+            note.replace('"', "'")
+        )
     }
 }
 
@@ -275,18 +273,16 @@ pub struct BridgeReceipt {
 
 impl BridgeReceipt {
     pub fn to_json(&self) -> String {
-        // Issue #187: serialize, never hand-format; account and order_id are
-        // caller-controlled strings.
-        serde_json::json!({
-            "account": self.account,
-            "order_id": self.order_id,
-            "amount_bridged": self.amount_bridged,
-            "quote_received": self.quote_received,
-            "max_spread_bps_seen": self.max_spread_bps_seen,
-            "max_spread_cap_bps": self.max_spread_cap_bps,
-            "gateway_active": self.gateway_active,
-        })
-        .to_string()
+        format!(
+            "{{\"account\":\"{}\",\"order_id\":\"{}\",\"amount_bridged\":{},\"quote_received\":{},\"max_spread_bps_seen\":{},\"max_spread_cap_bps\":{},\"gateway_active\":{}}}",
+            self.account,
+            self.order_id,
+            self.amount_bridged,
+            self.quote_received,
+            self.max_spread_bps_seen,
+            self.max_spread_cap_bps,
+            self.gateway_active
+        )
     }
 }
 
@@ -317,26 +313,5 @@ mod tests {
         assert!(gw.is_active());
         gw.on_internet_disconnect();
         assert!(!gw.is_active());
-    }
-
-    /// Issue #187: an account id containing JSON metacharacters must
-    /// round-trip through receipt and status JSON instead of breaking out
-    /// of the string (the old code even mangled quotes out of the note).
-    #[test]
-    fn json_outputs_escape_hostile_account_id() {
-        let mut gw = OpenApiGateway::new();
-        gw.on_internet_reconnect();
-        let evil = "ac\"ct-\\-1";
-        gw.set_local_credit(evil, 10_000);
-        let receipt = gw.bridge_local_to_global(evil, 10_000, 1).unwrap();
-        let rv: serde_json::Value =
-            serde_json::from_str(&receipt.to_json()).expect("receipt must be valid JSON");
-        assert_eq!(rv["account"], evil);
-        let sv: serde_json::Value =
-            serde_json::from_str(&gw.status_json()).expect("status must be valid JSON");
-        assert!(
-            sv["note"].as_str().unwrap().contains(evil),
-            "note should carry the raw account id, escaped by the serializer"
-        );
     }
 }

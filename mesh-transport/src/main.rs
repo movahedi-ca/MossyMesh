@@ -5,7 +5,6 @@ use consensus::init_consensus;
 use engine::init_engine;
 use interop::init_interop;
 use mesh_transport::ble_mesh::init_ble_mesh;
-use mesh_transport::honeypot::init_honeypot;
 use mesh_transport::identity_manager::init_identity_manager;
 use mesh_transport::kademlia_routing::{
     find_node_local, init_kademlia_routing, node_id_from_u8, NodeContact, RoutingTable,
@@ -34,9 +33,6 @@ async fn main() {
     init_stun_hole_punch();
     init_network();
     init_ble_mesh();
-    // Agent-13 security: onion-routed honeypots for anti-cartel enforcement
-    // (issue #168: the last remaining agent-13 module, now initialized).
-    init_honeypot();
 
     // 2b. Minimal live API exercise (pure-Rust, no async executor required)
     let mut node = MeshNode::bootstrap(b"mossymesh-daemon-node");
@@ -78,24 +74,14 @@ async fn main() {
     // 4. Mount Interop Bridging
     println!("\n[Interop] Mounting HTTP API endpoints...");
 
-    let server_handle = tokio::spawn(async { interop::run_http_server().await });
+    let server_handle = tokio::spawn(async {
+        interop::run_http_server().await;
+    });
 
     // Simulate persistent Websocket sync thread if external internet is available
     println!("\n[Daemon] Entering event loop...");
-    // We let the HTTP server run indefinitely; a startup failure (e.g. the
-    // bind port is taken) is logged and exits non-zero instead of
-    // panic-unwinding an unlogged thread (issue #150).
-    match server_handle.await {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) => {
-            eprintln!("[Interop] HTTP gateway failed: {e}");
-            std::process::exit(1);
-        }
-        Err(join_err) => {
-            eprintln!("[Interop] HTTP gateway task panicked: {join_err}");
-            std::process::exit(1);
-        }
-    }
+    // We let the HTTP server run indefinitely
+    server_handle.await.unwrap();
 
     println!("==================================================");
     println!("=          MOSSYMESH DAEMON TERMINATED           =");

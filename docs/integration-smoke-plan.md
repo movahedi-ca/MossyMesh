@@ -32,7 +32,7 @@ If Rust is unavailable, treat this plan + harness source as the contract; run wh
 | SMK-04 | `smoke_consensus_insert_merge` | consensus | insert + merge child present |
 | SMK-05 | `smoke_interop_health` | interop | `/api/v1/health` Ok |
 | SMK-06 | `smoke_job_pipeline` | interop → sandbox (test MinRoot admit) → engine → consensus | admitted `get_best_move` + startpos eval + Merkle proof |
-| SMK-07 | `smoke_ledger_bound_constant` | consensus | `MAX_LEDGER_SIZE == 10_485_760` |
+| SMK-07 | `smoke_ledger_bound_constant` | consensus | `MAX_LEDGER_SIZE == 10_000_000` |
 | SMK-08 | `smoke_sandbox_mem_constant` | sandbox | `MEM_LIMIT == 10 * 1024 * 1024` |
 
 ## Job Pipeline (SMK-06)

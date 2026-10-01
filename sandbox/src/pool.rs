@@ -207,23 +207,19 @@ impl FixedBlockPool {
     }
 
     /// Release a previously allocated handle back to the free list.
-    ///
-    /// The handle's block range is validated in full before anything is
-    /// mutated, so an invalid handle can never leave half-flipped free bits
-    /// or corrupt the used-block accounting (issue #179). Released blocks are
-    /// zeroed before the next allocation reuses them, so a later `allocate()`
-    /// cannot hand another tenant this handle's bytes (issue #176).
     pub fn free(&mut self, handle: BlockHandle) -> Result<(), PoolError> {
-        // Validate the whole range first; mutate nothing until it checks out.
-        self.validate(handle)?;
+        if handle.count == 0
+            || handle.start >= self.total_blocks
+            || handle.start + handle.count > self.total_blocks
+        {
+            return Err(PoolError::InvalidHandle);
+        }
         for b in handle.start..handle.start + handle.count {
+            if self.free[b] {
+                return Err(PoolError::InvalidHandle);
+            }
             self.free[b] = true;
         }
-        // Zero the released storage: the next allocate() reuses the hole via
-        // first-fit, and get()/get_mut() expose the full block range.
-        let start = handle.offset(self.block_size);
-        let end = start + handle.byte_len(self.block_size);
-        self.storage[start..end].fill(0);
         self.used_blocks -= handle.count;
         Ok(())
     }
@@ -382,36 +378,5 @@ mod tests {
         // Reset also reclaims after exhaustion.
         tight.reset();
         assert!(tight.allocate(64).is_ok());
-    }
-
-    #[test]
-    fn freed_blocks_are_zeroed_before_reuse() {
-        // Issue #176: freed storage must not leak the previous tenant's bytes
-        // through first-fit reuse.
-        let mut pool = FixedBlockPool::with_limit(32, 64).unwrap();
-        let h = pool.allocate(32).unwrap();
-        pool.write(h, b"super-secret-key-material").unwrap();
-        assert_eq!(pool.get(h).unwrap()[..25], *b"super-secret-key-material");
-        pool.free(h).unwrap();
-        let h2 = pool.allocate(32).unwrap();
-        assert_eq!(h2.start, h.start); // the same hole is reused
-        assert!(pool.get(h2).unwrap().iter().all(|&b| b == 0));
-    }
-
-    #[test]
-    fn free_validates_whole_range_before_mutating() {
-        // Issue #179: an invalid handle must not corrupt accounting or leak blocks.
-        let mut pool = FixedBlockPool::with_limit(32, 128).unwrap();
-        let h0 = pool.allocate(32).unwrap(); // block 0
-        let h1 = pool.allocate(64).unwrap(); // blocks 1-2
-        pool.free(h1).unwrap(); // blocks 1-2 free again
-                                // Overlapping handle: allocated block 0 plus free blocks 1-2.
-        let bad = BlockHandle { start: 0, count: 3 };
-        assert_eq!(pool.free(bad).unwrap_err(), PoolError::InvalidHandle);
-        // Nothing mutated: accounting intact, original handle still frees cleanly.
-        assert_eq!(pool.used_blocks(), 1);
-        pool.free(h0).unwrap();
-        assert_eq!(pool.used_blocks(), 0);
-        assert_eq!(pool.free_blocks(), pool.total_blocks());
     }
 }

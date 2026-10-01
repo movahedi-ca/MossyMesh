@@ -29,6 +29,10 @@ pub const ENGINE_WASM_BYTES: &[u8] = &[];
 
 /// Engine WASM bytes for the sandbox loader, or `None` when no bundle is
 /// embedded (feature off, or asset missing at compile time).
+///
+/// Consumer (issue #171): [`crate::host::HostRuntime::load_engine`] calls
+/// this first and feeds the bytes to the runtime, falling back to reading
+/// `sandbox/assets/engine.wasm` from disk when this returns `None`.
 pub fn engine_wasm_bytes() -> Option<&'static [u8]> {
     #[cfg(all(feature = "bundled-engine", mossymesh_engine_wasm_bundled))]
     {

@@ -34,7 +34,7 @@ To allow multiple agents to work in parallel without merge conflicts, work is di
 - Incremental Merkle-Patricia datastore.
 - Recursive ZK folding for constant-sized proofs.
 - Deterministic island merge via CRDT/binary deltas.
-- Active ledger ≤ **10 MiB** (`MAX_LEDGER_SIZE`).
+- Active ledger ≤ **10 MB** (`MAX_LEDGER_SIZE`).
 
 ## Workstream D: Chess Engine Logic & WASM
 **Directory Scope**: `/engine`  
@@ -53,7 +53,7 @@ To allow multiple agents to work in parallel without merge conflicts, work is di
 **Focus & Deliverables**:
 - WAMR environment with fixed-block pools.
 - Symmetric static INT8 hooks.
-- Enforce 10 MiB via `MEM_LIMIT` / `wasm_runtime_full_init` path.
+- Enforce 10 MB via `MEM_LIMIT` / `wasm_runtime_full_init` path.
 - Job admit only with VDF-backed Ephemeral Job DID.
 
 ## Workstream F: Interop, Credits & Bridges

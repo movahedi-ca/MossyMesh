@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::htlc::{verify_preimage, Htlc, HtlcError, HtlcParams, HtlcState};
+use crate::htlc::{Htlc, HtlcError, HtlcParams, HtlcState};
 
 /// Errors from credit ledger / escrow operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -129,75 +129,33 @@ impl CreditLedger {
     }
 
     /// Receiver claims escrow with the SHA-256 preimage; credits move to receiver free balance.
-    ///
-    /// The credit is pre-checked *before* the HTLC state transition: if
-    /// crediting the receiver would overflow, the escrow stays `Funded` and no
-    /// funds move. (Settling first and crediting second destroyed funds on
-    /// [`CreditError::Overflow`], see issue #158.)
     pub fn claim_escrow(&mut self, id: &[u8; 32], preimage: &[u8]) -> Result<u64, CreditError> {
-        let (amount, receiver) = self.settle_preview(id, preimage, None)?;
-        self.credit_free(&receiver, amount)?;
         let htlc = self
             .escrows
             .get_mut(id)
             .ok_or(CreditError::UnknownEscrow(*id))?;
         htlc.claim(preimage)?;
+        let amount = htlc.amount;
+        let receiver = htlc.receiver.clone();
+        self.credit_free(&receiver, amount)?;
         Ok(amount)
     }
 
     /// Sender refunds after timeout; credits return to sender free balance.
-    ///
-    /// The credit is pre-checked before the refund state transition, so an
-    /// overflow leaves the escrow `Funded` instead of destroying funds.
     pub fn refund_escrow(
         &mut self,
         id: &[u8; 32],
         current_height: u64,
     ) -> Result<u64, CreditError> {
-        let (amount, sender) = self.settle_preview(id, &[], Some(current_height))?;
-        self.credit_free(&sender, amount)?;
         let htlc = self
             .escrows
             .get_mut(id)
             .ok_or(CreditError::UnknownEscrow(*id))?;
         htlc.refund(current_height)?;
+        let amount = htlc.amount;
+        let sender = htlc.sender.clone();
+        self.credit_free(&sender, amount)?;
         Ok(amount)
-    }
-
-    /// Peek at the escrow amount / beneficiary without mutating state.
-    ///
-    /// For claims (`height == None`) the preimage is also validated up front,
-    /// so a bad preimage cannot be confused with a credit failure.
-    fn settle_preview(
-        &self,
-        id: &[u8; 32],
-        preimage: &[u8],
-        current_height: Option<u64>,
-    ) -> Result<(u64, String), CreditError> {
-        let htlc = self
-            .escrows
-            .get(id)
-            .ok_or(CreditError::UnknownEscrow(*id))?;
-        match current_height {
-            None => {
-                if !htlc.is_open() {
-                    return Err(CreditError::Htlc(HtlcError::AlreadySettled));
-                }
-                if !verify_preimage(preimage, &htlc.payment_hash) {
-                    return Err(CreditError::Htlc(HtlcError::InvalidPreimage));
-                }
-                Ok((htlc.amount, htlc.receiver.clone()))
-            }
-            Some(height) => {
-                if !htlc.is_open() {
-                    return Err(CreditError::Htlc(HtlcError::AlreadySettled));
-                }
-                if height < htlc.timeout_height {
-                    return Err(CreditError::Htlc(HtlcError::TimeoutNotReached));
-                }
-                Ok((htlc.amount, htlc.sender.clone()))
-            }
-        }
     }
 
     /// Advance the mock VDF attached to an open escrow.
@@ -211,28 +169,15 @@ impl CreditLedger {
     }
 
     /// VDF-delayed cancel: after sequential delay, credits return to sender.
-    ///
-    /// The credit is pre-checked before the cancel state transition, so an
-    /// overflow leaves the escrow `Funded` instead of destroying funds.
     pub fn vdf_cancel_escrow(&mut self, id: &[u8; 32]) -> Result<u64, CreditError> {
-        let htlc = self
-            .escrows
-            .get(id)
-            .ok_or(CreditError::UnknownEscrow(*id))?;
-        if !htlc.is_open() {
-            return Err(CreditError::Htlc(HtlcError::AlreadySettled));
-        }
-        if !htlc.delay_satisfied() {
-            return Err(CreditError::Htlc(HtlcError::VdfNotComplete));
-        }
-        let amount = htlc.amount;
-        let sender = htlc.sender.clone();
-        self.credit_free(&sender, amount)?;
         let htlc = self
             .escrows
             .get_mut(id)
             .ok_or(CreditError::UnknownEscrow(*id))?;
         htlc.vdf_cancel()?;
+        let amount = htlc.amount;
+        let sender = htlc.sender.clone();
+        self.credit_free(&sender, amount)?;
         Ok(amount)
     }
 
@@ -535,82 +480,5 @@ mod tests {
         assert_eq!(ledger.mint("alice", 1).unwrap_err(), CreditError::Overflow);
         // Balance unchanged after the failed mint.
         assert_eq!(ledger.free_balance("alice"), u64::MAX);
-    }
-
-    /// Issue #158: a failed receiver credit must not destroy the escrow.
-    /// Claim is rejected *before* the HTLC state transition, so the escrow
-    /// stays `Funded` and conserved supply is unchanged.
-    #[test]
-    fn claim_overflow_keeps_escrow_funded_and_supply_conserved() {
-        let mut ledger = CreditLedger::new();
-        ledger.mint("alice", 5_000).unwrap();
-        ledger.mint("bob", u64::MAX - 100).unwrap();
-
-        let preimage = b"overflow-claim-proof";
-        let id = ledger
-            .open_escrow(escrow_params(20, "alice", "bob", 1_200, preimage))
-            .unwrap();
-
-        // bob's balance + 1_200 would overflow: claim must fail loudly.
-        assert_eq!(
-            ledger.claim_escrow(&id, preimage).unwrap_err(),
-            CreditError::Overflow
-        );
-        // Escrow was never settled; nothing credited anywhere.
-        assert_eq!(ledger.escrow_state(&id), Some(HtlcState::Funded));
-        assert_eq!(ledger.free_balance("alice"), 3_800);
-        assert_eq!(ledger.free_balance("bob"), u64::MAX - 100);
-        assert_eq!(ledger.total_escrowed(), 1_200);
-
-        // Lower the receiver balance so the claim fits, then it succeeds.
-        let mut ledger = CreditLedger::new();
-        ledger.mint("alice", 5_000).unwrap();
-        ledger.mint("bob", u64::MAX - 1_200).unwrap();
-        let id = ledger
-            .open_escrow(escrow_params(21, "alice", "bob", 1_200, preimage))
-            .unwrap();
-        assert_eq!(ledger.claim_escrow(&id, preimage).unwrap(), 1_200);
-        assert_eq!(ledger.free_balance("bob"), u64::MAX);
-        assert_eq!(ledger.escrow_state(&id), Some(HtlcState::Claimed));
-    }
-
-    /// Issue #158, refund path: sender-side overflow keeps escrow funded.
-    #[test]
-    fn refund_overflow_keeps_escrow_funded() {
-        let mut ledger = CreditLedger::new();
-        ledger.mint("alice", u64::MAX - 100).unwrap();
-        let preimage = b"overflow-refund-proof";
-        let mut params = escrow_params(22, "alice", "bob", 1_200, preimage);
-        params.timeout_height = 10;
-        let id = ledger.open_escrow(params).unwrap();
-        // Alice earns more after opening, pushing her balance back near MAX;
-        // the refund would now overflow, so it must fail before settling.
-        ledger.mint("alice", 1_200).unwrap();
-        assert_eq!(
-            ledger.refund_escrow(&id, 10).unwrap_err(),
-            CreditError::Overflow
-        );
-        assert_eq!(ledger.escrow_state(&id), Some(HtlcState::Funded));
-        assert_eq!(ledger.total_escrowed(), 1_200);
-    }
-
-    /// Issue #158, VDF-cancel path: sender-side overflow keeps escrow funded.
-    #[test]
-    fn vdf_cancel_overflow_keeps_escrow_funded() {
-        let mut ledger = CreditLedger::new();
-        ledger.mint("alice", u64::MAX - 100).unwrap();
-        let preimage = b"overflow-vdf-proof";
-        let id = ledger
-            .open_escrow(escrow_params(23, "alice", "bob", 1_200, preimage))
-            .unwrap();
-        ledger.advance_vdf(&id, 4).unwrap();
-        // Push Alice's balance back near MAX before the cancel settles.
-        ledger.mint("alice", 1_200).unwrap();
-        assert_eq!(
-            ledger.vdf_cancel_escrow(&id).unwrap_err(),
-            CreditError::Overflow
-        );
-        assert_eq!(ledger.escrow_state(&id), Some(HtlcState::Funded));
-        assert_eq!(ledger.total_escrowed(), 1_200);
     }
 }

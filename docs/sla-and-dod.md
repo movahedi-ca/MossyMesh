@@ -66,7 +66,7 @@ Crypto or memory allocation changes require written proof (doc or test) that SLA
 
 | ID | Pass condition |
 | --- | --- |
-| P2-DoD-1 | Guest heap ≤ 10 MiB; over-alloc → `Err`, not UB. |
+| P2-DoD-1 | Guest heap ≤ 10 MB; over-alloc → `Err`, not UB. |
 | P2-DoD-2 | Job DID requires successful MinRoot VDF verify. |
 | P2-DoD-3 | OOM and missing-export codes stable across nodes. |
 | P2-DoD-4 | Sandbox + VDF unit tests green; integration execute path returns stub bytes. |
@@ -90,7 +90,7 @@ Crypto or memory allocation changes require written proof (doc or test) that SLA
 | --- | --- |
 | P3-DoD-1 | Peer verifies update via sub-megabyte constant/bounded proof. |
 | P3-DoD-2 | Two partitions converge to identical root after merge. |
-| P3-DoD-3 | Active ledger ≤ 10 MiB under documented workload. |
+| P3-DoD-3 | Active ledger ≤ 10 MB under documented workload. |
 | P3-DoD-4 | insert → prove → verify round-trip in tests. |
 
 ---

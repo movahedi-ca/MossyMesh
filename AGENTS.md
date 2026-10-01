@@ -8,12 +8,12 @@ SLAs and phase DoD: [`docs/sla-and-dod.md`](docs/sla-and-dod.md).
 
 | SLA | Threshold |
 | --- | --- |
-| Active ledger RAM (edge) | ≤ **10 MiB** |
+| Active ledger RAM (edge) | ≤ **10 MB** |
 | Unverifiable AI/compute outputs | < **1%** |
 | Job timeout rate (unstable RF/env) | < **5%** |
 | Centralized DNS / IP / cloud DBs | **Forbidden** |
 
-Change control: any crypto-stack or memory-layout change must be proven not to violate the 10 MiB ledger cap or determinism SLA before merging to `main`.
+Change control: any crypto-stack or memory-layout change must be proven not to violate the 10 MB ledger cap or determinism SLA before merging to `main`.
 
 ---
 
@@ -58,7 +58,7 @@ Change control: any crypto-stack or memory-layout change must be proven not to v
 3. **Kademlia Topology** — identity DHT, pathfinding, heavy-line hole punching.
 4. **Captive Portal** — nginx portal (`client_max_body_size 150M`), docker compose, offline landing.
 5. **Shakmaty Engine** — bitboards, wasm32-wasip1, ~836 Mnps, Syzygy mmap strategy.
-6. **Merkle-Patricia Trie** — incremental trie, DAG-CBOR, active ledger ≤ 10 MiB.
+6. **Merkle-Patricia Trie** — incremental trie, DAG-CBOR, active ledger ≤ 10 MB.
 7. **ZK-SNARK Folding** — Nova-style constant-size verification proofs.
 8. **VDF Cryptographer** — MinRoot sequential VDF (~10 min) for Ephemeral Job DIDs.
 9. **CRDT Specialist** — yrs/YATA binary deltas; deterministic island merge.

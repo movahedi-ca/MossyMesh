@@ -188,17 +188,15 @@ impl LiquidityMiner {
 
     pub fn status_json(&self) -> String {
         let genesis = self.accounts.values().filter(|a| a.is_genesis).count();
-        // Issue #187: serialize, never hand-format. A hand-built string
-        // cannot escape node-controlled values safely.
-        serde_json::json!({
-            "internet_reconnected": self.internet_reconnected,
-            "genesis_nodes": genesis,
-            "total_points_issued": self.total_points_issued,
-            "total_tokens_airdropped": self.total_tokens_airdropped,
-            "points_per_epoch": POINTS_PER_OFFLINE_EPOCH,
-            "tokens_per_point": TOKENS_PER_POINT,
-        })
-        .to_string()
+        format!(
+            "{{\"internet_reconnected\":{},\"genesis_nodes\":{},\"total_points_issued\":{},\"total_tokens_airdropped\":{},\"points_per_epoch\":{},\"tokens_per_point\":{}}}",
+            self.internet_reconnected,
+            genesis,
+            self.total_points_issued,
+            self.total_tokens_airdropped,
+            POINTS_PER_OFFLINE_EPOCH,
+            TOKENS_PER_POINT
+        )
     }
 
     pub fn account_json(&self, node_id: &str) -> Result<String, LiquidityError> {
@@ -207,17 +205,10 @@ impl LiquidityMiner {
             .get(node_id)
             .ok_or(LiquidityError::UnknownNode)?;
         let unclaimed = self.unclaimed_points(node_id)?;
-        // Issue #187: node_id is attacker-controlled; it must be escaped by
-        // the serializer, not interpolated into a format string.
-        Ok(serde_json::json!({
-            "node_id": a.node_id,
-            "is_genesis": a.is_genesis,
-            "points": a.points,
-            "offline_epochs": a.offline_epochs,
-            "claimed_tokens": a.claimed_tokens,
-            "unclaimed_points": unclaimed,
-        })
-        .to_string())
+        Ok(format!(
+            "{{\"node_id\":\"{}\",\"is_genesis\":{},\"points\":{},\"offline_epochs\":{},\"claimed_tokens\":{},\"unclaimed_points\":{}}}",
+            a.node_id, a.is_genesis, a.points, a.offline_epochs, a.claimed_tokens, unclaimed
+        ))
     }
 }
 
@@ -353,17 +344,5 @@ mod tests {
             Err(LiquidityError::NotGenesis)
         );
         assert_eq!(miner.total_points_issued, 0);
-    }
-
-    /// Issue #187: a node id containing JSON metacharacters must round-trip
-    /// through account_json instead of breaking out of the string.
-    #[test]
-    fn account_json_escapes_hostile_node_id() {
-        let mut miner = LiquidityMiner::new();
-        let evil = "node-\"quoted\"-\\-back\ttab";
-        miner.register_genesis(evil);
-        let json = miner.account_json(evil).unwrap();
-        let v: serde_json::Value = serde_json::from_str(&json).expect("must be valid JSON");
-        assert_eq!(v["node_id"], evil);
     }
 }

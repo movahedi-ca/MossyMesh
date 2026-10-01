@@ -5,7 +5,7 @@ use std::fmt;
 /// Errors raised by the Merkle-Patricia Trie ledger and related hooks.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConsensusError {
-    /// Active ledger would exceed [`crate::MAX_LEDGER_SIZE`] (10 MiB edge cap).
+    /// Active ledger would exceed [`crate::MAX_LEDGER_SIZE`] (10 MB edge cap).
     OutOfMemory,
     /// A Merkle (or SNARK) proof failed verification.
     InvalidProof,
@@ -25,7 +25,7 @@ impl fmt::Display for ConsensusError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ConsensusError::OutOfMemory => {
-                write!(f, "ledger would exceed MAX_LEDGER_SIZE (10_485_760 bytes)")
+                write!(f, "ledger would exceed MAX_LEDGER_SIZE (10_000_000 bytes)")
             }
             ConsensusError::InvalidProof => write!(f, "invalid merkle or snark proof"),
             ConsensusError::NotFound => write!(f, "key not found in trie"),

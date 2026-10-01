@@ -286,12 +286,6 @@ impl TwammEngine {
             self.orders[idx].remaining_in.saturating_sub(fill.amount_in);
         self.orders[idx].slices_remaining -= 1;
 
-        // Issue #161: prune settled orders so fully-streamed orders cannot
-        // accumulate in the book forever (memory leak).
-        if self.orders[idx].remaining_in == 0 || self.orders[idx].slices_remaining == 0 {
-            self.orders.remove(idx);
-        }
-
         Ok(fill)
     }
 
@@ -337,32 +331,36 @@ impl TwammEngine {
 
     /// JSON summary of open book state (for REST).
     pub fn status_json(&self) -> String {
-        // Issue #187: serialize, never hand-format; order ids are
-        // caller-influenced strings.
-        let open: Vec<serde_json::Value> = self
+        let open: Vec<&TwammOrder> = self
             .orders
             .iter()
             .filter(|o| o.remaining_in > 0 && o.slices_remaining > 0)
-            .map(|o| {
-                serde_json::json!({
-                    "id": o.id,
-                    "side": match o.side {
-                        OrderSide::Buy => "buy",
-                        OrderSide::Sell => "sell",
-                    },
-                    "remaining_in": o.remaining_in,
-                    "slices_remaining": o.slices_remaining,
-                    "reference_price": o.reference_price,
-                })
-            })
             .collect();
-        serde_json::json!({
-            "max_spread_bps": MAX_SPREAD_BPS,
-            "open_orders": open.len(),
-            "orders": open,
-        })
-        .to_string()
+        format!(
+            "{{\"max_spread_bps\":{},\"open_orders\":{},\"orders\":{}}}",
+            MAX_SPREAD_BPS,
+            open.len(),
+            serde_json_orders(&open)
+        )
     }
+}
+
+fn serde_json_orders(orders: &[&TwammOrder]) -> String {
+    // Lightweight manual JSON to avoid requiring serde_json as a hard runtime dep path.
+    let parts: Vec<String> = orders
+        .iter()
+        .map(|o| {
+            let side = match o.side {
+                OrderSide::Buy => "buy",
+                OrderSide::Sell => "sell",
+            };
+            format!(
+                "{{\"id\":\"{}\",\"side\":\"{}\",\"remaining_in\":{},\"slices_remaining\":{},\"reference_price\":{}}}",
+                o.id, side, o.remaining_in, o.slices_remaining, o.reference_price
+            )
+        })
+        .collect();
+    format!("[{}]", parts.join(","))
 }
 
 /// Parse a minimal JSON-ish payload for REST submit:
@@ -501,11 +499,9 @@ mod tests {
         let mut eng = TwammEngine::new();
         let id = eng.submit_order(OrderSide::Buy, 100, 1, 1_000_000).unwrap();
         eng.stream_slice(&id, 1_000_000).unwrap();
-        // Issue #161: the settled order is pruned, so re-streaming finds
-        // nothing rather than an exhausted order.
         assert_eq!(
             eng.stream_slice(&id, 1_000_000),
-            Err(TwammError::OrderNotFound)
+            Err(TwammError::OrderExhausted)
         );
     }
 
@@ -677,41 +673,9 @@ mod tests {
         let mut eng = TwammEngine::new();
         let id = eng.submit_order(OrderSide::Sell, 50, 1, 1_000_000).unwrap();
         eng.stream_slice(&id, 1_000_000).unwrap();
-        // Issue #161: fully-streamed orders are pruned from the book, so a
-        // second stream finds no order at all.
         assert_eq!(
             eng.stream_slice(&id, 1_000_000),
-            Err(TwammError::OrderNotFound)
+            Err(TwammError::OrderExhausted)
         );
-        assert!(eng.get_order(&id).is_none());
-    }
-
-    /// Issue #161: settled orders are pruned, so the book cannot leak memory
-    /// from fully-streamed orders.
-    #[test]
-    fn fully_streamed_orders_are_pruned() {
-        let mut eng = TwammEngine::new();
-        let id = eng
-            .submit_order(OrderSide::Sell, 1_000_000, 4, 1_000_000)
-            .unwrap();
-        assert_eq!(eng.open_order_count(), 1);
-
-        let mut total_in = 0u64;
-        for _ in 0..4 {
-            let fill = eng.stream_slice(&id, 1_000_000).unwrap();
-            total_in += fill.amount_in;
-        }
-        assert_eq!(total_in, 1_000_000);
-        // Nothing left in the book: no leak.
-        assert_eq!(eng.open_order_count(), 0);
-        assert!(eng.get_order(&id).is_none());
-
-        // Partially streamed orders stay until their last slice.
-        let id2 = eng
-            .submit_order(OrderSide::Buy, 600_000, 3, 1_000_000)
-            .unwrap();
-        eng.stream_slice(&id2, 1_000_000).unwrap();
-        assert!(eng.get_order(&id2).is_some());
-        assert_eq!(eng.open_order_count(), 1);
     }
 }

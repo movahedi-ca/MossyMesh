@@ -1,37 +1,33 @@
 import { useEffect, useState } from "react";
-import { useDaemonHealth } from "../lib/daemonHealth";
-import { getStrings, initialLang, type AppLang } from "../i18n";
+import { useOnlineStatus } from "../hooks/useMeshNetwork";
 
 /**
- * Toast shown when the local mesh daemon becomes unreachable (#19, #204).
- *
- * This watches the daemon itself (periodic GET /api/v1/health), not the
- * browser's network state: navigator.onLine can be true while the daemon
- * is down, and false while the island mesh is fine.
+ * Toast shown when the local mesh daemon becomes unreachable (#19).
  *
  * The chessboard fetch path already degrades silently into island mode;
  * this makes the disconnect visible so failures are not silent.
  */
 export const DaemonToast = () => {
-  const [lang] = useState<AppLang>(initialLang);
-  const t = getStrings(lang);
-  const health = useDaemonHealth();
+  const online = useOnlineStatus();
   const [dismissed, setDismissed] = useState(false);
 
   useEffect(() => {
-    if (health === "reachable") setDismissed(false);
-  }, [health]);
+    if (online) setDismissed(false);
+  }, [online]);
 
-  if (health !== "unreachable" || dismissed) return null;
+  if (online || dismissed) return null;
 
   return (
     <div className="daemon-toast" role="alert" aria-live="assertive">
       <span className="status-dot daemon-toast-dot" aria-hidden="true" />
-      <span>{t.daemonToast.message}</span>
+      <span>
+        Local daemon unreachable. Island mode active: chess and mesh
+        continue on-device.
+      </span>
       <button
         type="button"
         className="daemon-toast-close"
-        aria-label={t.daemonToast.dismiss}
+        aria-label="Dismiss notification"
         onClick={() => setDismissed(true)}
       >
         ✕
