@@ -27,6 +27,3 @@ num-bigint = "0.4"
 # script (issue #146's build.rs registers it the same way when present).
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(mossymesh_engine_wasm_bundled)"] }
-
-[lints]
-workspace = true
