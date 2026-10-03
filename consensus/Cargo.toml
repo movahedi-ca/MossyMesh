@@ -25,3 +25,6 @@ sha2 = "0.10"
 default = []
 # Enable when integrating real nova-snark circuits (feature-gated to avoid breaking trie builds).
 # real-nova = ["nova-snark"]
+
+[lints]
+workspace = true

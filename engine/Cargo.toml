@@ -34,3 +34,6 @@ shakmaty = "0.27.2"
 # Feature-gated: keeps wasm32-wasip1 builds free of mmap/libc tablebase paths.
 # 0.25.x tracks shakmaty 0.27; newer syzygy releases require shakmaty 0.29+.
 shakmaty-syzygy = { version = "0.25", optional = true }
+
+[lints]
+workspace = true

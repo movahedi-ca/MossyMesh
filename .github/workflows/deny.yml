@@ -1,0 +1,24 @@
+name: cargo-deny
+
+# Dependency audit layer of the scan pipeline (phase 1):
+# advisories (RustSec), license allowlist, duplicate-version bans.
+on:
+  push:
+    branches: [main, 'agent/**']
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly advisory refresh even without code changes.
+    - cron: '0 7 * * 1'
+  workflow_dispatch:
+
+jobs:
+  deny:
+    name: cargo deny check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check

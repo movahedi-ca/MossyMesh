@@ -1,0 +1,5 @@
+# clippy.toml: threshold tuning for the workspace clippy run.
+# These adjust sensitivity of existing lints only; they add no new lints.
+# New lints are staged in the [workspace.lints] table in Cargo.toml.
+cognitive-complexity-threshold = 30
+too-many-arguments-threshold = 8

@@ -15,3 +15,6 @@ mesh-transport = { path = "../mesh-transport", optional = true }
 [features]
 default = []
 transport = ["dep:mesh-transport"]
+
+[lints]
+workspace = true
