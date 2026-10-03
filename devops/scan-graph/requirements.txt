@@ -1,0 +1,7 @@
+# tree-sitter is pinned to 0.25.2: 0.26.0 segfaults during tree walks
+# (heap corruption when Point temporaries from node.start_point are
+# garbage-collected). Do not upgrade past 0.25.x without re-running the
+# full-repo index as a smoke test.
+tree-sitter==0.25.2
+tree-sitter-rust
+tree-sitter-typescript
