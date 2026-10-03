@@ -1,0 +1,28 @@
+rules:
+  - id: rust-unsafe-block-needs-review
+    languages: [rust]
+    severity: WARNING
+    message: >-
+      unsafe block found. Every unsafe block in this repo needs a safety
+      comment and a reviewer who understands the invariant being upheld.
+    patterns:
+      - pattern: unsafe { ... }
+      - pattern-not-inside:
+          pattern-either:
+            - pattern: |
+                #[cfg(test)]
+                mod tests {
+                  ...
+                }
+            - pattern: |
+                #[cfg(test)]
+                mod test {
+                  ...
+                }
+    paths:
+      exclude:
+        - "**/tests/**"
+        - "**/*test*.rs"
+    metadata:
+      category: security
+      confidence: HIGH

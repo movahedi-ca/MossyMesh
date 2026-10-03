@@ -1,0 +1,31 @@
+rules:
+  - id: rust-no-panic-in-lib
+    languages: [rust]
+    severity: WARNING
+    message: >-
+      panic! in library code crashes the whole daemon. Mesh daemons must stay
+      up on bad input, so prefer returning Result and letting the caller decide.
+    patterns:
+      - pattern: panic!(...)
+      - pattern-not-inside:
+          pattern-either:
+            - pattern: |
+                #[cfg(test)]
+                mod tests {
+                  ...
+                }
+            - pattern: |
+                #[cfg(test)]
+                mod test {
+                  ...
+                }
+    paths:
+      exclude:
+        - "**/tests/**"
+        - "**/*test*.rs"
+        - "**/main.rs"
+        - "**/examples/**"
+        - "**/benches/**"
+    metadata:
+      category: correctness
+      confidence: HIGH

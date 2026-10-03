@@ -1,0 +1,30 @@
+rules:
+  - id: rust-no-todo-unimplemented
+    languages: [rust]
+    severity: WARNING
+    message: >-
+      todo! or unimplemented! left in non-test code. These panic at runtime,
+      so track the work in an issue instead of shipping the panic.
+    patterns:
+      - pattern-either:
+          - pattern: todo!(...)
+          - pattern: unimplemented!(...)
+      - pattern-not-inside:
+          pattern-either:
+            - pattern: |
+                #[cfg(test)]
+                mod tests {
+                  ...
+                }
+            - pattern: |
+                #[cfg(test)]
+                mod test {
+                  ...
+                }
+    paths:
+      exclude:
+        - "**/tests/**"
+        - "**/*test*.rs"
+    metadata:
+      category: correctness
+      confidence: HIGH

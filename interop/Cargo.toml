@@ -2,6 +2,8 @@
 name = "interop"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
+publish = false
 description = "MossyMesh interop: TWAMM, OpenAPI gateway, liquidity mining"
 
 [dependencies]
@@ -12,3 +14,6 @@ axum = "0.7"
 tokio = { version = "1", features = ["full"] }
 utoipa = "5"
 utoipa-swagger-ui = { version = "8", features = ["axum"] }
+
+[lints]
+workspace = true

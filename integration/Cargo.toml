@@ -2,6 +2,7 @@
 name = "integration"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
 description = "Cross-crate smoke tests for MossyMesh (Architect / DevOps harness)"
 publish = false
 
@@ -15,3 +16,6 @@ mesh-transport = { path = "../mesh-transport", optional = true }
 [features]
 default = []
 transport = ["dep:mesh-transport"]
+
+[lints]
+workspace = true

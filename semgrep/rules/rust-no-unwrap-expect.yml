@@ -1,0 +1,33 @@
+rules:
+  - id: rust-no-unwrap-expect-outside-tests
+    languages: [rust]
+    severity: WARNING
+    message: >-
+      unwrap() or expect() outside tests panics on unexpected input. In mesh
+      networking code that input comes from the network, so handle the error
+      explicitly instead.
+    patterns:
+      - pattern-either:
+          - pattern: $X.unwrap()
+          - pattern: $X.expect(...)
+      - pattern-not-inside:
+          pattern-either:
+            - pattern: |
+                #[cfg(test)]
+                mod tests {
+                  ...
+                }
+            - pattern: |
+                #[cfg(test)]
+                mod test {
+                  ...
+                }
+    paths:
+      exclude:
+        - "**/tests/**"
+        - "**/*test*.rs"
+        - "**/examples/**"
+        - "**/benches/**"
+    metadata:
+      category: correctness
+      confidence: HIGH

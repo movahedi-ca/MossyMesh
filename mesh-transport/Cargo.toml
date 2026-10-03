@@ -2,6 +2,8 @@
 name = "mesh-transport"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
+publish = false
 
 [dependencies]
 libp2p = { version = "0.53.2", features = ["tokio", "tcp", "dns", "noise", "yamux", "kad", "macros", "ping"] }
@@ -31,3 +33,6 @@ path = "src/lib.rs"
 name = "mesh-daemon"
 path = "src/main.rs"
 
+
+[lints]
+workspace = true

@@ -1,0 +1,77 @@
+name: nightly-deep-scan
+
+# Deep-scan layer of the scan pipeline (phase 5). Runs nightly:
+# rebuilds the tree-sitter scan graph, runs the slop queries, uploads
+# the report as an artifact, and runs CodeQL over the Rust workspace.
+#
+# Note: CodeQL's Rust support is newer than its support for other
+# languages. This workflow uses the standard init/autobuild/analyze
+# flow; if the init step ever rejects the language, that is a CodeQL
+# limitation to revisit, not a repo problem.
+on:
+  schedule:
+    # 02:00 America/Toronto daily.
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  scan-graph:
+    name: Scan graph + slop report
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: devops/scan-graph/requirements.txt
+
+      - name: Install scan-graph dependencies
+        run: pip install -r devops/scan-graph/requirements.txt
+
+      - name: Build scan graph
+        run: python devops/scan-graph/index.py . --out devops/scan-graph/output/graph.json
+
+      - name: Run slop queries
+        run: >-
+          python devops/scan-graph/slop.py devops/scan-graph/output/graph.json
+          --out devops/scan-graph/output/slop-report.md
+
+      - name: Upload scan artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: scan-graph-output
+          path: |
+            devops/scan-graph/output/graph.json
+            devops/scan-graph/output/slop-report.md
+          retention-days: 30
+
+  codeql:
+    name: CodeQL Rust analysis
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: rust
+
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v3
+
+      - name: Analyze
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: codeql-rust-nightly

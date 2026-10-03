@@ -10,3 +10,23 @@ members = [
     "integration",
 ]
 resolver = "2"
+
+# Workspace lint table (scan pipeline, phase 1).
+#
+# The aggressive lints below are staged at "allow". CI runs clippy with
+# -D warnings, so promoting any of them to "warn" would fail CI on
+# existing code until the backlog is fixed. Promotion path is documented
+# in docs/scan-pipeline.md: run `cargo clippy` locally, fix the
+# findings, then flip the level here.
+[workspace.lints.rust]
+missing_debug_implementations = "allow"
+
+[workspace.lints.clippy]
+uninlined_format_args = "allow"
+redundant_clone = "allow"
+needless_pass_by_value = "allow"
+unwrap_used = "allow"
+expect_used = "allow"
+panic = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
