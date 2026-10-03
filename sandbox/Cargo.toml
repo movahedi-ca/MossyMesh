@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "WAMR/WASI execution sandbox with 10 MB RAM cap, fixed-block pools, and INT8 quantization"
 license = "MIT"
+publish = false
 
 [features]
 default = []

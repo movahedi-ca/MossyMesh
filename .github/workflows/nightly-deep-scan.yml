@@ -21,6 +21,9 @@ jobs:
   scan-graph:
     name: Scan graph + slop report
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: write
     steps:
       - uses: actions/checkout@v4
 

@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "MossyMesh chess application logic (shakmaty) — deterministic, WASM-ready"
 license = "MIT OR Apache-2.0"
+publish = false
 # Target notes (wasm32-wasip1 readiness) — full how-to: devops/engine-wasm.md
 #   rustup target add wasm32-wasip1
 #   cargo build -p engine --target wasm32-wasip1

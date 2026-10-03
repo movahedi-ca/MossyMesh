@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "MossyMesh consensus ledger: Merkle-Patricia Trie, Merkle proofs, DAG-CBOR, CRDT hooks"
 license = "MIT"
+publish = false
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
