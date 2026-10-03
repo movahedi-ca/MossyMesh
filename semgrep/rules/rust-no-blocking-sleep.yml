@@ -1,0 +1,30 @@
+rules:
+  - id: rust-no-blocking-sleep
+    languages: [rust]
+    severity: WARNING
+    message: >-
+      std::thread::sleep blocks the OS thread. In async mesh code this stalls
+      the executor and can wedge networking. Use tokio::time::sleep instead.
+    patterns:
+      - pattern: std::thread::sleep(...)
+      - pattern-not-inside:
+          pattern-either:
+            - pattern: |
+                #[cfg(test)]
+                mod tests {
+                  ...
+                }
+            - pattern: |
+                #[cfg(test)]
+                mod test {
+                  ...
+                }
+    paths:
+      exclude:
+        - "**/tests/**"
+        - "**/*test*.rs"
+        - "**/examples/**"
+        - "**/benches/**"
+    metadata:
+      category: performance
+      confidence: HIGH

@@ -1,0 +1,47 @@
+name: semgrep
+
+# Pattern-scan layer of the scan pipeline (phase 2).
+# Pull requests: differential scan, only NEW findings fail the build.
+# Pushes to main/agent branches: full scan, informational.
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main, 'agent/**']
+  workflow_dispatch:
+
+jobs:
+  semgrep:
+    name: Semgrep differential scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Semgrep
+        run: pip install semgrep
+
+      - name: Differential scan against PR base
+        if: github.event_name == 'pull_request'
+        # --baseline-commit reports only findings introduced after the base
+        # commit, and exits non-zero when any exist, so new findings fail
+        # the PR while the existing backlog stays grandfathered.
+        run: >-
+          semgrep scan --config semgrep/rules
+          --baseline-commit ${{ github.event.pull_request.base.sha }}
+          --error
+          --sarif --output semgrep.sarif
+
+      - name: Full scan on push (informational)
+        if: github.event_name != 'pull_request'
+        run: >-
+          semgrep scan --config semgrep/rules
+          --sarif --output semgrep.sarif || true
+
+      - name: Upload SARIF for PR annotations
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: semgrep.sarif
+          category: semgrep-custom-rules
