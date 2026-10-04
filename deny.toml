@@ -19,9 +19,6 @@ ignore = [
     # hickory-proto 0.24.4 DoS via name compression; arrives transitively
     # via libp2p-dns, so the fix is a libp2p upgrade.
     { id = "RUSTSEC-2026-0119", reason = "Tracked in #266; needs a libp2p upgrade, not a patch bump." },
-    # serde_cbor 0.11 is unmaintained; consensus uses it directly for CBOR.
-    # Swapping it touches the wire format.
-    { id = "RUSTSEC-2021-0127", reason = "Tracked in #267; needs a careful serialization migration." },
 ]
 
 [licenses]

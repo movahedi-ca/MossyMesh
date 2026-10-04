@@ -1,6 +1,7 @@
 //! Compact CBOR encoding for IPLD-style cryptographic pointers and trie nodes.
 //!
-//! Uses `serde_cbor` as a lightweight DAG-CBOR-ish encoding.
+//! Uses `ciborium` as a lightweight DAG-CBOR-ish encoding (the maintained
+//! CBOR codec; `serde_cbor` is unmaintained, see RUSTSEC-2021-0127).
 //! Full IPLD CID resolution is deferred; hashes are raw 32-byte cryptographic pointers.
 
 use serde::{Deserialize, Serialize};
@@ -39,12 +40,15 @@ pub struct BranchCodec {
 
 /// Encode an arbitrary serde value as compact CBOR bytes.
 pub fn encode_cbor<T: Serialize>(value: &T) -> Result<Vec<u8>, ConsensusError> {
-    serde_cbor::to_vec(value).map_err(|e| ConsensusError::CodecError(e.to_string()))
+    let mut buf = Vec::new();
+    ciborium::into_writer(value, &mut buf)
+        .map_err(|e| ConsensusError::CodecError(e.to_string()))?;
+    Ok(buf)
 }
 
 /// Decode CBOR bytes into a typed value.
 pub fn decode_cbor<T: for<'de> Deserialize<'de>>(bytes: &[u8]) -> Result<T, ConsensusError> {
-    serde_cbor::from_slice(bytes).map_err(|e| ConsensusError::CodecError(e.to_string()))
+    ciborium::from_reader(bytes).map_err(|e| ConsensusError::CodecError(e.to_string()))
 }
 
 /// Deterministic Blake3 hash of domain-tagged CBOR payload.

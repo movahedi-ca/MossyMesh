@@ -14,7 +14,8 @@ ed25519-dalek = "2.2"
 # Blake3: fast, deterministic 32-byte digests; preferred over SHA-2 on constrained edge hardware.
 blake3 = "1.5"
 # Compact CBOR serialization approximating DAG-CBOR for IPLD-style node encoding.
-serde_cbor = "0.11"
+# ciborium is the maintained CBOR codec (serde_cbor is unmaintained, RUSTSEC-2021-0127).
+ciborium = "0.2"
 # Deterministic mock commitments for Nova-style folding (real nova-snark is optional/heavy).
 sha2 = "0.10"
 
