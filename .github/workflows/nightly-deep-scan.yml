@@ -44,13 +44,28 @@ jobs:
           python devops/scan-graph/slop.py devops/scan-graph/output/graph.json
           --out devops/scan-graph/output/slop-report.md
 
+      - name: Build coverage record
+        # Fails loudly when the evidence a layer needs is missing (exit 2)
+        # or the ledger contains blocked units (exit 1): the pipeline
+        # refuses to certify coverage it cannot see.
+        run: >-
+          python devops/scan-graph/coverage.py
+          --graph devops/scan-graph/output/graph.json
+          --out-ledger devops/scan-graph/output/coverage-ledger.json
+          --out-report devops/scan-graph/output/coverage-report.md
+
       - name: Upload scan artifacts
+        # Always upload, even when the coverage record failed: the partial
+        # ledger is the evidence needed to diagnose the gap.
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: scan-graph-output
           path: |
             devops/scan-graph/output/graph.json
             devops/scan-graph/output/slop-report.md
+            devops/scan-graph/output/coverage-ledger.json
+            devops/scan-graph/output/coverage-report.md
           retention-days: 30
 
   codeql:

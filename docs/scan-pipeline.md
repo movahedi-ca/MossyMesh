@@ -80,6 +80,40 @@ Nightly CodeQL analysis over the Rust workspace via the standard
 init/autobuild/analyze actions. This is the layer for taint tracking and
 cross-crate data-flow questions the pattern rules cannot express.
 
+## Coverage record
+
+A clean scan means nothing if the scanner never looked. Every nightly run
+builds a coverage ledger alongside the slop report:
+
+- `devops/scan-graph/output/coverage-ledger.json` — machine-readable units
+- `devops/scan-graph/output/coverage-report.md` — the human-readable
+  coverage statement, ending with an explicit **what was NOT looked at**
+  section
+
+Built by `devops/scan-graph/coverage.py`, uploaded with the nightly
+artifacts (30-day retention).
+
+Unit states: `covered`, `skipped` (with reason), `out_of_scope` (declared
+by design), `blocked` (evidence missing). A unit is `covered` only with
+evidence from that run (layers 3-4) or because the layer is configured to
+cover it on every run (layers 1-2, marked declared scope, not observed
+coverage). Units are `layer/surface` (e.g. `l3/rust`, `l2/rust-test`).
+
+The rules the ledger enforces:
+
+1. Nothing is recorded `covered` without evidence. A differential PR run
+   is never presented as full-repo coverage.
+2. Parse failures are named, not just counted: `index.py` records
+   `parse_error_files` in the graph metadata, and the ledger lists every
+   file layer 3 skipped because tree-sitter rejected it.
+3. The script fails loud instead of certifying blind: missing graph
+   evidence exits 2, blocked units exit 1, and no ledger is written that
+   implies clean coverage. The upload step runs `if: always()` so the
+   partial ledger survives as diagnostic evidence.
+4. `out_of_scope` is a design decision, not an oversight. If a class here
+   starts carrying security-sensitive logic, that is a reason to extend a
+   layer, not to assume the gap closed itself.
+
 ## Triage
 
 1. New findings fail the PR. Fix them in the PR or suppress with a

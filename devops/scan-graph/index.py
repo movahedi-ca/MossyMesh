@@ -72,6 +72,10 @@ class GraphBuilder:
         self.edges = []
         self.files_parsed = 0
         self.parse_errors = 0
+        # Repo-relative paths of files the parser rejected. Named (not just
+        # counted) so the coverage record can list exactly what layer 3
+        # skipped instead of implying it indexed everything.
+        self.parse_error_files = []
         self._file_ids = {}
         # function name -> list of entity ids (for call resolution)
         self._name_index = {}
@@ -125,6 +129,7 @@ class GraphBuilder:
                 raise ValueError("tree-sitter reported error nodes")
         except Exception:
             self.parse_errors += 1
+            self.parse_error_files.append(rel)
             return
         self.files_parsed += 1
         file_id = self.add_entity(
@@ -147,6 +152,7 @@ class GraphBuilder:
                 raise ValueError("tree-sitter reported error nodes")
         except Exception:
             self.parse_errors += 1
+            self.parse_error_files.append(rel)
             return
         self.files_parsed += 1
         file_id = self.add_entity(
@@ -434,6 +440,7 @@ def main(argv=None):
             "repo_rev": git_rev(root),
             "files_parsed": builder.files_parsed,
             "parse_errors": builder.parse_errors,
+            "parse_error_files": sorted(builder.parse_error_files),
         },
         "entities": builder.entities,
         "edges": builder.edges,
