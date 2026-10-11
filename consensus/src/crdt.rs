@@ -92,12 +92,16 @@ impl Delta {
     }
 
     /// Encode delta to a compact binary blob.
+    ///
+    /// Uses postcard (the maintained bincode-1 successor). The encoding is
+    /// NOT byte-compatible with the old bincode blobs: peers must run the
+    /// same codec, which holds because encode/decode are always paired here.
     pub fn encode(&self) -> Result<Vec<u8>, CrdtError> {
-        bincode::serialize(self).map_err(|e| CrdtError::Encode(e.to_string()))
+        postcard::to_stdvec(self).map_err(|e| CrdtError::Encode(e.to_string()))
     }
 
     pub fn decode(bytes: &[u8]) -> Result<Self, CrdtError> {
-        bincode::deserialize(bytes).map_err(|e| CrdtError::Decode(e.to_string()))
+        postcard::from_bytes(bytes).map_err(|e| CrdtError::Decode(e.to_string()))
     }
 }
 
